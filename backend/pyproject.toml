@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "postmortem"
+version = "0.0.1"
+description = "Postmortem agent backend"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.6",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["postmortem*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
