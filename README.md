@@ -69,6 +69,19 @@ npm run typecheck
 npm run build    # also runs lint and type checks during build
 ```
 
+### End-to-end UI tests
+
+A Playwright suite drives the actual UI in headless Chromium against a real
+backend.
+
+```sh
+./scripts/e2e.sh        # boots backend + frontend, runs all e2e specs, tears down
+```
+
+The script expects Playwright Chromium at `/opt/pw-browsers`. Override with
+`PLAYWRIGHT_BROWSERS_PATH=...` if you've installed it elsewhere
+(`npx playwright install chromium`).
+
 ## Notes on this slice
 
 - SQLAlchemy 2.x with SQLite for development; the schema uses Postgres-friendly
