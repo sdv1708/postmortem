@@ -32,6 +32,7 @@ rm -f "$DB_FILE"
   PYTHONPATH=. \
   POSTMORTEM_DEV_BYPASS=1 \
   POSTMORTEM_DATABASE_URL="sqlite:///./_e2e.db" \
+  POSTMORTEM_CORS_ORIGINS="http://localhost:$FRONTEND_PORT,http://127.0.0.1:$FRONTEND_PORT" \
   python3 -m uvicorn postmortem.app:app \
     --host 127.0.0.1 --port "$BACKEND_PORT" --log-level warning \
     >"$LOG_DIR/backend.log" 2>&1

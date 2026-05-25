@@ -2,34 +2,64 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { api, type Incident } from "@/lib/api";
 
 export default function IncidentOverviewPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["incident", id],
-    queryFn: () => api.getIncident(id),
-    enabled: Boolean(id),
-  });
+  const [incident, setIncident] = useState<Incident | null>(null);
+  const [error, setError] = useState<Error | null>(null);
 
-  if (isLoading) return <p className="text-sm text-neutral-500">Loading…</p>;
-  if (error) return <p className="text-sm text-red-600">Failed to load incident.</p>;
-  if (!data) return null;
+  useEffect(() => {
+    if (!id) {
+      return;
+    }
+
+    let active = true;
+
+    api
+      .getIncident(id)
+      .then((item) => {
+        if (active) {
+          setIncident(item);
+        }
+      })
+      .catch((err: Error) => {
+        if (active) {
+          setError(err);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [id]);
+
+  if (!incident && !error) {
+    return <p className="text-sm text-neutral-500">Loading...</p>;
+  }
+
+  if (error) {
+    return <p className="text-sm text-red-600">Failed to load incident.</p>;
+  }
+
+  if (!incident) {
+    return null;
+  }
 
   return (
     <div className="space-y-8">
       <div className="space-y-2">
         <Link href="/incidents" className="text-sm text-neutral-500">
-          ← All incidents
+          Back to all incidents
         </Link>
-        <h1 className="text-2xl font-semibold">{data.title}</h1>
+        <h1 className="text-2xl font-semibold">{incident.title}</h1>
         <p className="text-sm text-neutral-600">
-          {data.severity ?? "unspecified"} · {data.status} · created{" "}
-          {new Date(data.created_at).toLocaleString()}
+          {incident.severity ?? "unspecified"} / {incident.status} / created{" "}
+          {new Date(incident.created_at).toLocaleString()}
         </p>
-        {data.summary && <p className="text-sm leading-relaxed">{data.summary}</p>}
+        {incident.summary && <p className="text-sm leading-relaxed">{incident.summary}</p>}
       </div>
 
       <Section title="Evidence">

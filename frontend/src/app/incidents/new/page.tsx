@@ -2,30 +2,35 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, type Severity } from "@/lib/api";
 
 const SEVERITIES = ["sev0", "sev1", "sev2", "sev3", "sev4"] as const;
 
 export default function NewIncidentPage() {
   const router = useRouter();
-  const queryClient = useQueryClient();
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
-  const [severity, setSeverity] = useState<string>("");
+  const [severity, setSeverity] = useState<Severity | "">("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
 
-  const mutation = useMutation({
-    mutationFn: () =>
-      api.createIncident({
+  async function submit() {
+    setIsSubmitting(true);
+    setError(null);
+
+    try {
+      const incident = await api.createIncident({
         title,
         summary: summary || null,
         severity: severity || null,
-      }),
-    onSuccess: (incident) => {
-      queryClient.invalidateQueries({ queryKey: ["incidents"] });
+      });
       router.push(`/incidents/${incident.id}`);
-    },
-  });
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error("Failed to create incident"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
 
   return (
     <div className="max-w-xl space-y-6">
@@ -34,7 +39,7 @@ export default function NewIncidentPage() {
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
-          mutation.mutate();
+          void submit();
         }}
       >
         <label className="block space-y-1">
@@ -52,8 +57,8 @@ export default function NewIncidentPage() {
           <span className="text-sm font-medium">Severity</span>
           <select
             value={severity}
-            onChange={(e) => setSeverity(e.target.value)}
-            className="w-full rounded-md border px-3 py-2 text-sm bg-white"
+            onChange={(e) => setSeverity(e.target.value as Severity | "")}
+            className="w-full rounded-md border px-3 py-2 text-sm"
           >
             <option value="">unspecified</option>
             {SEVERITIES.map((s) => (
@@ -75,22 +80,20 @@ export default function NewIncidentPage() {
           />
         </label>
 
-        {mutation.error && (
-          <p className="text-sm text-red-600">{(mutation.error as Error).message}</p>
-        )}
+        {error && <p className="text-sm text-red-600">{error.message}</p>}
 
         <div className="flex gap-2">
           <button
             type="submit"
-            disabled={mutation.isPending || !title}
-            className="rounded-md bg-neutral-900 px-4 py-2 text-sm text-white disabled:opacity-50"
+            disabled={isSubmitting || !title.trim()}
+            className="button-primary"
           >
-            {mutation.isPending ? "Creating…" : "Create incident"}
+            {isSubmitting ? "Creating..." : "Create incident"}
           </button>
           <button
             type="button"
             onClick={() => router.back()}
-            className="rounded-md border px-4 py-2 text-sm"
+            className="button-secondary"
           >
             Cancel
           </button>

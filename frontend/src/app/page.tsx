@@ -9,7 +9,7 @@ export default function Home() {
       </p>
       <Link
         href="/incidents"
-        className="inline-block rounded-md bg-neutral-900 px-4 py-2 text-sm text-white"
+        className="button-primary"
       >
         View incidents
       </Link>

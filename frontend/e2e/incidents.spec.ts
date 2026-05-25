@@ -23,7 +23,7 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Analysis runs" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Postmortem" })).toBeVisible();
 
-  await page.getByRole("link", { name: "All incidents" }).click();
+  await page.getByRole("link", { name: "Back to all incidents" }).click();
   await expect(page).toHaveURL(/\/incidents$/);
   await expect(page.getByText(title)).toBeVisible();
 });

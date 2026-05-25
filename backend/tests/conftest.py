@@ -17,6 +17,7 @@ def settings(tmp_path) -> Settings:
         database_url=f"sqlite:///{tmp_path}/test.db",
         api_token="test-token",
         dev_bypass=False,
+        cors_origins=("http://localhost:3000",),
     )
 
 
@@ -56,6 +57,7 @@ def dev_bypass_app(tmp_path):
         database_url=f"sqlite:///{tmp_path}/bypass.db",
         api_token=None,
         dev_bypass=True,
+        cors_origins=("http://localhost:3000",),
     )
     return create_app(settings)
 

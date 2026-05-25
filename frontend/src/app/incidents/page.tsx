@@ -1,45 +1,64 @@
 "use client";
 
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { api, type Incident } from "@/lib/api";
 
 export default function IncidentsPage() {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["incidents"],
-    queryFn: api.listIncidents,
-  });
+  const [incidents, setIncidents] = useState<Incident[] | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    api
+      .listIncidents()
+      .then((items) => {
+        if (active) {
+          setIncidents(items);
+        }
+      })
+      .catch((err: Error) => {
+        if (active) {
+          setError(err);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold">Incidents</h1>
         <Link
           href="/incidents/new"
-          className="rounded-md bg-neutral-900 px-3 py-2 text-sm text-white"
+          className="button-primary"
         >
           New incident
         </Link>
       </div>
 
-      {isLoading && <p className="text-sm text-neutral-500">Loading…</p>}
+      {!incidents && !error && <p className="text-sm text-neutral-500">Loading...</p>}
       {error && (
         <p className="text-sm text-red-600">
           Failed to load incidents. Is the backend running and is your API token set?
         </p>
       )}
-      {data && data.length === 0 && (
+      {incidents && incidents.length === 0 && (
         <p className="text-sm text-neutral-500">No incidents yet. Create one to get started.</p>
       )}
-      {data && data.length > 0 && (
+      {incidents && incidents.length > 0 && (
         <ul className="divide-y rounded-md border bg-white">
-          {data.map((incident) => (
+          {incidents.map((incident) => (
             <li key={incident.id} className="p-4">
               <Link href={`/incidents/${incident.id}`} className="block space-y-1">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-4">
                   <span className="font-medium">{incident.title}</span>
-                  <span className="text-xs uppercase tracking-wide text-neutral-500">
-                    {incident.severity ?? "unspecified"} · {incident.status}
+                  <span className="shrink-0 text-xs uppercase tracking-wide text-neutral-500">
+                    {incident.severity ?? "unspecified"} / {incident.status}
                   </span>
                 </div>
                 {incident.summary && (

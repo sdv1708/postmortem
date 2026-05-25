@@ -39,6 +39,8 @@ export POSTMORTEM_API_TOKEN=dev-token
 # export POSTMORTEM_DEV_BYPASS=1
 
 # SQLite by default; override with POSTMORTEM_DATABASE_URL for Postgres.
+# CORS defaults to http://localhost:3000 and http://127.0.0.1:3000.
+# Override with POSTMORTEM_CORS_ORIGINS for another frontend host/port.
 uvicorn postmortem.app:app --reload
 ```
 
