@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-neutral-50 text-neutral-900 antialiased;
+}
+
+input,
+textarea,
+select {
+  @apply border-neutral-300 bg-white text-neutral-900 placeholder:text-neutral-400 shadow-sm;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  @apply border-neutral-900 outline-none ring-2 ring-neutral-900/10;
+}
+
+.button-primary {
+  @apply inline-flex h-10 items-center justify-center rounded-md border border-neutral-900 bg-neutral-900 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-neutral-900/20 disabled:cursor-not-allowed disabled:border-neutral-300 disabled:bg-neutral-300 disabled:text-neutral-500;
+}
+
+.button-secondary {
+  @apply inline-flex h-10 items-center justify-center rounded-md border border-neutral-300 bg-white px-4 text-sm font-medium text-neutral-900 shadow-sm transition hover:border-neutral-400 hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-neutral-900/10;
+}
