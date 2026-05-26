@@ -4,28 +4,98 @@
 
 :root {
   color-scheme: light;
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --border: #e5e7eb;
+  --border-strong: #d4d4d8;
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --text-subtle: #94a3b8;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --ring: rgba(79, 70, 229, 0.18);
 }
 
+html,
 body {
-  @apply bg-neutral-50 text-neutral-900 antialiased;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(at 100% 0%, rgba(79, 70, 229, 0.06) 0px, transparent 50%),
+    radial-gradient(at 0% 100%, rgba(14, 165, 233, 0.05) 0px, transparent 50%);
+  background-attachment: fixed;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 input,
 textarea,
 select {
-  @apply border-neutral-300 bg-white text-neutral-900 placeholder:text-neutral-400 shadow-sm;
+  @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition;
 }
 
 input:focus,
 textarea:focus,
 select:focus {
-  @apply border-neutral-900 outline-none ring-2 ring-neutral-900/10;
+  @apply border-indigo-500 outline-none ring-4 ring-indigo-500/15;
+}
+
+input[type="file"] {
+  @apply cursor-pointer py-1.5 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-slate-900 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-slate-700;
+}
+
+textarea {
+  @apply min-h-[6rem] leading-6;
 }
 
 .button-primary {
-  @apply inline-flex h-10 items-center justify-center rounded-md border border-neutral-900 bg-neutral-900 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-700 focus:outline-none focus:ring-2 focus:ring-neutral-900/20 disabled:cursor-not-allowed disabled:border-neutral-300 disabled:bg-neutral-300 disabled:text-neutral-500;
+  @apply inline-flex h-10 items-center justify-center gap-1.5 rounded-lg bg-slate-900 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-slate-700 focus:outline-none focus:ring-4 focus:ring-slate-900/15 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none;
 }
 
 .button-secondary {
-  @apply inline-flex h-10 items-center justify-center rounded-md border border-neutral-300 bg-white px-4 text-sm font-medium text-neutral-900 shadow-sm transition hover:border-neutral-400 hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-neutral-900/10;
+  @apply inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:ring-4 focus:ring-slate-900/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400;
+}
+
+.button-danger {
+  @apply inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-white px-4 text-sm font-medium text-rose-600 shadow-sm transition hover:border-rose-300 hover:bg-rose-50 focus:outline-none focus:ring-4 focus:ring-rose-500/15 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 disabled:border-slate-200;
+}
+
+.card {
+  @apply rounded-xl border border-slate-200 bg-white shadow-sm;
+}
+
+.card-padded {
+  @apply rounded-xl border border-slate-200 bg-white p-5 shadow-sm;
+}
+
+.badge {
+  @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset;
+}
+
+.badge-dot {
+  @apply h-1.5 w-1.5 rounded-full;
+}
+
+.label {
+  @apply text-xs font-medium uppercase tracking-wide text-slate-500;
+}
+
+/* Scrollbar styling */
+.scroll-area::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-area::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.scroll-area::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+  background-clip: padding-box;
+  border: 2px solid transparent;
 }
