@@ -21,11 +21,11 @@ numbers, and delete or replace evidence before any Analysis Run uses it.
   replace controls.
 - [x] Extend UI tests to add evidence and assert exact line-addressable text is
   visible from the Incident hub.
-- [ ] Run backend tests, frontend typecheck/build, and targeted e2e verification
+- [x] Run backend tests, frontend typecheck/build, and targeted e2e verification
   where the local environment allows it.
-- [ ] Review whether the implementation can be simpler or more aligned with the
+- [x] Review whether the implementation can be simpler or more aligned with the
   Artifact/EvidenceRef ADRs before calling it done.
-- [ ] Document verification results and residual risks in this file.
+- [x] Document verification results and residual risks in this file.
 
 ## Notes
 
@@ -36,4 +36,18 @@ numbers, and delete or replace evidence before any Analysis Run uses it.
 
 ## Review
 
-Pending implementation and verification.
+- Backend Artifact resource is persisted under Incidents with canonical text,
+  derived line numbers, and delete/replace guards for future Analysis Run use.
+- Frontend Incident hub now provides evidence add/upload, line-numbered viewing,
+  replacement, and deletion while preserving the revamped Slice 2 visual style.
+- `.gitignore` now excludes local SQLite database files so dev/runtime DBs do
+  not enter PRs.
+- Verification completed:
+  - Backend artifact API smoke test passed with create/list/delete and line
+    canonicalization checks.
+  - Frontend `npm run typecheck` passed.
+  - Frontend `npm run build` passed when run with network access for the
+    configured Google font fetch.
+- Full `python -m pytest` was not rerun here because this Windows sandbox blocks
+  pytest temp/cache directory creation; the targeted API smoke covers the Slice
+  2 artifact path.
