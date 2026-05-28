@@ -213,6 +213,9 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Local SQLite databases
+*.db
+
 # PyPI configuration file
 .pypirc
 
