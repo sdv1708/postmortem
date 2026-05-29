@@ -28,14 +28,18 @@ class StageRecorder:
 
     The recorder owns the session write for stage events so the executor stays
     free of transaction concerns while the AnalysisService keeps the session
-    boundary (ADR 0004). Each event is flushed as it is created or updated, so a
-    poller observes stage transitions incrementally (ADR 0026) rather than all
-    at once when the run finishes.
+    boundary (ADR 0004). Each event is flushed as it is created or updated so
+    callers sharing the transaction can observe stage order. HTTP pollers see
+    progress when execution runs outside the POST request and commits through
+    its own session.
     """
 
-    def __init__(self, session: Session, run: AnalysisRun) -> None:
+    def __init__(
+        self, session: Session, run: AnalysisRun, *, commit_on_change: bool = False
+    ) -> None:
         self._session = session
         self._run = run
+        self._commit_on_change = commit_on_change
         existing = session.scalar(
             select(func.count())
             .select_from(RunStageEvent)
@@ -55,7 +59,7 @@ class StageRecorder:
             warning_codes=[],
         )
         self._session.add(event)
-        self._session.flush()
+        self._persist()
         return event
 
     def succeed(
@@ -69,14 +73,19 @@ class StageRecorder:
         event.duration_ms = _elapsed_ms(event.started_at, event.completed_at)
         event.warning_codes = warning_codes or []
         event.usage = usage
-        self._session.flush()
+        self._persist()
 
     def fail(self, event: RunStageEvent, error: str) -> None:
         event.status = "failed"
         event.completed_at = _utcnow()
         event.duration_ms = _elapsed_ms(event.started_at, event.completed_at)
         event.error = error
+        self._persist()
+
+    def _persist(self) -> None:
         self._session.flush()
+        if self._commit_on_change:
+            self._session.commit()
 
 
 def _elapsed_ms(start: datetime | None, end: datetime | None) -> int | None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from postmortem.api.analysis_runs import execute_analysis_run_background
+
 
 def create_incident(client: TestClient, auth_headers) -> str:
     resp = client.post("/api/incidents", json={"title": "Run test incident"}, headers=auth_headers)
@@ -186,3 +188,50 @@ def test_run_status_is_terminal_and_pollable_after_start(client: TestClient, aut
     # Polling is idempotent: repeated reads return stable terminal state.
     assert second_poll["status"] == "succeeded"
     assert second_poll["stage_events"] == first_poll["stage_events"]
+
+
+def test_start_run_returns_queued_state_before_background_execution(
+    app, client: TestClient, auth_headers
+):
+    scheduled: list[tuple[object, str]] = []
+
+    def capture_background_task(background_tasks, session_factory, run_id):
+        scheduled.append((session_factory, run_id))
+
+    app.state.run_scheduler = capture_background_task
+
+    incident_id = create_incident(client, auth_headers)
+    artifact_id = add_artifact(client, auth_headers, incident_id)
+
+    start = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    )
+
+    assert start.status_code == 201, start.text
+    queued = start.json()
+    assert queued["status"] == "queued"
+    assert queued["artifact_ids"] == [artifact_id]
+    assert queued["stage_events"] == []
+    assert len(scheduled) == 1
+
+    first_poll = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{queued['id']}", headers=auth_headers
+    ).json()
+    assert first_poll["status"] == "queued"
+    assert first_poll["stage_events"] == []
+
+    session_factory, run_id = scheduled[0]
+    execute_analysis_run_background(session_factory, run_id)
+
+    terminal = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{queued['id']}", headers=auth_headers
+    ).json()
+    assert terminal["status"] == "succeeded"
+    assert [event["stage"] for event in terminal["stage_events"]] == [
+        "normalizing_evidence",
+        "extracting_timeline_candidates",
+        "generating_rca_hypotheses",
+        "verifying_citations",
+        "drafting_postmortem",
+        "flagging_unsupported_claims",
+    ]

@@ -31,40 +31,55 @@ with TanStack Query (ADR 0001) — no SSE, no token streaming (ADR 0005).
 
 ## Implementation Plan
 
-- [ ] Add `RunStageEvent` model: run_id, stage, status, sequence, started_at,
+- [x] Add `RunStageEvent` model: run_id, stage, status, sequence, started_at,
   completed_at, duration_ms, usage (tokens/model, nullable), warning_codes,
   attempt. Add relationship from `AnalysisRun`.
-- [ ] Add schema types: `RunStage`/`StageStatus` literals, `RunStageEventRead`,
+- [x] Add schema types: `RunStage`/`StageStatus` literals, `RunStageEventRead`,
   and embed `stage_events` in `AnalysisRunRead`.
-- [ ] Define the six-stage contract in one place (`pipeline.py`) so executor,
+- [x] Define the six-stage contract in one place (`pipeline.py`) so executor,
   schema, and tests share the ordered stage names.
-- [ ] Implement `StagedRunExecutor` (default) that runs the six stages in order,
+- [x] Implement `StagedRunExecutor` (default) that runs the six stages in order,
   persisting each event before the next; one retry per failing stage; on final
   failure mark the stage + run failed and stop, leaving prior events intact.
   Keep `PlaceholderRunExecutor` for tests / trivial swap demos.
-- [ ] Have the executor own stage-event persistence via a small callback/sink
+- [x] Have the executor own stage-event persistence via a small callback/sink
   injected by `AnalysisService` so the session boundary stays in the service
   (ADR 0004). Service still owns run-level status transitions.
-- [ ] Wire `AnalysisService` to use `StagedRunExecutor` by default and to expose
+- [x] Wire `AnalysisService` to use `StagedRunExecutor` by default and to expose
   stage events on reads; keep failure semantics (run failed, lock preserved).
-- [ ] Frontend: add TanStack Query + provider in layout; build a Run Status
+- [x] Frontend: add TanStack Query + provider in layout; build a Run Status
   panel that polls the run while non-terminal and renders all six stages with
   per-stage status, duration, and warning codes.
-- [ ] Backend tests: stage ordering, an event persisted per stage before the
+- [x] Backend tests: stage ordering, an event persisted per stage before the
   next, one-retry-then-success, one-retry-then-fail (run failed + later stages
   never created + earlier events preserved), warning codes surface, API shows
   stage_events and polling-visible transitions.
-- [ ] Frontend: typecheck + build; extend e2e to assert the six stages render
+- [x] Frontend: typecheck + build; extend e2e to assert the six stages render
   and the run reaches succeeded via polling.
-- [ ] Self-review for elegance/standards; run all tests; document results.
+- [x] Self-review for elegance/standards; run all tests; document results.
+
+## Follow-up Fix Plan: externally visible polling state
+
+- [x] Review code-review finding: stage events were flushed inside the POST
+  transaction, so external HTTP pollers could not observe them before the POST
+  completed.
+- [x] Add an API regression test proving POST returns a queued run before the
+  background executor records stage events.
+- [x] Keep service-level inline execution as the default for existing callers,
+  but allow API callers to create and lock a run without executing it inline.
+- [x] Commit queued run + locked Artifact state in the POST route, then execute
+  the run in a background task with a fresh DB session.
+- [x] Update comments/notes so they do not imply `flush()` makes cross-request
+  polling visible.
+- [x] Run backend and frontend regression checks; document results.
 
 ## Notes
 
-- "Async" stays product/API-level (ADR 0003): the executor runs synchronously
-  within start_run, but each stage is persisted as it completes so a poller
-  observes progress. To make polling-visible transitions testable without
-  real latency, the executor accepts an injectable per-stage hook; tests use it
-  to assert intermediate persisted state.
+- Service callers still default to inline execution for simple tests and future
+  CLI-style flows, but the HTTP command endpoint commits the queued run and
+  locked Artifact state before scheduling execution in a background session.
+  This keeps polling product-level (ADR 0003) while making queued/running/stage
+  transitions visible across requests.
 - Usage fields (tokens/model) are nullable now — no LLM is wired until #7, so
   they stay null but the column/contract exists per ADR 0021.
 
@@ -93,6 +108,25 @@ with TanStack Query (ADR 0001) — no SSE, no token streaming (ADR 0005).
 - E2E: `./scripts/e2e.sh` → 2 passed, including rendering all six stages and the
   run reaching succeeded via the polling UI.
 
+### Follow-up fix verification
+
+- Added regression coverage for the HTTP execution boundary: the POST response
+  now returns a queued run with no stage events before the captured background
+  executor runs, a separate session can observe committed running/stage
+  transitions during execution, and a subsequent poll sees succeeded with all
+  six stage events.
+- Backend targeted regression:
+  `python -m pytest backend/tests/test_api_analysis_runs.py backend/tests/test_run_executor.py backend/tests/test_services_analysis.py -q -p no:cacheprovider`
+  -> 32 passed.
+- Backend full suite:
+  `python -m pytest backend/tests -q -p no:cacheprovider` -> 52 passed.
+- Frontend: `npm run typecheck` -> passed.
+- Frontend: `npm run build` -> passed after allowing the expected Google Fonts
+  network fetch.
+- E2E: manual Windows equivalent of `scripts/e2e.sh` -> passed. The shell script
+  itself still has CRLF line endings and fails under Bash in this workspace
+  before starting the app.
+
 ### Self-review (code-review skill, high effort) — fixes applied
 
 - Restored a "Refresh status" control: the query only polls while a run is
@@ -111,11 +145,11 @@ with TanStack Query (ADR 0001) — no SSE, no token streaming (ADR 0005).
 
 ### Known/accepted limitations
 
-- The MVP executor runs synchronously inside `start_run` (ADR 0003: async is
-  product/API-level), so a poller's first read already sees terminal state; the
-  polling machinery is built for the real async future and is exercised by the
-  list-level refetch today. Intermediate per-stage states are asserted at the
-  service layer via an injected stage hook rather than over HTTP.
+- The current stage bodies are no-op placeholders until LLM/pipeline work lands,
+  so runs may still complete too quickly for a human to see every intermediate
+  state. The HTTP execution boundary is now separate from the POST transaction,
+  and the API regression test holds the scheduler to prove queued state is
+  externally visible before execution.
 - Schema is created with `create_all` (no migrations yet); the new table is
   created fine on existing dev DBs, but column additions in later slices will
   need a migration story. Out of scope for this slice.

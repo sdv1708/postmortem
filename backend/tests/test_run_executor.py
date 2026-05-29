@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from postmortem.models import Artifact, RunStageEvent
+from postmortem.db import make_session_factory
+from postmortem.models import AnalysisRun, Artifact, RunStageEvent
 from postmortem.pipeline import RUN_STAGES
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import (
@@ -72,6 +73,47 @@ def test_each_stage_persisted_before_the_next_starts(fresh_session):
     assert snapshots[5][0] == "normalizing_evidence:succeeded"
     assert snapshots[5][-1] == "flagging_unsupported_claims:running"
     assert run.status == "succeeded"
+
+
+def test_commit_progress_makes_stage_transitions_visible_to_other_sessions(fresh_session):
+    incident = _incident_with_artifact(fresh_session)
+    run = AnalysisService(fresh_session).start_run(
+        incident.id, AnalysisRunCreate(), execute_inline=False
+    )
+    fresh_session.commit()
+    observer_factory = make_session_factory(fresh_session.get_bind())
+    snapshots: list[tuple[str, list[str]]] = []
+
+    def runner(stage, attempt, run):
+        observer = observer_factory()
+        try:
+            observed_run = observer.get(AnalysisRun, run.id)
+            events = _events(observer, run.id)
+            snapshots.append(
+                (
+                    observed_run.status,
+                    [f"{event.stage}:{event.status}" for event in events],
+                )
+            )
+        finally:
+            observer.close()
+        return None
+
+    executor = StagedRunExecutor(stage_runner=runner)
+    AnalysisService(fresh_session, executor=executor).execute_run(
+        run.id, commit_progress=True
+    )
+    fresh_session.commit()
+
+    assert snapshots[0] == ("running", ["normalizing_evidence:running"])
+    assert snapshots[1] == (
+        "running",
+        [
+            "normalizing_evidence:succeeded",
+            "extracting_timeline_candidates:running",
+        ],
+    )
+    assert snapshots[-1][1][-1] == "flagging_unsupported_claims:running"
 
 
 def test_stage_retried_once_then_succeeds(fresh_session):
