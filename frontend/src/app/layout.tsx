@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import { Providers } from "./providers";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -17,6 +18,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={inter.className}>
       <body>
+        <Providers>
         <div className="flex min-h-screen flex-col">
           <header className="sticky top-0 z-30 border-b border-slate-200/70 bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60">
             <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3.5">
@@ -60,10 +62,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <footer className="border-t border-slate-200/70 bg-white/40">
             <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4 text-xs text-slate-500">
               <span>Postmortem Agent</span>
-              <span>Slice 3 · Async analysis runs</span>
+              <span>Slice 4 · Six-stage run status</span>
             </div>
           </footer>
         </div>
+        </Providers>
       </body>
     </html>
   );

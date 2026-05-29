@@ -134,3 +134,55 @@ def test_unknown_run_returns_404(client: TestClient, auth_headers):
 def test_analysis_runs_require_auth(client: TestClient):
     resp = client.get("/api/incidents/whatever/analysis-runs")
     assert resp.status_code == 401
+
+
+def test_run_status_exposes_six_ordered_stage_events(client: TestClient, auth_headers):
+    incident_id = create_incident(client, auth_headers)
+    add_artifact(client, auth_headers, incident_id)
+
+    run = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()
+
+    status_resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}", headers=auth_headers
+    )
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    stages = [event["stage"] for event in body["stage_events"]]
+    assert stages == [
+        "normalizing_evidence",
+        "extracting_timeline_candidates",
+        "generating_rca_hypotheses",
+        "verifying_citations",
+        "drafting_postmortem",
+        "flagging_unsupported_claims",
+    ]
+    assert all(event["status"] == "succeeded" for event in body["stage_events"])
+    assert all(event["duration_ms"] is not None for event in body["stage_events"])
+    # Usage stays null until an LLM is wired in (#7); the field exists now.
+    assert all(event["usage"] is None for event in body["stage_events"])
+
+
+def test_run_status_is_terminal_and_pollable_after_start(client: TestClient, auth_headers):
+    # The MVP executor runs synchronously, so the very first poll already shows
+    # the terminal succeeded state with all six stage events persisted. The
+    # contract the UI polls against (status + stage_events) is what we assert.
+    incident_id = create_incident(client, auth_headers)
+    add_artifact(client, auth_headers, incident_id)
+    run = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()
+
+    first_poll = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}", headers=auth_headers
+    ).json()
+    second_poll = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}", headers=auth_headers
+    ).json()
+
+    assert first_poll["status"] == "succeeded"
+    assert len(first_poll["stage_events"]) == 6
+    # Polling is idempotent: repeated reads return stable terminal state.
+    assert second_poll["status"] == "succeeded"
+    assert second_poll["stage_events"] == first_poll["stage_events"]

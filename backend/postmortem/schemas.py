@@ -10,6 +10,15 @@ Severity = Literal["sev0", "sev1", "sev2", "sev3", "sev4"]
 IncidentStatus = Literal["open", "investigating", "mitigated", "resolved", "closed"]
 ArtifactSourceType = Literal["incident_notes", "logs", "stack_trace", "deployment_notes", "other"]
 RunStatus = Literal["queued", "running", "succeeded", "failed"]
+RunStage = Literal[
+    "normalizing_evidence",
+    "extracting_timeline_candidates",
+    "generating_rca_hypotheses",
+    "verifying_citations",
+    "drafting_postmortem",
+    "flagging_unsupported_claims",
+]
+StageStatus = Literal["running", "succeeded", "failed"]
 
 
 class IncidentCreate(BaseModel):
@@ -93,6 +102,24 @@ class ExperimentMetadata(BaseModel):
     verifier_version: str
 
 
+class RunStageEventRead(BaseModel):
+    """A persisted Run Stage Event surfaced for the status page (ADR 0021)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    sequence: int
+    stage: RunStage
+    status: StageStatus
+    attempt: int
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_ms: int | None
+    usage: dict | None
+    warning_codes: list[str]
+    error: str | None
+
+
 class AnalysisRunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -102,6 +129,7 @@ class AnalysisRunRead(BaseModel):
     error: str | None
     experiment_metadata: ExperimentMetadata
     artifact_ids: list[str]
+    stage_events: list[RunStageEventRead]
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

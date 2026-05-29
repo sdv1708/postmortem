@@ -10,7 +10,7 @@ from ..models import AnalysisRun, Artifact, RunArtifact
 from ..schemas import AnalysisRunCreate
 from .artifacts import ArtifactNotFoundError
 from .incidents import IncidentService
-from .run_executor import PlaceholderRunExecutor, RunExecutor
+from .run_executor import RunExecutor, StagedRunExecutor, StageRecorder
 
 
 class AnalysisRunNotFoundError(LookupError):
@@ -32,13 +32,15 @@ class AnalysisService:
     duplicating orchestration in transport code. A run is created as durable,
     pollable async product state (ADR 0003): it is persisted as ``queued``, its
     included Artifacts are locked immutable (ADR 0018), then a RunExecutor
-    advances it to a terminal state. The MVP executor is a synchronous
-    placeholder; the lifecycle and persistence are what matter here.
+    advances it through the six DB-persisted stages (ADR 0026), recording a Run
+    Stage Event per attempt before the next stage so the status page can poll
+    progress. Execution is synchronous within `start_run`; the per-stage
+    persistence is what makes the lifecycle observable.
     """
 
     def __init__(self, session: Session, executor: RunExecutor | None = None) -> None:
         self._session = session
-        self._executor = executor or PlaceholderRunExecutor()
+        self._executor = executor or StagedRunExecutor()
 
     def start_run(self, incident_id: str, payload: AnalysisRunCreate) -> AnalysisRun:
         IncidentService(self._session).get(incident_id)
@@ -104,9 +106,12 @@ class AnalysisService:
         run.status = "running"
         run.started_at = _utcnow()
         self._session.flush()
+        recorder = StageRecorder(self._session, run)
         try:
-            self._executor.execute(run)
-        except Exception as exc:  # ADR 0029: a failed stage marks the run failed
+            self._executor.execute(run, recorder)
+        except Exception as exc:  # ADR 0029: a stage that fails its retry fails the run
+            # Prior stage events and the Artifact lock are left intact and
+            # inspectable; later stages were never started.
             run.status = "failed"
             run.error = str(exc) or exc.__class__.__name__
             run.completed_at = _utcnow()
@@ -130,6 +135,7 @@ def analysis_run_read(run: AnalysisRun) -> dict:
         "error": run.error,
         "experiment_metadata": run,
         "artifact_ids": run_artifact_ids(run),
+        "stage_events": list(run.stage_events),
         "created_at": run.created_at,
         "updated_at": run.updated_at,
         "started_at": run.started_at,

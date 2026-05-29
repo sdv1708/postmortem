@@ -1,94 +1,121 @@
-# Slice 3: Start an asynchronous analysis run and lock used evidence
+# Slice 4: Six-stage run status page with persisted stage events
 
 ## Objective
 
-Implement GitHub issue #4 (blocked-by #3, which is closed → unblocked): add the
-first Analysis Run command path. A user starts analysis from an Incident with
-selected current Artifacts, the run is created as durable, pollable async
-product state, and the included Artifacts become immutable. Stage behavior is a
-placeholder (real six-stage pipeline lands in #5).
+Implement GitHub issue #5 (blocked-by #4, merged → unblocked). Make the
+demo-worthy waiting experience real: an Analysis Run progresses through the six
+named Run Stages, persists a Run Stage Event per stage *before* moving to the
+next (ADR 0026), retries a failing stage at most once then fails the run while
+preserving prior stage outputs (ADR 0029), and the UI polls run status/events
+with TanStack Query (ADR 0001) — no SSE, no token streaming (ADR 0005).
 
 ## Relevant ADRs
 
-- 0003 async run API model (status polling, internal synchronous worker is fine)
-- 0004 shared service layer for UI + future CLI
-- 0009 swappability demonstrated with fakes (RunExecutor)
-- 0018 artifacts immutable once included in a run
-- 0022 resource APIs + explicit command endpoints (start run is a command)
-- 0024 explicit structured tables (analysis_runs, run_artifacts)
-- 0025 experiment metadata defaults persisted on the run
-- 0029 stage-level failure (run marked failed, prior state preserved)
+- 0026 six-stage DB-persisted pipeline contract (persist each stage before next)
+- 0021 run-centric observability: stage, status, timestamps, duration, usage,
+  Warning Codes; heavy debug context stays in logs, not the event table
+- 0029 stage-level failure with a single retry; prior outputs preserved
+- 0005 demo-worthy status page without token streaming
+- 0001 web UI first; TanStack Query for polling
+- 0003 async run API model is status polling
+- 0009 RunExecutor is a kept interface; swap fakes in tests
+
+## The six stages (exact order, ADR 0026)
+
+1. normalizing evidence
+2. extracting timeline candidates
+3. generating RCA hypotheses
+4. verifying citations
+5. drafting postmortem
+6. flagging unsupported claims
 
 ## Implementation Plan
 
-- [x] Confirm #4 is unblocked and study existing slices + ADRs.
-- [x] Add `AnalysisRun` and `RunArtifact` models with status, experiment
-  metadata defaults, and included-artifact references.
-- [x] Add `AnalysisRun` schemas (create + read with artifact_ids + metadata).
-- [x] Add `RunExecutor` interface + `PlaceholderRunExecutor`, and an
-  `AnalysisService` that starts/fetches/lists runs and locks artifacts.
-- [x] Wire run lifecycle: queued → running → succeeded; failed executor marks
-  the run failed but keeps artifacts locked and prior state intact.
-- [x] Add resource-oriented + command analysis-run API endpoints under
-  `/api/incidents/{id}/analysis-runs`.
-- [x] Fix root `.gitignore` so `frontend/src/lib/` is not swallowed by the
-  Python `lib/` rule, and commit the missing `api.ts` client.
-- [x] Extend the frontend API client with analysis-run methods/types.
-- [x] Replace the Incident page "Analysis runs" placeholder with a real
-  start-run control + run status list that reloads locked evidence.
-- [x] Add backend tests: start run, immutability (409 delete/replace), body is
-  unchanged source of truth, status fetch/list, no-artifact + 404 cases,
-  service-layer start (CLI path), fake-executor lifecycle + failure.
-- [x] Extend e2e spec to start a run and see status + locked evidence.
-- [x] Run backend pytest + frontend typecheck/build; document results here.
+- [ ] Add `RunStageEvent` model: run_id, stage, status, sequence, started_at,
+  completed_at, duration_ms, usage (tokens/model, nullable), warning_codes,
+  attempt. Add relationship from `AnalysisRun`.
+- [ ] Add schema types: `RunStage`/`StageStatus` literals, `RunStageEventRead`,
+  and embed `stage_events` in `AnalysisRunRead`.
+- [ ] Define the six-stage contract in one place (`pipeline.py`) so executor,
+  schema, and tests share the ordered stage names.
+- [ ] Implement `StagedRunExecutor` (default) that runs the six stages in order,
+  persisting each event before the next; one retry per failing stage; on final
+  failure mark the stage + run failed and stop, leaving prior events intact.
+  Keep `PlaceholderRunExecutor` for tests / trivial swap demos.
+- [ ] Have the executor own stage-event persistence via a small callback/sink
+  injected by `AnalysisService` so the session boundary stays in the service
+  (ADR 0004). Service still owns run-level status transitions.
+- [ ] Wire `AnalysisService` to use `StagedRunExecutor` by default and to expose
+  stage events on reads; keep failure semantics (run failed, lock preserved).
+- [ ] Frontend: add TanStack Query + provider in layout; build a Run Status
+  panel that polls the run while non-terminal and renders all six stages with
+  per-stage status, duration, and warning codes.
+- [ ] Backend tests: stage ordering, an event persisted per stage before the
+  next, one-retry-then-success, one-retry-then-fail (run failed + later stages
+  never created + earlier events preserved), warning codes surface, API shows
+  stage_events and polling-visible transitions.
+- [ ] Frontend: typecheck + build; extend e2e to assert the six stages render
+  and the run reaches succeeded via polling.
+- [ ] Self-review for elegance/standards; run all tests; document results.
 
 ## Notes
 
-- `frontend/src/lib/api.ts` was authored in slice 2 but never committed because
-  the root Python `.gitignore` `lib/` rule matches `frontend/src/lib/`. The
-  frontend currently cannot build. Fixing this is in-scope for getting #4's UI
-  acceptance criteria to actually work.
-- TanStack Query polling is explicitly a #5 concern (and not installed); #4 uses
-  the existing plain-fetch pattern: start the run, then fetch status afterward.
+- "Async" stays product/API-level (ADR 0003): the executor runs synchronously
+  within start_run, but each stage is persisted as it completes so a poller
+  observes progress. To make polling-visible transitions testable without
+  real latency, the executor accepts an injectable per-stage hook; tests use it
+  to assert intermediate persisted state.
+- Usage fields (tokens/model) are nullable now — no LLM is wired until #7, so
+  they stay null but the column/contract exists per ADR 0021.
 
 ## Review
 
-- Backend: `AnalysisRun` + `RunArtifact` tables persist run status, experiment
-  metadata defaults (ADR 0025), and immutable Artifact references. `AnalysisService`
-  (ADR 0004) starts/fetches/lists runs; starting locks the included Artifacts
-  (`included_in_analysis_run=True`) before execution so the existing
-  ArtifactService guards (ADR 0018) reject delete/replace with 409.
-- `RunExecutor` is a kept interface (ADR 0009) with a no-op
-  `PlaceholderRunExecutor`. The service drives queued → running → terminal; an
-  executor exception marks the run `failed` with its message while keeping the
-  artifact lock and run-artifact references intact (ADR 0029). Real six-stage
-  behavior + Run Stage Events are deferred to #5.
-- API: command + resource endpoints under
-  `/api/incidents/{id}/analysis-runs` (POST start, GET list, GET one), behind
-  the single-user gate. Status polling, not streaming (ADR 0003/0005).
-- Frontend: reconstructed `src/lib/api.ts` (see note below) with analysis-run
-  methods, and replaced the Incident page placeholder with a real start-run
-  control + run status list. Starting a run reloads evidence so the lock badge
-  appears and delete/replace disable.
-- Fixed a real bug: the root Python `.gitignore` `lib/` rule was hiding
-  `frontend/src/lib/`, so `api.ts` had never been committed and the frontend
-  could not build from a clean checkout. Added a scoped negation and committed
-  the client.
+- Backend: `pipeline.py` holds the single ordered six-stage contract (ADR
+  0026). `RunStageEvent` persists stage/status/sequence/attempt/timestamps/
+  duration_ms/usage/warning_codes (ADR 0021). `StagedRunExecutor` runs the six
+  stages in order; each attempt is recorded as an event before the next stage,
+  with one retry per stage then fail-and-stop (ADR 0029). `StageRecorder` owns
+  event persistence; `AnalysisService` keeps the session boundary (ADR 0004)
+  and marks the run failed on executor error while preserving prior events and
+  the Artifact lock. Stage work is a no-op until the LLM arrives in #7.
+- Frontend: TanStack Query provider (ADR 0001) drives a Run Status panel that
+  polls the run list while any run is non-terminal and renders all six stages
+  with per-stage status, duration, retried badge, and warning codes. No
+  streaming (ADR 0005).
 
 ### Verification
 
-- Backend: `PYTHONPATH=. python -m pytest` → 39 passed (was 30; +9 analysis +
-  service/API coverage for immutability, source-of-truth body, lifecycle,
-  failure, 404/422 cases).
-- Frontend: `npm run typecheck` and `npm run build` both pass.
-- E2E: `./scripts/e2e.sh` → 2 passed, including starting a run, seeing
-  `succeeded`, and confirming the included artifact is locked.
-- Note: several pre-existing e2e assertions had latent strict-mode ambiguities
-  that only surfaced once the frontend could build again; tightened them to
-  exact/role-scoped locators.
+- Backend: `python -m pytest` → 50 passed (was 39; +11 for stage ordering,
+  persist-before-next, one-retry-then-succeed, retry-then-fail with
+  preservation, warning codes, recorder sequencing, non-dict runner guard, and
+  API stage_events visibility).
+- Frontend: `npm run typecheck` + `npm run build` pass.
+- E2E: `./scripts/e2e.sh` → 2 passed, including rendering all six stages and the
+  run reaching succeeded via the polling UI.
 
-## Lessons captured
+### Self-review (code-review skill, high effort) — fixes applied
 
-- A platform-default Python `.gitignore` (`lib/`) silently swallowed
-  `frontend/src/lib/`. Captured in `tasks/lessons.md` so future polyglot repos
-  scope language-specific ignore rules.
+- Restored a "Refresh status" control: the query only polls while a run is
+  non-terminal, so without it a terminal/externally-started run list could go
+  stale with no manual recovery.
+- Hardened `eventsByStage` to keep the highest-`sequence` event per stage rather
+  than relying on array delivery order, so a retried stage can't display its
+  failed first attempt.
+- Stage timing now shows the recorded `duration_ms` for failed (not just
+  succeeded) terminal events, so observability isn't lost on failure.
+- Simplified the start-run mutation to a single authoritative refetch (dropped a
+  fragile optimistic prepend that wouldn't reconcile on refetch failure).
+- Removed dead `RUN_STAGE_LABELS` (no backend consumer; labels live in the UI).
+- Added `_normalize_outcome` so a future stage runner returning a non-dict is
+  recorded as a stage failure instead of escaping as an uncaught exception.
+
+### Known/accepted limitations
+
+- The MVP executor runs synchronously inside `start_run` (ADR 0003: async is
+  product/API-level), so a poller's first read already sees terminal state; the
+  polling machinery is built for the real async future and is exercised by the
+  list-level refetch today. Intermediate per-stage states are asserted at the
+  service layer via an injected stage hook rather than over HTTP.
+- Schema is created with `create_all` (no migrations yet); the new table is
+  created fine on existing dev DBs, but column additions in later slices will
+  need a migration story. Out of scope for this slice.

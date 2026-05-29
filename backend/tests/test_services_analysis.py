@@ -124,7 +124,7 @@ def test_failed_executor_marks_run_failed_but_keeps_lock(fresh_session):
     incident, artifact = _incident_with_artifact(fresh_session)
 
     class BoomExecutor:
-        def execute(self, run):
+        def execute(self, run, recorder):
             raise RuntimeError("stage exploded")
 
     run = AnalysisService(fresh_session, executor=BoomExecutor()).start_run(
@@ -145,7 +145,7 @@ def test_fake_executor_runs_and_can_inspect_locked_run(fresh_session):
     seen = {}
 
     class RecordingExecutor:
-        def execute(self, run):
+        def execute(self, run, recorder):
             seen["status_during"] = run.status
             seen["artifact_count"] = len(run.run_artifacts)
 

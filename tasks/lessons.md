@@ -13,3 +13,9 @@
   from a clean checkout. When adding a Python `.gitignore` to a repo that also
   has JS/TS source, anchor build-output rules (e.g. `/build/`) or add negations
   for source paths, and verify with `git check-ignore -v <path>`.
+- The `scripts/e2e.sh` cleanup trap does not reliably reap the Next.js dev
+  server child tree when the script is killed (SIGTERM/timeout), leaving stale
+  `next-server` processes holding :3000 that make the next run fail instantly
+  with empty output. Run the suite in the foreground and, if a run is
+  interrupted, `pkill -9 -f next-server` (and uvicorn) before retrying. Confirm
+  ports are free first.

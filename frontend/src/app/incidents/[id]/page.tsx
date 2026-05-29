@@ -3,13 +3,19 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
+  isTerminalRunStatus,
+  RUN_STAGES,
   type AnalysisRun,
   type Artifact,
   type ArtifactSourceType,
   type Incident,
+  type RunStage,
+  type RunStageEvent,
   type RunStatus,
+  type StageStatus,
 } from "@/lib/api";
 import { SeverityBadge, StatusBadge } from "../_components/badges";
 
@@ -27,9 +33,6 @@ export default function IncidentOverviewPage() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
-  const [runs, setRuns] = useState<AnalysisRun[]>([]);
-  const [runError, setRunError] = useState<Error | null>(null);
-  const [isStartingRun, setIsStartingRun] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [artifactError, setArtifactError] = useState<Error | null>(null);
   const [isLoadingArtifacts, setIsLoadingArtifacts] = useState(false);
@@ -42,14 +45,13 @@ export default function IncidentOverviewPage() {
     let active = true;
     setIsLoadingArtifacts(true);
 
-    Promise.all([api.getIncident(id), api.listArtifacts(id), api.listAnalysisRuns(id)])
-      .then(([incidentItem, artifactItems, runItems]) => {
+    Promise.all([api.getIncident(id), api.listArtifacts(id)])
+      .then(([incidentItem, artifactItems]) => {
         if (!active) {
           return;
         }
         setIncident(incidentItem);
         setArtifacts(artifactItems);
-        setRuns(runItems);
         setSelectedArtifactId((current) => current ?? artifactItems[0]?.id ?? null);
       })
       .catch((err: Error) => {
@@ -136,40 +138,6 @@ export default function IncidentOverviewPage() {
     }
   }
 
-  async function startRun() {
-    if (!id) {
-      return;
-    }
-    setRunError(null);
-    setIsStartingRun(true);
-    try {
-      // Start the run, then fetch current status. Starting locks the included
-      // evidence, so reload artifacts to reflect the lock without blocking.
-      await api.startAnalysisRun(id);
-      const [runItems] = await Promise.all([
-        api.listAnalysisRuns(id),
-        reloadArtifacts(selectedArtifactId),
-      ]);
-      setRuns(runItems);
-    } catch (err) {
-      setRunError(err instanceof Error ? err : new Error("Failed to start analysis run"));
-    } finally {
-      setIsStartingRun(false);
-    }
-  }
-
-  async function refreshRuns() {
-    if (!id) {
-      return;
-    }
-    setRunError(null);
-    try {
-      setRuns(await api.listAnalysisRuns(id));
-    } catch (err) {
-      setRunError(err instanceof Error ? err : new Error("Failed to refresh runs"));
-    }
-  }
-
   if (!incident && !error) {
     return <DetailSkeleton />;
   }
@@ -247,12 +215,9 @@ export default function IncidentOverviewPage() {
         description="Start an async run. Included evidence locks so citations stay anchored."
       >
         <AnalysisRuns
-          runs={runs}
+          incidentId={id}
           artifactCount={artifacts.length}
-          isStarting={isStartingRun}
-          error={runError}
-          onStart={startRun}
-          onRefresh={refreshRuns}
+          onRunStarted={() => reloadArtifacts(selectedArtifactId)}
         />
       </Section>
 
@@ -663,21 +628,45 @@ function inferSourceType(filename: string): ArtifactSourceType {
 }
 
 function AnalysisRuns({
-  runs,
+  incidentId,
   artifactCount,
-  isStarting,
-  error,
-  onStart,
-  onRefresh,
+  onRunStarted,
 }: {
-  runs: AnalysisRun[];
+  incidentId: string;
   artifactCount: number;
-  isStarting: boolean;
-  error: Error | null;
-  onStart: () => Promise<void>;
-  onRefresh: () => Promise<void>;
+  onRunStarted: () => void | Promise<void>;
 }) {
-  const canStart = artifactCount > 0 && !isStarting;
+  const queryClient = useQueryClient();
+  const runsKey = ["analysis-runs", incidentId];
+
+  // Poll the run list while any run is still in flight (ADR 0001 / 0005). Once
+  // every run is terminal, polling stops until the next mutation.
+  const runsQuery = useQuery<AnalysisRun[]>({
+    queryKey: runsKey,
+    queryFn: () => api.listAnalysisRuns(incidentId),
+    enabled: !!incidentId,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasActive = !!data && data.some((run) => !isTerminalRunStatus(run.status));
+      return hasActive ? 1500 : false;
+    },
+  });
+
+  const startMutation = useMutation({
+    mutationFn: () => api.startAnalysisRun(incidentId),
+    onSuccess: async () => {
+      // Refetch the authoritative list (which includes the new run) and let the
+      // parent reflect the now-locked evidence. No optimistic insert: the
+      // refetched server state is the single source of truth.
+      await queryClient.invalidateQueries({ queryKey: runsKey });
+      await onRunStarted();
+    },
+  });
+
+  const runs = runsQuery.data ?? [];
+  const canStart = artifactCount > 0 && !startMutation.isPending;
+  const error =
+    (startMutation.error as Error | null) ?? (runsQuery.error as Error | null) ?? null;
 
   return (
     <div className="space-y-4">
@@ -694,23 +683,20 @@ function AnalysisRuns({
           {runs.length > 0 && (
             <button
               type="button"
-              onClick={() => {
-                void onRefresh();
-              }}
+              onClick={() => runsQuery.refetch()}
+              disabled={runsQuery.isFetching}
               className="button-secondary"
             >
-              Refresh status
+              {runsQuery.isFetching ? "Refreshing..." : "Refresh status"}
             </button>
           )}
           <button
             type="button"
-            onClick={() => {
-              void onStart();
-            }}
+            onClick={() => startMutation.mutate()}
             disabled={!canStart}
             className="button-primary"
           >
-            {isStarting ? "Starting..." : "Start analysis run"}
+            {startMutation.isPending ? "Starting..." : "Start analysis run"}
           </button>
         </div>
       </div>
@@ -729,26 +715,88 @@ function AnalysisRuns({
           </p>
         </div>
       ) : (
-        <ul className="card divide-y divide-slate-100 overflow-hidden">
+        <ul className="space-y-4">
           {runs.map((run) => (
-            <li key={run.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5">
-              <div className="min-w-0 space-y-1">
-                <div className="flex items-center gap-2">
-                  <RunStatusBadge status={run.status} />
-                  <span className="text-xs text-slate-500">
-                    {run.artifact_ids.length} artifact
-                    {run.artifact_ids.length === 1 ? "" : "s"} · {run.experiment_metadata.pipeline_version}
-                  </span>
-                </div>
-                {run.error && <p className="text-xs text-rose-600">{run.error}</p>}
-              </div>
-              <span className="text-xs text-slate-500">
-                Started {new Date(run.created_at).toLocaleString()}
-              </span>
+            <li key={run.id}>
+              <RunStatusCard run={run} />
             </li>
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+function RunStatusCard({ run }: { run: AnalysisRun }) {
+  const eventsByStage = new Map<RunStage, RunStageEvent>();
+  // Keep the highest-sequence event per stage so a retried stage shows its
+  // final attempt regardless of the array's delivery order.
+  for (const event of run.stage_events) {
+    const current = eventsByStage.get(event.stage);
+    if (!current || event.sequence > current.sequence) {
+      eventsByStage.set(event.stage, event);
+    }
+  }
+  const isPolling = !isTerminalRunStatus(run.status);
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/60 px-5 py-3">
+        <div className="flex items-center gap-2">
+          <RunStatusBadge status={run.status} />
+          <span className="text-xs text-slate-500">
+            {run.artifact_ids.length} artifact{run.artifact_ids.length === 1 ? "" : "s"} ·{" "}
+            {run.experiment_metadata.pipeline_version}
+          </span>
+          {isPolling && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-slate-500">
+              <Spinner /> Updating…
+            </span>
+          )}
+        </div>
+        <span className="text-xs text-slate-500">
+          Started {new Date(run.created_at).toLocaleString()}
+        </span>
+      </div>
+
+      {run.error && (
+        <p className="border-b border-rose-100 bg-rose-50/60 px-5 py-2 text-xs text-rose-700">
+          {run.error}
+        </p>
+      )}
+
+      <ol className="divide-y divide-slate-100">
+        {RUN_STAGES.map(({ stage, label }, index) => {
+          const event = eventsByStage.get(stage);
+          return (
+            <li key={stage} className="flex items-center justify-between gap-3 px-5 py-2.5">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="w-4 text-right text-xs tabular-nums text-slate-400">
+                  {index + 1}
+                </span>
+                <StageStatusIcon status={event?.status} />
+                <span className="truncate text-sm text-slate-800">{label}</span>
+                {event && event.attempt > 1 && (
+                  <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
+                    retried
+                  </span>
+                )}
+                {event?.warning_codes.map((code) => (
+                  <span
+                    key={code}
+                    className="badge bg-amber-50 text-amber-700 ring-amber-200"
+                  >
+                    {code}
+                  </span>
+                ))}
+              </div>
+              <span className="shrink-0 text-xs text-slate-400">
+                <StageTiming event={event} />
+              </span>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
@@ -761,6 +809,43 @@ function RunStatusBadge({ status }: { status: RunStatus }) {
     failed: "bg-rose-50 text-rose-700 ring-rose-200",
   };
   return <span className={`badge ${map[status]}`}>{status}</span>;
+}
+
+function StageStatusIcon({ status }: { status: StageStatus | undefined }) {
+  if (status === "succeeded") {
+    return (
+      <svg className="text-emerald-600" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-label="succeeded">
+        <path d="M20 6 9 17l-5-5" />
+      </svg>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <svg className="text-rose-600" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-label="failed">
+        <path d="M18 6 6 18" />
+        <path d="m6 6 12 12" />
+      </svg>
+    );
+  }
+  if (status === "running") {
+    return <Spinner />;
+  }
+  return <span className="inline-block h-2.5 w-2.5 rounded-full bg-slate-300" aria-label="pending" />;
+}
+
+function StageTiming({ event }: { event: RunStageEvent | undefined }) {
+  if (!event) {
+    return <>pending</>;
+  }
+  if (event.status === "running") {
+    return <>running…</>;
+  }
+  // Both succeeded and failed terminal events carry a measured duration; show
+  // it whenever it was recorded so observability is not lost on failure.
+  if (event.duration_ms !== null) {
+    return <>{event.duration_ms} ms</>;
+  }
+  return <>{event.status}</>;
 }
 
 function Section({
