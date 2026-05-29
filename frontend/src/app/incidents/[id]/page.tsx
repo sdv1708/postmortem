@@ -5,9 +5,11 @@ import { useParams } from "next/navigation";
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
   api,
+  type AnalysisRun,
   type Artifact,
   type ArtifactSourceType,
   type Incident,
+  type RunStatus,
 } from "@/lib/api";
 import { SeverityBadge, StatusBadge } from "../_components/badges";
 
@@ -25,6 +27,9 @@ export default function IncidentOverviewPage() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const [runs, setRuns] = useState<AnalysisRun[]>([]);
+  const [runError, setRunError] = useState<Error | null>(null);
+  const [isStartingRun, setIsStartingRun] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [artifactError, setArtifactError] = useState<Error | null>(null);
   const [isLoadingArtifacts, setIsLoadingArtifacts] = useState(false);
@@ -37,13 +42,14 @@ export default function IncidentOverviewPage() {
     let active = true;
     setIsLoadingArtifacts(true);
 
-    Promise.all([api.getIncident(id), api.listArtifacts(id)])
-      .then(([incidentItem, artifactItems]) => {
+    Promise.all([api.getIncident(id), api.listArtifacts(id), api.listAnalysisRuns(id)])
+      .then(([incidentItem, artifactItems, runItems]) => {
         if (!active) {
           return;
         }
         setIncident(incidentItem);
         setArtifacts(artifactItems);
+        setRuns(runItems);
         setSelectedArtifactId((current) => current ?? artifactItems[0]?.id ?? null);
       })
       .catch((err: Error) => {
@@ -130,6 +136,40 @@ export default function IncidentOverviewPage() {
     }
   }
 
+  async function startRun() {
+    if (!id) {
+      return;
+    }
+    setRunError(null);
+    setIsStartingRun(true);
+    try {
+      // Start the run, then fetch current status. Starting locks the included
+      // evidence, so reload artifacts to reflect the lock without blocking.
+      await api.startAnalysisRun(id);
+      const [runItems] = await Promise.all([
+        api.listAnalysisRuns(id),
+        reloadArtifacts(selectedArtifactId),
+      ]);
+      setRuns(runItems);
+    } catch (err) {
+      setRunError(err instanceof Error ? err : new Error("Failed to start analysis run"));
+    } finally {
+      setIsStartingRun(false);
+    }
+  }
+
+  async function refreshRuns() {
+    if (!id) {
+      return;
+    }
+    setRunError(null);
+    try {
+      setRuns(await api.listAnalysisRuns(id));
+    } catch (err) {
+      setRunError(err instanceof Error ? err : new Error("Failed to refresh runs"));
+    }
+  }
+
   if (!incident && !error) {
     return <DetailSkeleton />;
   }
@@ -202,10 +242,17 @@ export default function IncidentOverviewPage() {
         />
       </Section>
 
-      <Section title="Analysis runs" description="Async analysis pipeline.">
-        <Placeholder
-          tag="Coming in slices 3–4"
-          body="Async runs and the six-stage status page land in #4 and #5."
+      <Section
+        title="Analysis runs"
+        description="Start an async run. Included evidence locks so citations stay anchored."
+      >
+        <AnalysisRuns
+          runs={runs}
+          artifactCount={artifacts.length}
+          isStarting={isStartingRun}
+          error={runError}
+          onStart={startRun}
+          onRefresh={refreshRuns}
         />
       </Section>
 
@@ -613,6 +660,107 @@ function inferSourceType(filename: string): ArtifactSourceType {
     return "logs";
   }
   return "incident_notes";
+}
+
+function AnalysisRuns({
+  runs,
+  artifactCount,
+  isStarting,
+  error,
+  onStart,
+  onRefresh,
+}: {
+  runs: AnalysisRun[];
+  artifactCount: number;
+  isStarting: boolean;
+  error: Error | null;
+  onStart: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+}) {
+  const canStart = artifactCount > 0 && !isStarting;
+
+  return (
+    <div className="space-y-4">
+      <div className="card-padded flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-slate-900">Run analysis on current evidence</p>
+          <p className="mt-0.5 text-sm text-slate-600">
+            {artifactCount === 0
+              ? "Add at least one piece of evidence before starting a run."
+              : `Starts a run over ${artifactCount} artifact${artifactCount === 1 ? "" : "s"} and locks them.`}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {runs.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                void onRefresh();
+              }}
+              className="button-secondary"
+            >
+              Refresh status
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              void onStart();
+            }}
+            disabled={!canStart}
+            className="button-primary"
+          >
+            {isStarting ? "Starting..." : "Start analysis run"}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          {error.message}
+        </div>
+      )}
+
+      {runs.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-slate-300 bg-white/70 p-6 text-center">
+          <h3 className="text-sm font-semibold text-slate-900">No analysis runs yet</h3>
+          <p className="mt-1 text-sm text-slate-600">
+            Start a run to lock the current evidence and track its status here.
+          </p>
+        </div>
+      ) : (
+        <ul className="card divide-y divide-slate-100 overflow-hidden">
+          {runs.map((run) => (
+            <li key={run.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5">
+              <div className="min-w-0 space-y-1">
+                <div className="flex items-center gap-2">
+                  <RunStatusBadge status={run.status} />
+                  <span className="text-xs text-slate-500">
+                    {run.artifact_ids.length} artifact
+                    {run.artifact_ids.length === 1 ? "" : "s"} · {run.experiment_metadata.pipeline_version}
+                  </span>
+                </div>
+                {run.error && <p className="text-xs text-rose-600">{run.error}</p>}
+              </div>
+              <span className="text-xs text-slate-500">
+                Started {new Date(run.created_at).toLocaleString()}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function RunStatusBadge({ status }: { status: RunStatus }) {
+  const map: Record<RunStatus, string> = {
+    queued: "bg-slate-100 text-slate-600 ring-slate-200",
+    running: "bg-amber-50 text-amber-700 ring-amber-200",
+    succeeded: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    failed: "bg-rose-50 text-rose-700 ring-rose-200",
+  };
+  return <span className={`badge ${map[status]}`}>{status}</span>;
 }
 
 function Section({

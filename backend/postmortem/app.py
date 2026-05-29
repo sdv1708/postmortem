@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.analysis_runs import router as analysis_runs_router
 from .api.artifacts import router as artifacts_router
 from .api.incidents import router as incidents_router
 from .auth import configure_auth
@@ -42,6 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(incidents_router)
     app.include_router(artifacts_router)
+    app.include_router(analysis_runs_router)
     return app
 
 

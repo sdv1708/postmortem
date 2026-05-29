@@ -19,7 +19,7 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByRole("heading", { name: title })).toBeVisible();
   await expect(page.getByText("sev2")).toBeVisible();
   await expect(page.getByText("API 500s climbing after the 14:28 deploy.")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Evidence", exact: true })).toBeVisible();
 
   await page.getByLabel("Source type").selectOption("logs");
   await page.getByLabel("Source name").fill("api-errors.log");
@@ -27,9 +27,9 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await page.getByRole("button", { name: "Add evidence" }).click();
   await expect(page.getByRole("button", { name: /api-errors\.log/ })).toBeVisible();
   await expect(page.getByRole("rowheader", { name: "1" })).toBeVisible();
-  await expect(page.getByText("14:28 deploy started")).toBeVisible();
+  await expect(page.getByRole("cell", { name: "14:28 deploy started" })).toBeVisible();
   await expect(page.getByRole("rowheader", { name: "2" })).toBeVisible();
-  await expect(page.getByText("14:32 api 500s spike")).toBeVisible();
+  await expect(page.getByRole("cell", { name: "14:32 api 500s spike" })).toBeVisible();
 
   await page.getByLabel("Upload text file").setInputFiles({
     name: "deploy-notes.txt",
@@ -39,8 +39,20 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByLabel("Source name")).toHaveValue("deploy-notes.txt");
   await expect(page.getByLabel("Artifact text")).toHaveValue("deploy v184 released\nrollback prepared");
 
-  await expect(page.getByRole("heading", { name: "Analysis runs" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Analysis runs", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Postmortem" })).toBeVisible();
+
+  // Start an async analysis run over the current evidence and see its status.
+  await expect(page.getByRole("heading", { name: "No analysis runs yet" })).toBeVisible();
+  await page.getByRole("button", { name: "Start analysis run" }).click();
+  await expect(page.getByText("succeeded")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No analysis runs yet" })).toBeHidden();
+
+  // The included evidence is now locked: it shows the lock badge and the
+  // delete control is disabled.
+  await page.getByRole("button", { name: /api-errors\.log/ }).click();
+  await expect(page.getByText("Locked · in analysis")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete" })).toBeDisabled();
 
   await page.getByRole("link", { name: "Back to all incidents" }).click();
   await expect(page).toHaveURL(/\/incidents$/);

@@ -71,3 +71,66 @@ class Artifact(Base):
     )
 
     incident: Mapped[Incident] = relationship(back_populates="artifacts")
+
+
+class AnalysisRun(Base):
+    """An asynchronous analysis run started from an Incident (ADR 0003).
+
+    Runs are async at the product/API level: clients start a run and then poll
+    Run Status. Versioned Experiment Metadata is recorded per run (ADR 0025) so
+    prompt and pipeline tradeoffs are comparable later. Six-stage pipeline
+    behavior and Run Stage Events land in slice #5; this slice persists the
+    durable run lifecycle and the locked Artifact references.
+    """
+
+    __tablename__ = "analysis_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    incident_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Experiment Metadata defaults (ADR 0025). Scenario id, deterministic check
+    # results, and judge scores attach in later eval slices.
+    pipeline_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    retrieval_strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunking_strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    verifier_version: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    incident: Mapped[Incident] = relationship()
+    run_artifacts: Mapped[list["RunArtifact"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="RunArtifact.created_at"
+    )
+
+
+class RunArtifact(Base):
+    """Immutable reference from an Analysis Run to an included Artifact.
+
+    The Artifact body remains the citation source of truth and cannot change
+    once referenced (ADR 0018); corrections require a new Artifact and new run.
+    """
+
+    __tablename__ = "run_artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="run_artifacts")
+    artifact: Mapped[Artifact] = relationship()

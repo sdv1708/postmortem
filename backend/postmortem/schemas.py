@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 Severity = Literal["sev0", "sev1", "sev2", "sev3", "sev4"]
 IncidentStatus = Literal["open", "investigating", "mitigated", "resolved", "closed"]
 ArtifactSourceType = Literal["incident_notes", "logs", "stack_trace", "deployment_notes", "other"]
+RunStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
 class IncidentCreate(BaseModel):
@@ -67,3 +68,41 @@ class ArtifactRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     lines: list[ArtifactLine]
+
+
+class AnalysisRunCreate(BaseModel):
+    """Command payload to start an Analysis Run (ADR 0022).
+
+    `artifact_ids` selects the current Artifacts to include. When omitted, all
+    of the Incident's current Artifacts are included.
+    """
+
+    artifact_ids: list[str] | None = None
+
+
+class ExperimentMetadata(BaseModel):
+    """Versioned metadata recorded per run for experiment tracking (ADR 0025)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    pipeline_version: str
+    prompt_version: str
+    model_provider: str
+    retrieval_strategy: str
+    chunking_strategy: str
+    verifier_version: str
+
+
+class AnalysisRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    incident_id: str
+    status: RunStatus
+    error: str | None
+    experiment_metadata: ExperimentMetadata
+    artifact_ids: list[str]
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None

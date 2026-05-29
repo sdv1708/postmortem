@@ -7,6 +7,18 @@ from dataclasses import dataclass
 DEFAULT_WORKSPACE_SLUG = "default"
 DEFAULT_WORKSPACE_NAME = "Default Workspace"
 
+# Experiment Metadata defaults recorded on each Analysis Run (ADR 0025). These
+# are intentionally MVP placeholders; later slices wire real prompt/model and
+# strategy versions as those components enter the pipeline (ADR 0009).
+DEFAULT_EXPERIMENT_METADATA: dict[str, str] = {
+    "pipeline_version": "mvp-0",
+    "prompt_version": "none-0",
+    "model_provider": "none",
+    "retrieval_strategy": "deterministic-0",
+    "chunking_strategy": "source-aware-0",
+    "verifier_version": "none-0",
+}
+
 
 @dataclass(frozen=True)
 class Settings:

@@ -7,13 +7,21 @@ and `docs/adr/` for architectural decision records.
 
 This repository is being built out one slice at a time, tracked under issue #1.
 
-- **Slice 1 (#2): incident workspace path** — done (this branch). Incidents can
-  be created, listed, and fetched through a resource-oriented API. The default
-  workspace stub is bootstrapped automatically. A single-user bearer-token gate
-  protects the API, with an explicit local-dev bypass.
-- Later slices (#3-#13) add evidence upload, async runs, the six-stage
-  pipeline, citation verification, structured postmortems, scenario fixtures,
-  evaluations, and refusal behavior.
+- **Slice 1 (#2): incident workspace path** — done. Incidents can be created,
+  listed, and fetched through a resource-oriented API. The default workspace
+  stub is bootstrapped automatically. A single-user bearer-token gate protects
+  the API, with an explicit local-dev bypass.
+- **Slice 2 (#3): line-addressable evidence** — done. Artifacts can be pasted or
+  uploaded, viewed with stable line numbers, and deleted or replaced before a
+  run uses them.
+- **Slice 3 (#4): async analysis runs + locked evidence** — done (this branch).
+  A command endpoint starts an Analysis Run for an Incident over selected
+  current Artifacts. The run is durable, pollable async product state with
+  experiment-metadata defaults; included Artifacts become immutable so their
+  bodies stay the citation source of truth. Stage behavior is a placeholder
+  (`PlaceholderRunExecutor`); the six-stage status page lands in #5.
+- Later slices (#5-#13) add the six-stage pipeline, citation verification,
+  structured postmortems, scenario fixtures, evaluations, and refusal behavior.
 
 ## Repository layout
 
@@ -89,8 +97,14 @@ The script expects Playwright Chromium at `/opt/pw-browsers`. Override with
 - SQLAlchemy 2.x with SQLite for development; the schema uses Postgres-friendly
   column types so swapping `POSTMORTEM_DATABASE_URL` is the only change needed
   to point at Postgres.
-- `IncidentService` owns incident create/list/get. Routes call the service —
-  this is the boundary the future CLI (Milestone 2) will share.
+- `IncidentService`, `ArtifactService`, and `AnalysisService` own their domain
+  behavior. Routes call the services — this is the boundary the future CLI
+  (Milestone 2) will share. `AnalysisService.start_run` is the start-run entry
+  point both the web UI and a future CLI use.
+- Analysis Runs are async at the product/API level (ADR 0003): clients POST to
+  start a run and then GET its status. A `RunExecutor` does the run's work; the
+  MVP ships a no-op `PlaceholderRunExecutor`, and tests swap in fakes to prove
+  swappability and the single-retry-free failure path.
 - The default workspace is created on app startup (idempotent) and on every
   service-level `create` so tests against a fresh DB work without explicit
   setup.
