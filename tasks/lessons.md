@@ -7,3 +7,9 @@
 - Do not present partially implemented work as ready for manual testing. If the
   frontend acceptance criteria are not wired yet, say that explicitly and keep
   implementing before asking the user to test the slice.
+- In a polyglot repo, scope language-specific `.gitignore` rules. A stock Python
+  `.gitignore` ignores `lib/`, which silently matched `frontend/src/lib/` and
+  kept the (untracked) frontend API client out of git — the app could not build
+  from a clean checkout. When adding a Python `.gitignore` to a repo that also
+  has JS/TS source, anchor build-output rules (e.g. `/build/`) or add negations
+  for source paths, and verify with `git check-ignore -v <path>`.
