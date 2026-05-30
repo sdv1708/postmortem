@@ -39,6 +39,20 @@ def test_log_windows_overlap_by_15_percent_and_preserve_line_numbers():
     assert all(c.line_start >= 1 and c.line_end <= 100 for c in chunks)
 
 
+def test_log_window_start_moves_to_nearest_timestamp_boundary():
+    lines = [f"2026-05-09T14:{i:02d}:00Z event {i}" for i in range(1, 35)]
+    lines += ["continuation detail without its own timestamp"]
+    lines += [f"2026-05-09T15:{i:02d}:00Z event {i}" for i in range(1, 66)]
+    chunks = _chunker().chunk("logs", "api.log", "\n".join(lines))
+
+    assert chunks[0].line_start == 1
+    # Fixed 40-line windows with 15% overlap would normally start at line 35.
+    # Because line 35 is a continuation, the next window starts at the nearest
+    # preceding timestamped log line instead.
+    assert chunks[1].line_start == 34
+    assert chunks[0].line_end - chunks[1].line_start + 1 >= 6
+
+
 def test_consecutive_windows_always_share_at_least_one_line():
     body = "\n".join(f"l{i}" for i in range(1, 250))
     chunks = _chunker().chunk("logs", "api.log", body)
@@ -70,6 +84,18 @@ def test_incident_notes_split_on_paragraph_boundaries():
     assert (chunks[0].line_start, chunks[0].line_end) == (1, 2)
     assert (chunks[1].line_start, chunks[1].line_end) == (4, 4)
     assert (chunks[2].line_start, chunks[2].line_end) == (6, 6)
+
+
+def test_incident_notes_preserve_heading_boundaries_without_blank_lines():
+    body = "Intro summary\n# Detection\n14:32 alert fired\n# Mitigation\nrollback started"
+    chunks = _chunker().chunk("incident_notes", "notes.md", body)
+
+    assert [c.text for c in chunks] == [
+        "Intro summary",
+        "# Detection\n14:32 alert fired",
+        "# Mitigation\nrollback started",
+    ]
+    assert [c.line_start for c in chunks] == [1, 2, 4]
 
 
 def test_deploy_notes_are_small_release_entry_chunks():

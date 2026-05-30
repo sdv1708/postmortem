@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..chunking import ChunkingStrategy, SourceAwareLineWindowChunker
-from ..models import AnalysisRun, Artifact, EvidenceRef, RunArtifact, TimelineEvent
+from ..models import AnalysisRun, Artifact, EvidenceChunk, EvidenceRef, RunArtifact, TimelineEvent
 from ..timestamps import parse_timestamp
 
 
@@ -54,20 +54,38 @@ class PipelineStageRunner:
     def _normalize_evidence(self, run: AnalysisRun) -> dict | None:
         """Chunk every included Artifact into source-aware line windows.
 
-        Chunks are retrieval aids, not citation targets (ADR 0027), so they are
-        not persisted; the stage's product is the validated chunk set and a
-        Warning Code when an Artifact yields no chunks.
+        Chunks are retrieval aids, not citation targets (ADR 0027), but they
+        are persisted as the inspectable output of this stage (ADR 0026). The
+        timeline stage and all EvidenceRefs still cite Artifact line ranges.
         """
+        self._clear_chunks(run)
         artifacts = self._run_artifacts(run)
         warning_codes: list[str] = []
         total_chunks = 0
+        sequence = 1
         for artifact in artifacts:
             chunks = self._chunker.chunk(artifact.source_type, artifact.source_name, artifact.body)
             total_chunks += len(chunks)
             if not chunks:
                 warning_codes.append("chunk_count_anomaly")
+            for chunk in chunks:
+                self._session.add(
+                    EvidenceChunk(
+                        run_id=run.id,
+                        artifact_id=artifact.id,
+                        sequence=sequence,
+                        source_type=chunk.source_type,
+                        source_name=chunk.source_name,
+                        line_start=chunk.line_start,
+                        line_end=chunk.line_end,
+                        text=chunk.text,
+                        chunking_strategy=self._chunker.version,
+                    )
+                )
+                sequence += 1
         if total_chunks == 0:
             warning_codes.append("chunk_count_anomaly")
+        self._session.flush()
         return {"warning_codes": _dedupe(warning_codes)}
 
     def _extract_timeline(self, run: AnalysisRun) -> dict | None:
@@ -153,6 +171,14 @@ class PipelineStageRunner:
         )
         for event in existing:
             self._session.delete(event)  # cascade removes its EvidenceRefs
+        self._session.flush()
+
+    def _clear_chunks(self, run: AnalysisRun) -> None:
+        existing = self._session.scalars(
+            select(EvidenceChunk).where(EvidenceChunk.run_id == run.id)
+        )
+        for chunk in existing:
+            self._session.delete(chunk)
         self._session.flush()
 
 

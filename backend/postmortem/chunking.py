@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import Final, Protocol
 
+from .timestamps import parse_timestamp
+
 # Versioned Chunking Strategy identity recorded in Experiment Metadata (ADR
 # 0025). Bump this string whenever the chunking rules change so runs produced by
 # different rule sets stay comparable.
@@ -108,14 +110,16 @@ def _window_chunks(
 # A blank line (or run of blank lines) separates human-note paragraphs and
 # deploy-note release entries.
 _BLANK_LINE = re.compile(r"^\s*$")
+_HEADING_LINE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
 
 
 def _blocks_by_blank_lines(lines: list[str]) -> list[tuple[int, list[str]]]:
-    """Group lines into blocks separated by blank lines.
+    """Group lines into blocks separated by blank lines or note headings.
 
     Returns (base_line, block_lines) where base_line is the 1-based Artifact
     line of the block's first line. Blank separator lines are dropped from the
-    blocks but still counted so line numbers stay accurate.
+    blocks but still counted so line numbers stay accurate. Markdown headings
+    begin a new block so human-note section boundaries survive chunking.
     """
     blocks: list[tuple[int, list[str]]] = []
     current: list[str] = []
@@ -125,13 +129,62 @@ def _blocks_by_blank_lines(lines: list[str]) -> list[tuple[int, list[str]]]:
             if current:
                 blocks.append((current_base, current))
                 current = []
-        else:
-            if not current:
-                current_base = index
-            current.append(line)
+            continue
+
+        if _HEADING_LINE.match(line) and current:
+            blocks.append((current_base, current))
+            current = []
+
+        if not current:
+            current_base = index
+        current.append(line)
     if current:
         blocks.append((current_base, current))
     return blocks
+
+
+def _has_time_anchor(line: str) -> bool:
+    parsed = parse_timestamp(line)
+    return parsed is not None and line.strip().startswith(parsed.original_text)
+
+
+def _timestamp_aware_window_chunks(
+    source_name: str,
+    lines: list[str],
+    window: int,
+) -> list[Chunk]:
+    total = len(lines)
+    if total == 0:
+        return []
+    if total <= window:
+        return _window_chunks("logs", source_name, lines, window)
+
+    overlap = _overlap_for(window)
+    step = window - overlap
+    chunks: list[Chunk] = []
+    start = 0
+    while start < total:
+        end = min(start + window, total)
+        chunks.append(
+            Chunk(
+                source_type="logs",
+                source_name=source_name,
+                line_start=start + 1,
+                line_end=end,
+                text="\n".join(lines[start:end]),
+            )
+        )
+        if end == total:
+            break
+
+        nominal = start + step
+        next_start = nominal
+        for candidate in range(nominal, start, -1):
+            if _has_time_anchor(lines[candidate]):
+                next_start = candidate
+                break
+        start = next_start
+    return chunks
 
 
 class SourceAwareLineWindowChunker:
@@ -158,7 +211,9 @@ class SourceAwareLineWindowChunker:
             return self._stack_trace(source_name, lines)
         if source_type in {"incident_notes", "deployment_notes"}:
             return self._block_oriented(source_type, source_name, lines)
-        window = _LOG_WINDOW_LINES if source_type == "logs" else _DEFAULT_WINDOW_LINES
+        if source_type == "logs":
+            return _timestamp_aware_window_chunks(source_name, lines, _LOG_WINDOW_LINES)
+        window = _DEFAULT_WINDOW_LINES
         return _window_chunks(source_type, source_name, lines, window)
 
     def _stack_trace(self, source_name: str, lines: list[str]) -> list[Chunk]:

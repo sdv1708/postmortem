@@ -818,6 +818,14 @@ function RunTimeline({ incidentId, runId }: { incidentId: string; runId: string 
     );
   }
 
+  if (timelineQuery.isError) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-rose-600">
+        Timeline candidates could not be loaded.
+      </div>
+    );
+  }
+
   const events = timelineQuery.data ?? [];
   if (events.length === 0) {
     return (
