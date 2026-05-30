@@ -98,12 +98,30 @@ inside the existing `StagedRunExecutor` stage_runner hook.
 - Cleanup: simplified stage dispatch (if/elif vs unbound-method table); cached
   the immutable run-artifact set so both stages share one query.
 
+### Review fix addendum
+
+- [x] Added persisted `EvidenceChunk` rows as the inspectable
+  `normalizing_evidence` stage output. Chunks remain retrieval aids; EvidenceRefs
+  still point only to Artifact line ranges.
+- [x] Made normalization idempotent across a failed first attempt by clearing
+  run chunks before rewriting them.
+- [x] Made log window starts timestamp-aware: if a fixed overlap boundary lands
+  in a continuation line, the next chunk starts at the nearest preceding
+  timestamped line while preserving coverage and at least the 15% overlap.
+- [x] Preserved markdown heading boundaries for human notes in addition to blank
+  line paragraph boundaries.
+- [x] Added focused regressions for persisted chunks, retry idempotency,
+  timestamp-aware log boundaries, and heading boundaries.
+
+### Review fix verification
+
+- Targeted backend: `python -m pytest -p no:cacheprovider tests/test_chunking.py tests/test_stages_timeline.py` -> 18 passed.
+- Full backend: `python -m pytest -p no:cacheprovider` -> 85 passed.
+
 ### Known/accepted limitations
 
-- Chunks are validated/counted but not persisted: per ADR 0027 chunks are
-  retrieval aids, not citation targets, and nothing consumes them until the
-  retrieval/RCA slices. The normalize stage proves chunkability and emits
-  `chunk_count_anomaly`; persisting chunks is deferred to when retrieval needs
-  them.
+- Persisted chunks are not exposed through an API yet. They exist to satisfy the
+  stage-output persistence contract and to give later retrieval/RCA slices a DB
+  handoff point without changing citation semantics.
 - The frontend fetches timeline per succeeded run card (fine for the few runs
   per incident in the MVP); a batched endpoint can come later if needed.

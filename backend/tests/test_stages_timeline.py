@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from postmortem.models import TimelineEvent
+from postmortem.models import EvidenceChunk, TimelineEvent
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 
@@ -22,6 +22,14 @@ def _timeline(session, run_id):
         session.query(TimelineEvent)
         .filter(TimelineEvent.run_id == run_id)
         .order_by(TimelineEvent.sequence)
+    )
+
+
+def _chunks(session, run_id):
+    return list(
+        session.query(EvidenceChunk)
+        .filter(EvidenceChunk.run_id == run_id)
+        .order_by(EvidenceChunk.sequence)
     )
 
 
@@ -65,6 +73,64 @@ def test_timeline_events_built_from_timestamped_lines_with_citations(fresh_sessi
     assert ref.snippet == "2026-05-09T14:28:31Z deploy v184 rolled out"
     # The noise line (line 2) is never cited.
     assert events[1].evidence_refs[0].line_start == 3
+
+
+def test_normalized_evidence_chunks_are_persisted_before_timeline(fresh_session):
+    incident = _incident(fresh_session)
+    artifact = _add(
+        fresh_session,
+        incident.id,
+        "logs",
+        "api.log",
+        "\n".join(f"2026-05-09T14:{i:02d}:00Z event {i}" for i in range(1, 46)),
+    )
+    fresh_session.commit()
+
+    run = AnalysisService(fresh_session).start_run(incident.id, AnalysisRunCreate())
+    fresh_session.commit()
+
+    chunks = _chunks(fresh_session, run.id)
+    assert len(chunks) == 2
+    assert chunks[0].artifact_id == artifact.id
+    assert chunks[0].sequence == 1
+    assert (chunks[0].line_start, chunks[0].line_end) == (1, 40)
+    assert chunks[0].chunking_strategy == "source-aware-1"
+    assert chunks[0].text.startswith("2026-05-09T14:01:00Z event 1")
+    assert _timeline(fresh_session, run.id)
+
+
+def test_normalizing_evidence_is_idempotent_across_retry(fresh_session):
+    from postmortem.services import StagedRunExecutor
+    from postmortem.services.stages import PipelineStageRunner
+
+    incident = _incident(fresh_session)
+    _add(
+        fresh_session,
+        incident.id,
+        "logs",
+        "api.log",
+        "\n".join(f"2026-05-09T14:{i:02d}:00Z event {i}" for i in range(1, 46)),
+    )
+    fresh_session.commit()
+
+    real = PipelineStageRunner(fresh_session)
+
+    def flaky(stage, attempt, run):
+        if stage == "normalizing_evidence":
+            outcome = real(stage, attempt, run)
+            if attempt == 1:
+                raise RuntimeError("boom after chunk write")
+            return outcome
+        return real(stage, attempt, run)
+
+    run = AnalysisService(fresh_session, executor=StagedRunExecutor(stage_runner=flaky)).start_run(
+        incident.id, AnalysisRunCreate()
+    )
+    fresh_session.commit()
+
+    chunks = _chunks(fresh_session, run.id)
+    assert run.status == "succeeded"
+    assert [chunk.sequence for chunk in chunks] == [1, 2]
 
 
 def test_normalized_events_sort_before_inferred_ones(fresh_session):

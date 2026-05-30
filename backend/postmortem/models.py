@@ -181,6 +181,37 @@ class RunStageEvent(Base):
     run: Mapped[AnalysisRun] = relationship(back_populates="stage_events")
 
 
+class EvidenceChunk(Base):
+    """A persisted normalized evidence chunk for one Analysis Run.
+
+    Chunks are retrieval aids (ADR 0027), not citation targets. They are
+    persisted so the `normalizing_evidence` stage has inspectable output before
+    timeline extraction (ADR 0026), while EvidenceRefs continue to cite immutable
+    Artifact line ranges.
+    """
+
+    __tablename__ = "evidence_chunks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    line_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    line_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    chunking_strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship()
+    artifact: Mapped[Artifact] = relationship()
+
+
 class TimelineEvent(Base):
     """A time-anchored event extracted from a run's normalized evidence.
 
