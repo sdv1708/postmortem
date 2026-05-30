@@ -43,7 +43,8 @@ def test_start_run_persists_experiment_metadata_defaults(fresh_session):
 
     assert run.pipeline_version == "mvp-0"
     assert run.retrieval_strategy == "deterministic-0"
-    assert run.chunking_strategy == "source-aware-0"
+    # Slice 5 wired a real Chunking Strategy; the run records its version.
+    assert run.chunking_strategy == "source-aware-1"
 
 
 def test_locked_artifact_cannot_be_deleted_or_replaced(fresh_session):

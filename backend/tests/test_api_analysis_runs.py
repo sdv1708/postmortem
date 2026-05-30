@@ -235,3 +235,72 @@ def test_start_run_returns_queued_state_before_background_execution(
         "drafting_postmortem",
         "flagging_unsupported_claims",
     ]
+
+
+def test_run_records_chunking_strategy_version(client: TestClient, auth_headers):
+    incident_id = create_incident(client, auth_headers)
+    add_artifact(client, auth_headers, incident_id)
+    run = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()
+    assert run["experiment_metadata"]["chunking_strategy"] == "source-aware-1"
+
+
+def test_timeline_endpoint_returns_sorted_cited_events(client: TestClient, auth_headers):
+    incident_id = create_incident(client, auth_headers)
+    add_artifact(
+        client,
+        auth_headers,
+        incident_id,
+        body=(
+            "2026-05-09T14:32:02Z api 500 rate climbing\n"
+            "2026-05-09T14:28:31Z deploy v184 rolled out"
+        ),
+    )
+    run = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()
+
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}/timeline",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    events = resp.json()
+    assert [e["sequence"] for e in events] == [1, 2]
+    # Chronological: the 14:28 event sorts before the 14:32 event.
+    assert events[0]["normalized_ts"] < events[1]["normalized_ts"]
+    first_ref = events[0]["evidence_refs"][0]
+    assert first_ref["line_start"] == 2  # the 14:28 line is line 2 of the body
+    assert first_ref["snippet"] == "2026-05-09T14:28:31Z deploy v184 rolled out"
+    assert first_ref["confidence_score"] == 1.0
+
+
+def test_timeline_endpoint_marks_inferred_timestamps_uncertain(client: TestClient, auth_headers):
+    incident_id = create_incident(client, auth_headers)
+    add_artifact(client, auth_headers, incident_id, body="14:40 dashboards went red")
+    run = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()
+
+    events = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}/timeline",
+        headers=auth_headers,
+    ).json()
+    assert len(events) == 1
+    assert events[0]["uncertain"] is True
+    assert events[0]["normalized_ts"] is None
+    assert events[0]["original_ts_text"] == "14:40"
+
+
+def test_timeline_endpoint_unknown_run_returns_404(client: TestClient, auth_headers):
+    incident_id = create_incident(client, auth_headers)
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/nope/timeline", headers=auth_headers
+    )
+    assert resp.status_code == 404
+
+
+def test_timeline_endpoint_requires_auth(client: TestClient):
+    resp = client.get("/api/incidents/x/analysis-runs/y/timeline")
+    assert resp.status_code == 401

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -179,3 +179,70 @@ class RunStageEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     run: Mapped[AnalysisRun] = relationship(back_populates="stage_events")
+
+
+class TimelineEvent(Base):
+    """A time-anchored event extracted from a run's normalized evidence.
+
+    Produced by the "extracting timeline candidates" stage (ADR 0026). Stores a
+    normalized UTC timestamp when one could be parsed and always preserves the
+    original timestamp text so the claim stays auditable (ADR 0019). Inferred or
+    ambiguous timestamps are flagged ``uncertain`` rather than presented as
+    equally precise.
+    """
+
+    __tablename__ = "timeline_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Stable display/sort order assigned at extraction time (chronological with
+    # normalized events first, then inferred). Distinct from the timestamp so the
+    # status page has a deterministic order even for unparseable timestamps.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    normalized_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    original_ts_text: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    uncertain: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship()
+    evidence_refs: Mapped[list["EvidenceRef"]] = relationship(
+        back_populates="timeline_event",
+        cascade="all, delete-orphan",
+        order_by="EvidenceRef.line_start",
+    )
+
+
+class EvidenceRef(Base):
+    """A relational citation to an exact Artifact line range (ADR 0024 / 0027).
+
+    EvidenceRefs point to Artifact line ranges rather than chunk ids, because
+    chunk boundaries can change across Chunking Strategy versions while line
+    addresses stay stable. The relational shape (not JSON) is what the citation
+    panel, eval aggregation, and referential integrity depend on. ``snippet`` is
+    the exact stored text of those lines so later citation-integrity
+    verification can confirm an exact match.
+    """
+
+    __tablename__ = "evidence_refs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # Nullable owner FK: timeline events cite evidence now; hypotheses, impact
+    # claims, etc. reuse this table in later slices.
+    timeline_event_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("timeline_events.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    artifact_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    line_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    line_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    snippet: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    timeline_event: Mapped["TimelineEvent"] = relationship(back_populates="evidence_refs")
+    artifact: Mapped[Artifact] = relationship()

@@ -4,7 +4,9 @@ from .analysis import (
     NoArtifactsError,
     analysis_run_read,
     run_artifact_ids,
+    timeline_event_read,
 )
+from .stages import PipelineStageRunner
 from .artifacts import (
     ArtifactLockedError,
     ArtifactNotFoundError,
@@ -29,6 +31,8 @@ __all__ = [
     "NoArtifactsError",
     "analysis_run_read",
     "run_artifact_ids",
+    "timeline_event_read",
+    "PipelineStageRunner",
     "ArtifactLockedError",
     "ArtifactNotFoundError",
     "ArtifactService",

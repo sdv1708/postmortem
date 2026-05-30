@@ -134,3 +134,31 @@ class AnalysisRunRead(BaseModel):
     updated_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+
+
+class EvidenceRefRead(BaseModel):
+    """A relational citation to exact Artifact lines (ADR 0024)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    artifact_id: str
+    source_name: str
+    line_start: int
+    line_end: int
+    snippet: str
+    confidence_score: float
+
+
+class TimelineEventRead(BaseModel):
+    """A timeline candidate with its citations (ADR 0019)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    sequence: int
+    normalized_ts: datetime | None
+    original_ts_text: str | None
+    uncertain: bool
+    description: str
+    evidence_refs: list[EvidenceRefRead]
