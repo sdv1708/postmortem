@@ -63,6 +63,12 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   // The run reaches succeeded via polling.
   await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
 
+  // Timeline candidates appear after the run, citing exact artifact lines and
+  // labeling the time-only timestamps as inferred (ADR 0019).
+  await expect(page.getByText(/Timeline candidates/)).toBeVisible();
+  await expect(page.getByText("api-errors.log:2")).toBeVisible();
+  await expect(page.getByText("inferred").first()).toBeVisible();
+
   // The included evidence is now locked: it shows the lock badge and the
   // delete control is disabled.
   await page.getByRole("button", { name: /api-errors\.log/ }).click();

@@ -16,6 +16,7 @@ import {
   type RunStageEvent,
   type RunStatus,
   type StageStatus,
+  type TimelineEvent,
 } from "@/lib/api";
 import { SeverityBadge, StatusBadge } from "../_components/badges";
 
@@ -718,7 +719,7 @@ function AnalysisRuns({
         <ul className="space-y-4">
           {runs.map((run) => (
             <li key={run.id}>
-              <RunStatusCard run={run} />
+              <RunStatusCard incidentId={incidentId} run={run} />
             </li>
           ))}
         </ul>
@@ -727,7 +728,7 @@ function AnalysisRuns({
   );
 }
 
-function RunStatusCard({ run }: { run: AnalysisRun }) {
+function RunStatusCard({ incidentId, run }: { incidentId: string; run: AnalysisRun }) {
   const eventsByStage = new Map<RunStage, RunStageEvent>();
   // Keep the highest-sequence event per stage so a retried stage shows its
   // final attempt regardless of the array's delivery order.
@@ -796,6 +797,76 @@ function RunStatusCard({ run }: { run: AnalysisRun }) {
             </li>
           );
         })}
+      </ol>
+
+      {run.status === "succeeded" && <RunTimeline incidentId={incidentId} runId={run.id} />}
+    </div>
+  );
+}
+
+function RunTimeline({ incidentId, runId }: { incidentId: string; runId: string }) {
+  const timelineQuery = useQuery<TimelineEvent[]>({
+    queryKey: ["run-timeline", incidentId, runId],
+    queryFn: () => api.listRunTimeline(incidentId, runId),
+  });
+
+  if (timelineQuery.isPending) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        <Spinner /> Loading timeline…
+      </div>
+    );
+  }
+
+  if (timelineQuery.isError) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-rose-600">
+        Timeline candidates could not be loaded.
+      </div>
+    );
+  }
+
+  const events = timelineQuery.data ?? [];
+  if (events.length === 0) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        No timeline candidates: the included evidence had no recognizable timestamps.
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-slate-200">
+      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+        Timeline candidates · {events.length}
+      </p>
+      <ol className="divide-y divide-slate-100 px-2 py-1">
+        {events.map((event) => (
+          <li key={event.id} className="flex items-start gap-3 px-3 py-2.5">
+            <span className="mt-0.5 w-40 shrink-0 text-xs tabular-nums text-slate-500">
+              {event.normalized_ts
+                ? new Date(event.normalized_ts).toISOString().replace(".000Z", "Z")
+                : event.original_ts_text ?? "—"}
+              {event.uncertain && (
+                <span className="ml-1.5 badge bg-amber-50 text-amber-700 ring-amber-200">
+                  inferred
+                </span>
+              )}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-slate-800">{event.description}</p>
+              {event.evidence_refs.map((ref) => (
+                <p key={ref.id} className="mt-0.5 truncate text-xs text-slate-500">
+                  <span className="font-medium text-slate-600">
+                    {ref.source_name}:{ref.line_start}
+                    {ref.line_end !== ref.line_start ? `-${ref.line_end}` : ""}
+                  </span>{" "}
+                  <span className="font-mono">{ref.snippet}</span>
+                </p>
+              ))}
+            </div>
+          </li>
+        ))}
       </ol>
     </div>
   );

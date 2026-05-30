@@ -4,7 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..auth import require_user
-from ..schemas import AnalysisRunCreate, AnalysisRunRead
+from ..schemas import AnalysisRunCreate, AnalysisRunRead, TimelineEventRead
 from ..services import (
     AnalysisRunNotFoundError,
     AnalysisService,
@@ -12,6 +12,7 @@ from ..services import (
     IncidentNotFoundError,
     NoArtifactsError,
     analysis_run_read,
+    timeline_event_read,
 )
 from .deps import get_db
 
@@ -96,3 +97,17 @@ def get_analysis_run(
     except AnalysisRunNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
     return AnalysisRunRead.model_validate(analysis_run_read(run))
+
+
+@router.get("/{run_id}/timeline", response_model=list[TimelineEventRead])
+def list_run_timeline(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> list[TimelineEventRead]:
+    """Sorted Timeline Events for a run, each citing exact Artifact lines."""
+    try:
+        events = AnalysisService(db).list_timeline(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    return [TimelineEventRead.model_validate(timeline_event_read(event)) for event in events]

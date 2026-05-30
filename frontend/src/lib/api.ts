@@ -117,6 +117,26 @@ export function isTerminalRunStatus(status: RunStatus): boolean {
   return status === "succeeded" || status === "failed";
 }
 
+export interface EvidenceRef {
+  id: string;
+  artifact_id: string;
+  source_name: string;
+  line_start: number;
+  line_end: number;
+  snippet: string;
+  confidence_score: number;
+}
+
+export interface TimelineEvent {
+  id: string;
+  sequence: number;
+  normalized_ts: string | null;
+  original_ts_text: string | null;
+  uncertain: boolean;
+  description: string;
+  evidence_refs: EvidenceRef[];
+}
+
 export interface IncidentCreate {
   title: string;
   summary?: string | null;
@@ -219,6 +239,12 @@ export const api = {
   getAnalysisRun(incidentId: string, runId: string): Promise<AnalysisRun> {
     return request<AnalysisRun>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}`,
+    );
+  },
+
+  listRunTimeline(incidentId: string, runId: string): Promise<TimelineEvent[]> {
+    return request<TimelineEvent[]>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/timeline`,
     );
   },
 

@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..chunking import CHUNKING_STRATEGY_VERSION
 from ..config import DEFAULT_EXPERIMENT_METADATA
-from ..models import AnalysisRun, Artifact, RunArtifact
+from ..models import AnalysisRun, Artifact, RunArtifact, TimelineEvent
 from ..schemas import AnalysisRunCreate
 from .artifacts import ArtifactNotFoundError
 from .incidents import IncidentService
 from .run_executor import RunExecutor, StagedRunExecutor, StageRecorder
+from .stages import PipelineStageRunner
 
 
 class AnalysisRunNotFoundError(LookupError):
@@ -41,7 +43,12 @@ class AnalysisService:
 
     def __init__(self, session: Session, executor: RunExecutor | None = None) -> None:
         self._session = session
-        self._executor = executor or StagedRunExecutor()
+        # Default to the real six-stage pipeline whose deterministic stage work
+        # (chunking + timeline extraction) reads and writes through this session
+        # (ADR 0026). Tests inject their own executor to exercise edge cases.
+        self._executor = executor or StagedRunExecutor(
+            stage_runner=PipelineStageRunner(session)
+        )
 
     def start_run(
         self,
@@ -56,7 +63,7 @@ class AnalysisService:
         run = AnalysisRun(
             incident_id=incident_id,
             status="queued",
-            **DEFAULT_EXPERIMENT_METADATA,
+            **{**DEFAULT_EXPERIMENT_METADATA, "chunking_strategy": CHUNKING_STRATEGY_VERSION},
         )
         self._session.add(run)
         self._session.flush()
@@ -94,6 +101,20 @@ class AnalysisService:
             select(AnalysisRun)
             .where(AnalysisRun.incident_id == incident_id)
             .order_by(AnalysisRun.created_at.desc())
+        )
+        return list(self._session.scalars(stmt))
+
+    def list_timeline(self, incident_id: str, run_id: str) -> list[TimelineEvent]:
+        """Sorted Timeline Events for a run, with their EvidenceRefs (ADR 0019).
+
+        Validates the run belongs to the incident first so the endpoint cannot
+        leak another incident's timeline.
+        """
+        self.get_run(incident_id, run_id)
+        stmt = (
+            select(TimelineEvent)
+            .where(TimelineEvent.run_id == run_id)
+            .order_by(TimelineEvent.sequence.asc())
         )
         return list(self._session.scalars(stmt))
 
@@ -147,6 +168,26 @@ class AnalysisService:
 
 def run_artifact_ids(run: AnalysisRun) -> list[str]:
     return [ref.artifact_id for ref in run.run_artifacts]
+
+
+def timeline_event_read(event: TimelineEvent) -> dict:
+    """Shape a TimelineEvent (with EvidenceRefs) for TimelineEventRead.
+
+    ``normalized_ts`` is stored naive UTC (see stages._as_naive_utc); re-attach
+    the UTC tz on the way out so the API emits an unambiguous ``...Z`` instant.
+    """
+    normalized = event.normalized_ts
+    if normalized is not None and normalized.tzinfo is None:
+        normalized = normalized.replace(tzinfo=timezone.utc)
+    return {
+        "id": event.id,
+        "sequence": event.sequence,
+        "normalized_ts": normalized,
+        "original_ts_text": event.original_ts_text,
+        "uncertain": event.uncertain,
+        "description": event.description,
+        "evidence_refs": list(event.evidence_refs),
+    }
 
 
 def analysis_run_read(run: AnalysisRun) -> dict:
