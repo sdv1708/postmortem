@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from postmortem.api.analysis_runs import execute_analysis_run_background
+
 
 def create_incident(client: TestClient, auth_headers) -> str:
     resp = client.post("/api/incidents", json={"title": "Run test incident"}, headers=auth_headers)
@@ -134,3 +136,102 @@ def test_unknown_run_returns_404(client: TestClient, auth_headers):
 def test_analysis_runs_require_auth(client: TestClient):
     resp = client.get("/api/incidents/whatever/analysis-runs")
     assert resp.status_code == 401
+
+
+def test_run_status_exposes_six_ordered_stage_events(client: TestClient, auth_headers):
+    incident_id = create_incident(client, auth_headers)
+    add_artifact(client, auth_headers, incident_id)
+
+    run = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()
+
+    status_resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}", headers=auth_headers
+    )
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    stages = [event["stage"] for event in body["stage_events"]]
+    assert stages == [
+        "normalizing_evidence",
+        "extracting_timeline_candidates",
+        "generating_rca_hypotheses",
+        "verifying_citations",
+        "drafting_postmortem",
+        "flagging_unsupported_claims",
+    ]
+    assert all(event["status"] == "succeeded" for event in body["stage_events"])
+    assert all(event["duration_ms"] is not None for event in body["stage_events"])
+    # Usage stays null until an LLM is wired in (#7); the field exists now.
+    assert all(event["usage"] is None for event in body["stage_events"])
+
+
+def test_run_status_is_terminal_and_pollable_after_start(client: TestClient, auth_headers):
+    # The MVP executor runs synchronously, so the very first poll already shows
+    # the terminal succeeded state with all six stage events persisted. The
+    # contract the UI polls against (status + stage_events) is what we assert.
+    incident_id = create_incident(client, auth_headers)
+    add_artifact(client, auth_headers, incident_id)
+    run = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()
+
+    first_poll = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}", headers=auth_headers
+    ).json()
+    second_poll = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run['id']}", headers=auth_headers
+    ).json()
+
+    assert first_poll["status"] == "succeeded"
+    assert len(first_poll["stage_events"]) == 6
+    # Polling is idempotent: repeated reads return stable terminal state.
+    assert second_poll["status"] == "succeeded"
+    assert second_poll["stage_events"] == first_poll["stage_events"]
+
+
+def test_start_run_returns_queued_state_before_background_execution(
+    app, client: TestClient, auth_headers
+):
+    scheduled: list[tuple[object, str]] = []
+
+    def capture_background_task(background_tasks, session_factory, run_id):
+        scheduled.append((session_factory, run_id))
+
+    app.state.run_scheduler = capture_background_task
+
+    incident_id = create_incident(client, auth_headers)
+    artifact_id = add_artifact(client, auth_headers, incident_id)
+
+    start = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    )
+
+    assert start.status_code == 201, start.text
+    queued = start.json()
+    assert queued["status"] == "queued"
+    assert queued["artifact_ids"] == [artifact_id]
+    assert queued["stage_events"] == []
+    assert len(scheduled) == 1
+
+    first_poll = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{queued['id']}", headers=auth_headers
+    ).json()
+    assert first_poll["status"] == "queued"
+    assert first_poll["stage_events"] == []
+
+    session_factory, run_id = scheduled[0]
+    execute_analysis_run_background(session_factory, run_id)
+
+    terminal = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{queued['id']}", headers=auth_headers
+    ).json()
+    assert terminal["status"] == "succeeded"
+    assert [event["stage"] for event in terminal["stage_events"]] == [
+        "normalizing_evidence",
+        "extracting_timeline_candidates",
+        "generating_rca_hypotheses",
+        "verifying_citations",
+        "drafting_postmortem",
+        "flagging_unsupported_claims",
+    ]

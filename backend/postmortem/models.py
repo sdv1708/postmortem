@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -112,6 +112,9 @@ class AnalysisRun(Base):
     run_artifacts: Mapped[list["RunArtifact"]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="RunArtifact.created_at"
     )
+    stage_events: Mapped[list["RunStageEvent"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="RunStageEvent.sequence"
+    )
 
 
 class RunArtifact(Base):
@@ -134,3 +137,45 @@ class RunArtifact(Base):
 
     run: Mapped[AnalysisRun] = relationship(back_populates="run_artifacts")
     artifact: Mapped[Artifact] = relationship()
+
+
+class RunStageEvent(Base):
+    """A persisted Run Stage Event for run-centric observability (ADR 0021).
+
+    The RunExecutor persists one event per stage attempt before moving to the
+    next stage (ADR 0026), so the status page and evaluation harness can observe
+    progress, durations, retries, and Warning Codes by polling. Heavy debug
+    context (full prompts, raw responses, stack traces) belongs in logs keyed by
+    run_id, not in this table.
+    """
+
+    __tablename__ = "run_stage_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Position in the six-stage pipeline (1-based), used as the stable sort key
+    # for the status page even before timestamps differ.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Which attempt produced this event: 1 = first try, 2 = the single retry
+    # allowed by ADR 0029.
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Model/token usage when available (ADR 0021). Null until an LLM is wired
+    # into the pipeline (#7); the contract exists now so events are uniform.
+    usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Controlled Warning Codes such as `uncited_claim` (ADR 0021). Stored as a
+    # JSON list; empty list means no warnings.
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="stage_events")

@@ -42,11 +42,26 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Analysis runs", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Postmortem" })).toBeVisible();
 
-  // Start an async analysis run over the current evidence and see its status.
+  // Start an async analysis run and watch the six-stage status page. The UI
+  // polls run status (no streaming) until the run reaches a terminal state.
   await expect(page.getByRole("heading", { name: "No analysis runs yet" })).toBeVisible();
   await page.getByRole("button", { name: "Start analysis run" }).click();
-  await expect(page.getByText("succeeded")).toBeVisible();
   await expect(page.getByRole("heading", { name: "No analysis runs yet" })).toBeHidden();
+
+  // All six MVP stages render in order.
+  for (const stage of [
+    "Normalizing evidence",
+    "Extracting timeline candidates",
+    "Generating RCA hypotheses",
+    "Verifying citations",
+    "Drafting postmortem",
+    "Flagging unsupported claims",
+  ]) {
+    await expect(page.getByText(stage, { exact: true })).toBeVisible();
+  }
+
+  // The run reaches succeeded via polling.
+  await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
 
   // The included evidence is now locked: it shows the lock badge and the
   // delete control is disabled.

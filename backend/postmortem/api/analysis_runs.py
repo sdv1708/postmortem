@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session, sessionmaker
 
 from ..auth import require_user
 from ..schemas import AnalysisRunCreate, AnalysisRunRead
@@ -23,9 +23,33 @@ router = APIRouter(
 )
 
 
+def execute_analysis_run_background(session_factory: sessionmaker[Session], run_id: str) -> None:
+    session = session_factory()
+    try:
+        AnalysisService(session).execute_run(run_id, commit_progress=True)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def schedule_analysis_run(
+    background_tasks: BackgroundTasks,
+    session_factory: sessionmaker[Session],
+    run_id: str,
+) -> None:
+    background_tasks.add_task(execute_analysis_run_background, session_factory, run_id)
+
+
 @router.post("", response_model=AnalysisRunRead, status_code=status.HTTP_201_CREATED)
 def start_analysis_run(
-    incident_id: str, payload: AnalysisRunCreate, db: Session = Depends(get_db)
+    incident_id: str,
+    payload: AnalysisRunCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
 ) -> AnalysisRunRead:
     """Command endpoint that starts an Analysis Run (ADR 0022).
 
@@ -33,7 +57,13 @@ def start_analysis_run(
     rather than streaming (ADR 0003).
     """
     try:
-        run = AnalysisService(db).start_run(incident_id, payload)
+        run = AnalysisService(db).start_run(incident_id, payload, execute_inline=False)
+        # Commit the queued run and locked Artifact state before scheduling work
+        # in a fresh session. External pollers can then observe queued/running
+        # and stage-event transitions instead of waiting for the POST transaction.
+        db.commit()
+        scheduler = getattr(request.app.state, "run_scheduler", schedule_analysis_run)
+        scheduler(background_tasks, request.app.state.session_factory, run.id)
     except IncidentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     except ArtifactNotFoundError:

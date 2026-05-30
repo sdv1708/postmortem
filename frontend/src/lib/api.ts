@@ -22,6 +22,28 @@ export type ArtifactSourceType =
 
 export type RunStatus = "queued" | "running" | "succeeded" | "failed";
 
+export type RunStage =
+  | "normalizing_evidence"
+  | "extracting_timeline_candidates"
+  | "generating_rca_hypotheses"
+  | "verifying_citations"
+  | "drafting_postmortem"
+  | "flagging_unsupported_claims";
+
+export type StageStatus = "running" | "succeeded" | "failed";
+
+// The six MVP stages in order, with status-page labels (ADR 0026 / 0005). The
+// UI renders all six up front so the pipeline is legible even before a run has
+// produced an event for a later stage.
+export const RUN_STAGES: ReadonlyArray<{ stage: RunStage; label: string }> = [
+  { stage: "normalizing_evidence", label: "Normalizing evidence" },
+  { stage: "extracting_timeline_candidates", label: "Extracting timeline candidates" },
+  { stage: "generating_rca_hypotheses", label: "Generating RCA hypotheses" },
+  { stage: "verifying_citations", label: "Verifying citations" },
+  { stage: "drafting_postmortem", label: "Drafting postmortem" },
+  { stage: "flagging_unsupported_claims", label: "Flagging unsupported claims" },
+];
+
 export interface Incident {
   id: string;
   workspace_id: string;
@@ -63,6 +85,20 @@ export interface ExperimentMetadata {
   verifier_version: string;
 }
 
+export interface RunStageEvent {
+  id: string;
+  sequence: number;
+  stage: RunStage;
+  status: StageStatus;
+  attempt: number;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  usage: Record<string, unknown> | null;
+  warning_codes: string[];
+  error: string | null;
+}
+
 export interface AnalysisRun {
   id: string;
   incident_id: string;
@@ -70,10 +106,15 @@ export interface AnalysisRun {
   error: string | null;
   experiment_metadata: ExperimentMetadata;
   artifact_ids: string[];
+  stage_events: RunStageEvent[];
   created_at: string;
   updated_at: string;
   started_at: string | null;
   completed_at: string | null;
+}
+
+export function isTerminalRunStatus(status: RunStatus): boolean {
+  return status === "succeeded" || status === "failed";
 }
 
 export interface IncidentCreate {

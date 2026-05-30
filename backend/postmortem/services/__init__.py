@@ -14,7 +14,13 @@ from .artifacts import (
     canonicalize_body,
 )
 from .incidents import IncidentService, IncidentNotFoundError
-from .run_executor import PlaceholderRunExecutor, RunExecutor
+from .run_executor import (
+    PlaceholderRunExecutor,
+    RunExecutor,
+    StageFailedError,
+    StagedRunExecutor,
+    StageRecorder,
+)
 from .workspaces import ensure_default_workspace
 
 __all__ = [
@@ -33,5 +39,8 @@ __all__ = [
     "IncidentNotFoundError",
     "PlaceholderRunExecutor",
     "RunExecutor",
+    "StageFailedError",
+    "StagedRunExecutor",
+    "StageRecorder",
     "ensure_default_workspace",
 ]
