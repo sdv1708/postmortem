@@ -19,3 +19,6 @@
   with empty output. Run the suite in the foreground and, if a run is
   interrupted, `pkill -9 -f next-server` (and uvicorn) before retrying. Confirm
   ports are free first.
+- Treat incident lifecycle and evidence locking as separate concerns. Locking an
+  artifact preserves run citations; it does not answer whether an entire
+  incident should be archived or deleted from the workspace dashboard.

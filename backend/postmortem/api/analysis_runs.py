@@ -38,9 +38,8 @@ def execute_analysis_run_background(
     session_factory: sessionmaker[Session], run_id: str, settings: Settings | None = None
 ) -> None:
     # The RCA stage runs in this fresh background session, so build the configured
-    # generation provider here (ADR 0011). Settings default to the environment so
-    # the unchanged 2-arg call site (and tests) resolve the offline client when no
-    # provider is configured.
+    # generation provider here (ADR 0011). The optional fallback keeps direct
+    # invocations compatible with the offline environment default.
     settings = settings or Settings.from_env()
     client = build_llm_client(settings)
     session = session_factory()
@@ -58,8 +57,9 @@ def schedule_analysis_run(
     background_tasks: BackgroundTasks,
     session_factory: sessionmaker[Session],
     run_id: str,
+    settings: Settings,
 ) -> None:
-    background_tasks.add_task(execute_analysis_run_background, session_factory, run_id)
+    background_tasks.add_task(execute_analysis_run_background, session_factory, run_id, settings)
 
 
 @router.post("", response_model=AnalysisRunRead, status_code=status.HTTP_201_CREATED)
@@ -87,8 +87,16 @@ def start_analysis_run(
         # in a fresh session. External pollers can then observe queued/running
         # and stage-event transitions instead of waiting for the POST transaction.
         db.commit()
-        scheduler = getattr(request.app.state, "run_scheduler", schedule_analysis_run)
-        scheduler(background_tasks, request.app.state.session_factory, run.id)
+        scheduler = getattr(request.app.state, "run_scheduler", None)
+        if scheduler is None:
+            schedule_analysis_run(
+                background_tasks,
+                request.app.state.session_factory,
+                run.id,
+                request.app.state.settings,
+            )
+        else:
+            scheduler(background_tasks, request.app.state.session_factory, run.id)
     except IncidentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     except ArtifactNotFoundError:

@@ -168,6 +168,35 @@ def test_schema_invalid_output_fails_stage_without_corrupting_prior_outputs(fres
     assert event.attempt == 2
 
 
+def test_unknown_output_field_fails_stage(fresh_session):
+    incident = _incident(fresh_session)
+    artifact = _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    typo_field = json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "title": "Typo in structured output",
+                    "summary": "The model used an unknown evidence field.",
+                    "supporting_evidnce": [
+                        {"artifact_id": artifact.id, "line_start": 1, "line_end": 1}
+                    ],
+                }
+            ]
+        }
+    )
+    fake = FakeLLMClient(lambda system, user: typo_field)
+    run = AnalysisService(fresh_session, llm_client=fake).start_run(
+        incident.id, AnalysisRunCreate()
+    )
+    fresh_session.commit()
+
+    assert run.status == "failed"
+    assert _hypotheses(fresh_session, run.id) == []
+    assert _rca_event(fresh_session, run.id).attempt == 2
+
+
 def test_uncited_hypothesis_normalized_to_assumption_with_warning(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
@@ -209,7 +238,7 @@ def test_uncited_hypothesis_normalized_to_assumption_with_warning(fresh_session)
     assert artifact.body == AMBIGUOUS_BODY
 
 
-def test_out_of_range_citation_is_dropped(fresh_session):
+def test_out_of_range_citation_fails_stage(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
     fresh_session.commit()
@@ -229,20 +258,47 @@ def test_out_of_range_citation_is_dropped(fresh_session):
             ]
         }
     )
-    fake = FakeLLMClient([bad_ref])
+    fake = FakeLLMClient(lambda system, user: bad_ref)
     run = AnalysisService(fresh_session, llm_client=fake).start_run(
         incident.id, AnalysisRunCreate()
     )
     fresh_session.commit()
 
-    hyp = _hypotheses(fresh_session, run.id)[0]
-    refs = [r for r in hyp.evidence_refs if r.role == "supporting"]
-    # Only the in-range, in-run citation survives; the others are dropped so a
-    # citation never points outside the locked evidence.
-    assert len(refs) == 1
-    assert refs[0].line_start == 1
-    # It still has one valid citation, so it is not an assumption.
-    assert hyp.assumption is False
+    assert run.status == "failed"
+    assert _hypotheses(fresh_session, run.id) == []
+    event = _rca_event(fresh_session, run.id)
+    assert event.status == "failed"
+    assert event.attempt == 2
+    assert event.error == "RCA output cited an invalid artifact line range"
+
+
+def test_foreign_artifact_citation_fails_stage(fresh_session):
+    incident = _incident(fresh_session)
+    _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    foreign_ref = json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "title": "Cites another run's artifact",
+                    "summary": "Model hallucinated an artifact id.",
+                    "supporting_evidence": [
+                        {"artifact_id": "nonexistent", "line_start": 1, "line_end": 1}
+                    ],
+                }
+            ]
+        }
+    )
+    fake = FakeLLMClient(lambda system, user: foreign_ref)
+    run = AnalysisService(fresh_session, llm_client=fake).start_run(
+        incident.id, AnalysisRunCreate()
+    )
+    fresh_session.commit()
+
+    assert run.status == "failed"
+    assert _hypotheses(fresh_session, run.id) == []
+    assert _rca_event(fresh_session, run.id).error == "RCA output cited an artifact outside this run"
 
 
 def test_offline_default_produces_no_hypotheses_but_run_succeeds(fresh_session):

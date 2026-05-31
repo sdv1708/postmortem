@@ -259,29 +259,24 @@ class PipelineStageRunner:
     def _resolve_refs(
         self, by_id: dict[str, Artifact], refs: list[RcaEvidenceRef], role: str
     ) -> list[EvidenceRef]:
-        resolved: list[EvidenceRef] = []
-        for ref in refs:
-            evidence_ref = self._resolve_ref(by_id, ref, role)
-            if evidence_ref is not None:
-                resolved.append(evidence_ref)
-        return resolved
+        return [self._resolve_ref(by_id, ref, role) for ref in refs]
 
     def _resolve_ref(
         self, by_id: dict[str, Artifact], ref: RcaEvidenceRef, role: str
-    ) -> EvidenceRef | None:
+    ) -> EvidenceRef:
         """Turn a model-cited line range into a citation with an exact snippet.
 
         The snippet is read from the stored Artifact lines, never from the model,
         so the citation remains the source of truth (ADR 0024). A ref to an
-        artifact outside the run or to out-of-range lines is dropped here;
-        deterministic citation-integrity verification arrives in a later slice.
+        artifact outside the run or to out-of-range lines is rejected here so
+        invalid model output cannot disappear from the auditable run result.
         """
         artifact = by_id.get(ref.artifact_id)
         if artifact is None:
-            return None
+            raise ValueError("RCA output cited an artifact outside this run")
         lines = artifact.body.split("\n")
         if ref.line_start < 1 or ref.line_end < ref.line_start or ref.line_end > len(lines):
-            return None
+            raise ValueError("RCA output cited an invalid artifact line range")
         snippet = "\n".join(lines[ref.line_start - 1 : ref.line_end])
         return EvidenceRef(
             artifact_id=artifact.id,

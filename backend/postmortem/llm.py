@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Protocol, runtime_checkable
@@ -122,13 +123,14 @@ class OpenAICompatibleLLMClient:
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._provider = urllib.parse.urlsplit(self._base_url).netloc or self._base_url
         self._api_key = api_key
         self._model = model
         self._timeout = timeout
 
     @property
     def label(self) -> str:
-        return self._model
+        return f"openai-compatible:{self._provider}:{self._model}"
 
     def complete(self, *, system: str, user: str) -> LLMResponse:
         payload = {
@@ -156,8 +158,7 @@ class OpenAICompatibleLLMClient:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:  # non-2xx
-            detail = exc.read().decode("utf-8", "replace")
-            raise LLMError(f"provider returned HTTP {exc.code}: {detail}") from exc
+            raise LLMError(f"provider returned HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise LLMError(f"provider request failed: {exc}") from exc
         except json.JSONDecodeError as exc:
@@ -166,7 +167,7 @@ class OpenAICompatibleLLMClient:
         try:
             text = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"provider envelope missing completion text: {body}") from exc
+            raise LLMError("provider envelope missing completion text") from exc
         return LLMResponse(text=text, usage=body.get("usage"))
 
 

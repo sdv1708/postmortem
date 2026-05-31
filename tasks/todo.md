@@ -124,3 +124,45 @@ Stage 3 (`generating_rca_hypotheses`) is now real and end-to-end.
   to keep the existing scheduler-override test's 3-arg signature intact.
 - `ImpactClaim` and `ActionItem` both carry a `hypothesis_id` (user decision:
   per-hypothesis ownership for both).
+
+## Review Fix Plan
+
+Apply only the concrete review findings. No pipeline redesign.
+
+- [x] Add a minimal schema-compatibility upgrade for issue-6-era databases so
+  the existing `evidence_refs` table receives the new nullable owner columns and
+  `role` column before ORM queries run. Add a regression that starts from the old
+  table shape.
+- [x] Thread the app's configured LLM settings into the default background task
+  so queued-run metadata and execution always describe the same provider/model.
+  Preserve the existing scheduler override test hook.
+- [x] Make RCA Pydantic output models reject unknown keys (`extra="forbid"`) so
+  typo fields fail the stage per ADR 0028.
+- [x] Reject foreign-artifact and out-of-range model citations instead of
+  silently dropping them, so invalid refs fail stage 3 and prior stage outputs
+  remain inspectable.
+- [x] Make Review Surface citation rows focus the cited artifact and highlight
+  its exact line range in the existing Evidence panel.
+- [x] Record provider identity alongside model name in run experiment metadata,
+  without introducing a provider picker or provider-matrix abstraction.
+- [x] Sanitize provider exceptions persisted in Run Stage Events; keep raw
+  provider response bodies out of structured event state.
+- [x] Add focused regressions for each fix, run targeted backend tests, full
+  backend pytest, frontend typecheck/build, and the existing end-to-end suite.
+
+## Review Fix Verification
+
+- Focused backend regression suite: 36 passed.
+- Full backend suite: 109 passed.
+- Frontend: `npm run typecheck` and `npm run build` passed.
+- Browser regression: `npm run e2e` passed (2 tests), including timeline
+  citation click -> exact line highlight.
+- Hygiene: `git diff --check` passed; local e2e services and generated output
+  were removed after the run.
+
+## Deferred Backlog
+
+- [ ] After all planned slices are complete, define and implement incident-level
+  removal from the workspace dashboard. Decide explicitly between archiving
+  analyzed incidents and hard-deleting the full incident aggregate. Individual
+  evidence locked into an analysis run must remain protected.

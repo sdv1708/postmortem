@@ -168,8 +168,8 @@ def test_build_llm_client_is_provider_agnostic():
     )
     assert isinstance(offline, OfflineLLMClient)
 
-    # Switching provider/model is config-only: the label follows the model name,
-    # so Experiment Metadata reflects the swap without any code change.
+    # Switching provider/model is config-only: the label captures both endpoint
+    # identity and model so Experiment Metadata distinguishes provider swaps.
     configured = build_llm_client(
         Settings(
             database_url="sqlite://",
@@ -182,4 +182,4 @@ def test_build_llm_client_is_provider_agnostic():
         )
     )
     assert isinstance(configured, OpenAICompatibleLLMClient)
-    assert configured.label == "some-other-model"
+    assert configured.label == "openai-compatible:example.test:some-other-model"

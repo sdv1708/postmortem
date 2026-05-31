@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Versioned prompt identity recorded in Experiment Metadata (ADR 0025). Bump when
 # the prompt or the expected output contract changes so runs stay comparable.
@@ -18,24 +18,28 @@ PROMPT_VERSION: Final[str] = "rca-1"
 # from the stored lines, so the model is not trusted to reproduce snippet text.
 
 
-class RcaEvidenceRef(BaseModel):
+class StrictRcaModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RcaEvidenceRef(StrictRcaModel):
     artifact_id: str
     line_start: int = Field(ge=1)
     line_end: int = Field(ge=1)
     confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
-class RcaImpactClaim(BaseModel):
+class RcaImpactClaim(StrictRcaModel):
     description: str = Field(min_length=1)
     evidence: list[RcaEvidenceRef] = Field(default_factory=list)
 
 
-class RcaRemediationItem(BaseModel):
+class RcaRemediationItem(StrictRcaModel):
     description: str = Field(min_length=1)
     evidence: list[RcaEvidenceRef] = Field(default_factory=list)
 
 
-class RcaHypothesis(BaseModel):
+class RcaHypothesis(StrictRcaModel):
     title: str = Field(min_length=1)
     summary: str = Field(min_length=1)
     supporting_evidence: list[RcaEvidenceRef] = Field(default_factory=list)
@@ -46,7 +50,7 @@ class RcaHypothesis(BaseModel):
     remediation_items: list[RcaRemediationItem] = Field(default_factory=list)
 
 
-class RcaGenerationOutput(BaseModel):
+class RcaGenerationOutput(StrictRcaModel):
     """Top-level RCA stage output: ranked hypotheses (highest support first)."""
 
     hypotheses: list[RcaHypothesis]
