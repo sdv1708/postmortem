@@ -11,6 +11,9 @@ import {
   type AnalysisRun,
   type Artifact,
   type ArtifactSourceType,
+  type EvidenceRef,
+  type Hypothesis,
+  type HypothesisReviewStatus,
   type Incident,
   type RunStage,
   type RunStageEvent,
@@ -224,8 +227,8 @@ export default function IncidentOverviewPage() {
 
       <Section title="Postmortem" description="Drafted from evidence with line-level citations.">
         <Placeholder
-          tag="Coming in slices 6–9"
-          body="Drafted postmortems with cited claims arrive in #7, #8, #9, #10."
+          tag="Coming in slices 8–10"
+          body="Verified citations and drafted postmortems arrive in #8, #9, #10."
         />
       </Section>
     </div>
@@ -800,8 +803,234 @@ function RunStatusCard({ incidentId, run }: { incidentId: string; run: AnalysisR
       </ol>
 
       {run.status === "succeeded" && <RunTimeline incidentId={incidentId} runId={run.id} />}
+      {run.status === "succeeded" && <RunHypotheses incidentId={incidentId} runId={run.id} />}
     </div>
   );
+}
+
+function RunHypotheses({ incidentId, runId }: { incidentId: string; runId: string }) {
+  const queryClient = useQueryClient();
+  const hypothesesKey = ["run-hypotheses", incidentId, runId];
+  const hypothesesQuery = useQuery<Hypothesis[]>({
+    queryKey: hypothesesKey,
+    queryFn: () => api.listRunHypotheses(incidentId, runId),
+  });
+
+  const reviewMutation = useMutation({
+    mutationFn: ({
+      hypothesisId,
+      decision,
+    }: {
+      hypothesisId: string;
+      decision: HypothesisReviewStatus;
+    }) => api.reviewHypothesis(incidentId, runId, hypothesisId, decision),
+    onSuccess: (updated) => {
+      // The accept/reject decision never rewrites claims (ADR 0016); patch only
+      // the reviewed hypothesis's status into the cached list.
+      queryClient.setQueryData<Hypothesis[]>(hypothesesKey, (current) =>
+        current?.map((h) => (h.id === updated.id ? updated : h)),
+      );
+    },
+  });
+
+  if (hypothesesQuery.isPending) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        <Spinner /> Loading hypotheses…
+      </div>
+    );
+  }
+
+  if (hypothesesQuery.isError) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-rose-600">
+        Hypotheses could not be loaded.
+      </div>
+    );
+  }
+
+  const hypotheses = hypothesesQuery.data ?? [];
+  if (hypotheses.length === 0) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        No RCA hypotheses: the configured model returned none for this evidence.
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-slate-200">
+      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+        RCA hypotheses · {hypotheses.length}
+      </p>
+      <ol className="space-y-4 p-5">
+        {hypotheses.map((hypothesis) => (
+          <li key={hypothesis.id}>
+            <HypothesisCard
+              hypothesis={hypothesis}
+              onReview={(decision) =>
+                reviewMutation.mutate({ hypothesisId: hypothesis.id, decision })
+              }
+              isReviewing={
+                reviewMutation.isPending &&
+                reviewMutation.variables?.hypothesisId === hypothesis.id
+              }
+            />
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function HypothesisCard({
+  hypothesis,
+  onReview,
+  isReviewing,
+}: {
+  hypothesis: Hypothesis;
+  onReview: (decision: HypothesisReviewStatus) => void;
+  isReviewing: boolean;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold tabular-nums text-slate-600">
+            {hypothesis.rank}
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h4 className="text-sm font-semibold text-slate-900">{hypothesis.title}</h4>
+              {hypothesis.assumption && (
+                <span className="badge bg-amber-50 text-amber-700 ring-amber-200">assumption</span>
+              )}
+              <ReviewStatusBadge status={hypothesis.review_status} />
+            </div>
+            <p className="mt-1 text-sm leading-relaxed text-slate-700">{hypothesis.summary}</p>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onReview("accepted")}
+            disabled={isReviewing || hypothesis.review_status === "accepted"}
+            className="button-secondary"
+          >
+            Accept
+          </button>
+          <button
+            type="button"
+            onClick={() => onReview("rejected")}
+            disabled={isReviewing || hypothesis.review_status === "rejected"}
+            className="button-secondary"
+          >
+            Reject
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-4 px-4 py-3">
+        {hypothesis.supporting_evidence.length > 0 && (
+          <EvidenceGroup label="Supporting evidence" refs={hypothesis.supporting_evidence} />
+        )}
+        {hypothesis.contradicting_evidence.length > 0 && (
+          <EvidenceGroup label="Contradicting evidence" refs={hypothesis.contradicting_evidence} />
+        )}
+
+        {hypothesis.impact_claims.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="label">Impact</p>
+            <ul className="space-y-2">
+              {hypothesis.impact_claims.map((claim) => (
+                <li key={claim.id} className="text-sm text-slate-700">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span>{claim.description}</span>
+                    {claim.assumption && (
+                      <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
+                        assumption
+                      </span>
+                    )}
+                  </span>
+                  {claim.evidence_refs.length > 0 && (
+                    <EvidenceRefList refs={claim.evidence_refs} />
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {hypothesis.action_items.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="label">Remediation</p>
+            <ul className="space-y-2">
+              {hypothesis.action_items.map((item) => (
+                <li key={item.id} className="text-sm text-slate-700">
+                  <span>{item.description}</span>
+                  {item.evidence_refs.length > 0 && <EvidenceRefList refs={item.evidence_refs} />}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {hypothesis.unknowns.length > 0 && (
+          <BulletGroup label="Unknowns" items={hypothesis.unknowns} />
+        )}
+        {hypothesis.validation_steps.length > 0 && (
+          <BulletGroup label="Validation steps" items={hypothesis.validation_steps} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EvidenceGroup({ label, refs }: { label: string; refs: EvidenceRef[] }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="label">{label}</p>
+      <EvidenceRefList refs={refs} />
+    </div>
+  );
+}
+
+function EvidenceRefList({ refs }: { refs: EvidenceRef[] }) {
+  return (
+    <ul className="mt-1 space-y-1">
+      {refs.map((ref) => (
+        <li key={ref.id} className="truncate text-xs text-slate-500">
+          <span className="font-medium text-slate-600">
+            {ref.source_name}:{ref.line_start}
+            {ref.line_end !== ref.line_start ? `-${ref.line_end}` : ""}
+          </span>{" "}
+          <span className="font-mono">{ref.snippet}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function BulletGroup({ label, items }: { label: string; items: string[] }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="label">{label}</p>
+      <ul className="list-disc space-y-1 pl-5 text-sm text-slate-700">
+        {items.map((item, index) => (
+          <li key={index}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ReviewStatusBadge({ status }: { status: HypothesisReviewStatus }) {
+  const map: Record<HypothesisReviewStatus, string> = {
+    proposed: "bg-slate-100 text-slate-600 ring-slate-200",
+    accepted: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    rejected: "bg-rose-50 text-rose-700 ring-rose-200",
+  };
+  return <span className={`badge ${map[status]}`}>{status}</span>;
 }
 
 function RunTimeline({ incidentId, runId }: { incidentId: string; runId: string }) {

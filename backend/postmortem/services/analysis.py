@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from ..chunking import CHUNKING_STRATEGY_VERSION
 from ..config import DEFAULT_EXPERIMENT_METADATA
-from ..models import AnalysisRun, Artifact, RunArtifact, TimelineEvent
+from ..llm import LLMClient
+from ..models import AnalysisRun, Artifact, Hypothesis, RunArtifact, TimelineEvent
+from ..rca import PROMPT_VERSION
 from ..schemas import AnalysisRunCreate
 from .artifacts import ArtifactNotFoundError
 from .incidents import IncidentService
@@ -19,8 +21,17 @@ class AnalysisRunNotFoundError(LookupError):
     pass
 
 
+class HypothesisNotFoundError(LookupError):
+    pass
+
+
 class NoArtifactsError(ValueError):
     """Raised when a run is started with no Artifacts to analyze."""
+
+
+# Hypothesis review decisions a reviewer may record (ADR 0016). Accepting or
+# rejecting never edits the generated claims; it only sets this status.
+HYPOTHESIS_REVIEW_STATUSES: frozenset[str] = frozenset({"accepted", "rejected", "proposed"})
 
 
 def _utcnow() -> datetime:
@@ -41,13 +52,21 @@ class AnalysisService:
     progress.
     """
 
-    def __init__(self, session: Session, executor: RunExecutor | None = None) -> None:
+    def __init__(
+        self,
+        session: Session,
+        executor: RunExecutor | None = None,
+        llm_client: LLMClient | None = None,
+    ) -> None:
         self._session = session
-        # Default to the real six-stage pipeline whose deterministic stage work
-        # (chunking + timeline extraction) reads and writes through this session
-        # (ADR 0026). Tests inject their own executor to exercise edge cases.
+        self._llm_client = llm_client
+        # Default to the real six-stage pipeline whose stage work (chunking,
+        # timeline extraction, RCA generation) reads and writes through this
+        # session (ADR 0026). The RCA stage uses the injected LLMClient, or the
+        # offline default when none is configured (ADR 0011). Tests inject their
+        # own executor and/or client to exercise edge cases.
         self._executor = executor or StagedRunExecutor(
-            stage_runner=PipelineStageRunner(session)
+            stage_runner=PipelineStageRunner(session, llm_client=llm_client)
         )
 
     def start_run(
@@ -60,10 +79,18 @@ class AnalysisService:
         IncidentService(self._session).get(incident_id)
         artifacts = self._resolve_artifacts(incident_id, payload.artifact_ids)
 
+        # Record which strategies actually ran (ADR 0025): the chunking version,
+        # the RCA prompt version, and the configured model behind the LLMClient
+        # (ADR 0011). When no client is injected the model defaults stay as the
+        # offline placeholder.
+        metadata = {**DEFAULT_EXPERIMENT_METADATA, "chunking_strategy": CHUNKING_STRATEGY_VERSION}
+        if self._llm_client is not None:
+            metadata["model_provider"] = self._llm_client.label
+            metadata["prompt_version"] = PROMPT_VERSION
         run = AnalysisRun(
             incident_id=incident_id,
             status="queued",
-            **{**DEFAULT_EXPERIMENT_METADATA, "chunking_strategy": CHUNKING_STRATEGY_VERSION},
+            **metadata,
         )
         self._session.add(run)
         self._session.flush()
@@ -117,6 +144,34 @@ class AnalysisService:
             .order_by(TimelineEvent.sequence.asc())
         )
         return list(self._session.scalars(stmt))
+
+    def list_hypotheses(self, incident_id: str, run_id: str) -> list[Hypothesis]:
+        """Ranked RCA Hypotheses for a run, with their claims and citations.
+
+        Validates the run belongs to the incident first so the endpoint cannot
+        leak another incident's hypotheses.
+        """
+        self.get_run(incident_id, run_id)
+        stmt = (
+            select(Hypothesis)
+            .where(Hypothesis.run_id == run_id)
+            .order_by(Hypothesis.rank.asc())
+        )
+        return list(self._session.scalars(stmt))
+
+    def review_hypothesis(
+        self, incident_id: str, run_id: str, hypothesis_id: str, decision: str
+    ) -> Hypothesis:
+        """Record an accept/reject decision without rewriting the claim (ADR 0016)."""
+        self.get_run(incident_id, run_id)
+        hypothesis = self._session.get(Hypothesis, hypothesis_id)
+        if hypothesis is None or hypothesis.run_id != run_id:
+            raise HypothesisNotFoundError(hypothesis_id)
+        if decision not in HYPOTHESIS_REVIEW_STATUSES:
+            raise ValueError(f"invalid review decision: {decision}")
+        hypothesis.review_status = decision
+        self._session.flush()
+        return hypothesis
 
     def _resolve_artifacts(
         self, incident_id: str, artifact_ids: list[str] | None
@@ -187,6 +242,51 @@ def timeline_event_read(event: TimelineEvent) -> dict:
         "uncertain": event.uncertain,
         "description": event.description,
         "evidence_refs": list(event.evidence_refs),
+    }
+
+
+def _impact_claim_read(claim) -> dict:
+    return {
+        "id": claim.id,
+        "sequence": claim.sequence,
+        "description": claim.description,
+        "assumption": claim.assumption,
+        "evidence_refs": list(claim.evidence_refs),
+    }
+
+
+def _action_item_read(item) -> dict:
+    return {
+        "id": item.id,
+        "sequence": item.sequence,
+        "description": item.description,
+        "evidence_refs": list(item.evidence_refs),
+    }
+
+
+def hypothesis_read(hypothesis: Hypothesis) -> dict:
+    """Shape a Hypothesis (with claims/citations) for HypothesisRead.
+
+    Supporting and contradicting evidence are split by ``role`` so the Review
+    Surface can render them separately (PRD stage 3) rather than the client
+    re-deriving the split from a flat list.
+    """
+    supporting = [ref for ref in hypothesis.evidence_refs if ref.role != "contradicting"]
+    contradicting = [ref for ref in hypothesis.evidence_refs if ref.role == "contradicting"]
+    return {
+        "id": hypothesis.id,
+        "run_id": hypothesis.run_id,
+        "rank": hypothesis.rank,
+        "title": hypothesis.title,
+        "summary": hypothesis.summary,
+        "assumption": hypothesis.assumption,
+        "review_status": hypothesis.review_status,
+        "unknowns": list(hypothesis.unknowns),
+        "validation_steps": list(hypothesis.validation_steps),
+        "supporting_evidence": supporting,
+        "contradicting_evidence": contradicting,
+        "impact_claims": [_impact_claim_read(claim) for claim in hypothesis.impact_claims],
+        "action_items": [_action_item_read(item) for item in hypothesis.action_items],
     }
 
 

@@ -127,6 +127,39 @@ export interface EvidenceRef {
   confidence_score: number;
 }
 
+export type HypothesisReviewStatus = "proposed" | "accepted" | "rejected";
+
+export interface ImpactClaim {
+  id: string;
+  sequence: number;
+  description: string;
+  assumption: boolean;
+  evidence_refs: EvidenceRef[];
+}
+
+export interface ActionItem {
+  id: string;
+  sequence: number;
+  description: string;
+  evidence_refs: EvidenceRef[];
+}
+
+export interface Hypothesis {
+  id: string;
+  run_id: string;
+  rank: number;
+  title: string;
+  summary: string;
+  assumption: boolean;
+  review_status: HypothesisReviewStatus;
+  unknowns: string[];
+  validation_steps: string[];
+  supporting_evidence: EvidenceRef[];
+  contradicting_evidence: EvidenceRef[];
+  impact_claims: ImpactClaim[];
+  action_items: ActionItem[];
+}
+
 export interface TimelineEvent {
   id: string;
   sequence: number;
@@ -256,5 +289,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  },
+
+  listRunHypotheses(incidentId: string, runId: string): Promise<Hypothesis[]> {
+    return request<Hypothesis[]>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/hypotheses`,
+    );
+  },
+
+  reviewHypothesis(
+    incidentId: string,
+    runId: string,
+    hypothesisId: string,
+    decision: HypothesisReviewStatus,
+  ): Promise<Hypothesis> {
+    return request<Hypothesis>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/hypotheses/${hypothesisId}/review`,
+      { method: "POST", body: JSON.stringify({ decision }) },
+    );
   },
 };

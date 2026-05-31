@@ -1,8 +1,10 @@
 from .analysis import (
     AnalysisRunNotFoundError,
     AnalysisService,
+    HypothesisNotFoundError,
     NoArtifactsError,
     analysis_run_read,
+    hypothesis_read,
     run_artifact_ids,
     timeline_event_read,
 )
@@ -28,8 +30,10 @@ from .workspaces import ensure_default_workspace
 __all__ = [
     "AnalysisRunNotFoundError",
     "AnalysisService",
+    "HypothesisNotFoundError",
     "NoArtifactsError",
     "analysis_run_read",
+    "hypothesis_read",
     "run_artifact_ids",
     "timeline_event_read",
     "PipelineStageRunner",
