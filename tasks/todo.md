@@ -166,3 +166,16 @@ Apply only the concrete review findings. No pipeline redesign.
   removal from the workspace dashboard. Decide explicitly between archiving
   analyzed incidents and hard-deleting the full incident aggregate. Individual
   evidence locked into an analysis run must remain protected.
+
+## Review Follow-Up Batch
+
+- [x] Make the issue-6 `evidence_refs` column upgrade tolerate concurrent
+  startups without swallowing non-duplicate database failures.
+- [x] Reject non-HTTP(S) configured LLM base URLs before constructing requests
+  with bearer authorization headers.
+- [x] Enforce `EvidenceRef` ownership and role invariants at the database layer
+  for fresh schemas and upgraded SQLite/Postgres databases.
+- [x] Surface hypothesis accept/reject failures inline in the Review Surface
+  without changing the existing success-only cache update.
+- [ ] Run focused regressions while review findings arrive, then run the full
+  backend suite and hygiene checks once the batch is complete.

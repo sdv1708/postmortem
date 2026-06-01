@@ -3,10 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .db import Base
+from .db import Base, EVIDENCE_REF_OWNER_CHECK, EVIDENCE_REF_ROLE_CHECK
 
 
 def _uuid() -> str:
@@ -370,6 +370,16 @@ class EvidenceRef(Base):
     """
 
     __tablename__ = "evidence_refs"
+    __table_args__ = (
+        CheckConstraint(
+            EVIDENCE_REF_OWNER_CHECK,
+            name="ck_evidence_refs_exactly_one_owner",
+        ),
+        CheckConstraint(
+            EVIDENCE_REF_ROLE_CHECK,
+            name="ck_evidence_refs_allowed_role",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     timeline_event_id: Mapped[str | None] = mapped_column(

@@ -123,7 +123,12 @@ class OpenAICompatibleLLMClient:
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._provider = urllib.parse.urlsplit(self._base_url).netloc or self._base_url
+        parsed_url = urllib.parse.urlsplit(self._base_url)
+        if parsed_url.scheme not in {"http", "https"}:
+            raise ValueError(
+                f"unsupported LLM base URL scheme {parsed_url.scheme!r} for {base_url!r}"
+            )
+        self._provider = parsed_url.netloc or self._base_url
         self._api_key = api_key
         self._model = model
         self._timeout = timeout

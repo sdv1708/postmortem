@@ -17,6 +17,18 @@ def _client() -> OpenAICompatibleLLMClient:
     )
 
 
+@pytest.mark.parametrize("base_url", ["ftp://provider.test/v1", "provider.test/v1"])
+def test_client_rejects_unsupported_base_url_scheme(base_url):
+    with pytest.raises(ValueError) as excinfo:
+        OpenAICompatibleLLMClient(
+            base_url=base_url,
+            api_key="secret",
+            model="model-name",
+        )
+
+    assert repr(base_url) in str(excinfo.value)
+
+
 def test_http_error_omits_provider_response_body(monkeypatch):
     def fail(request, timeout):
         raise urllib.error.HTTPError(
@@ -54,4 +66,3 @@ def test_invalid_provider_envelope_omits_response_body(monkeypatch):
 
     assert str(excinfo.value) == "provider envelope missing completion text"
     assert "sensitive" not in str(excinfo.value)
-

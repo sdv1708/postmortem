@@ -895,6 +895,7 @@ function RunHypotheses({
   onFocusEvidence: (ref: EvidenceRef) => void;
 }) {
   const queryClient = useQueryClient();
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const hypothesesKey = ["run-hypotheses", incidentId, runId];
   const hypothesesQuery = useQuery<Hypothesis[]>({
     queryKey: hypothesesKey,
@@ -909,11 +910,19 @@ function RunHypotheses({
       hypothesisId: string;
       decision: HypothesisReviewStatus;
     }) => api.reviewHypothesis(incidentId, runId, hypothesisId, decision),
+    onMutate: () => {
+      setReviewError(null);
+    },
     onSuccess: (updated) => {
       // The accept/reject decision never rewrites claims (ADR 0016); patch only
       // the reviewed hypothesis's status into the cached list.
       queryClient.setQueryData<Hypothesis[]>(hypothesesKey, (current) =>
         current?.map((h) => (h.id === updated.id ? updated : h)),
+      );
+    },
+    onError: (error) => {
+      setReviewError(
+        error instanceof Error ? error.message : "Hypothesis review could not be saved.",
       );
     },
   });
@@ -948,6 +957,11 @@ function RunHypotheses({
       <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
         RCA hypotheses · {hypotheses.length}
       </p>
+      {reviewError && (
+        <p className="mx-5 mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {reviewError}
+        </p>
+      )}
       <ol className="space-y-4 p-5">
         {hypotheses.map((hypothesis) => (
           <li key={hypothesis.id}>
