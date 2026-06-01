@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 
-from postmortem.api.analysis_runs import execute_analysis_run_background
+from postmortem.api.analysis_runs import execute_analysis_run_background, schedule_analysis_run
 
 
 def create_incident(client: TestClient, auth_headers) -> str:
@@ -235,6 +236,16 @@ def test_start_run_returns_queued_state_before_background_execution(
         "drafting_postmortem",
         "flagging_unsupported_claims",
     ]
+
+
+def test_default_scheduler_threads_app_settings_into_background_execution(settings):
+    background_tasks = BackgroundTasks()
+    session_factory = object()
+
+    schedule_analysis_run(background_tasks, session_factory, "run-id", settings)
+
+    task = background_tasks.tasks[0]
+    assert task.args == (session_factory, "run-id", settings)
 
 
 def test_run_records_chunking_strategy_version(client: TestClient, auth_headers):

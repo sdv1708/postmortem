@@ -8,7 +8,7 @@ from .api.artifacts import router as artifacts_router
 from .api.incidents import router as incidents_router
 from .auth import configure_auth
 from .config import Settings
-from .db import Base, make_engine, make_session_factory
+from .db import Base, ensure_schema_compatibility, make_engine, make_session_factory
 from .services import ensure_default_workspace
 
 
@@ -18,6 +18,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     engine = make_engine(settings.database_url)
     Base.metadata.create_all(engine)
+    ensure_schema_compatibility(engine)
     session_factory = make_session_factory(engine)
 
     with session_factory() as session:

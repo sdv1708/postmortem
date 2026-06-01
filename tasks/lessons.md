@@ -19,3 +19,18 @@
   with empty output. Run the suite in the foreground and, if a run is
   interrupted, `pkill -9 -f next-server` (and uvicorn) before retrying. Confirm
   ports are free first.
+- Treat incident lifecycle and evidence locking as separate concerns. Locking an
+  artifact preserves run citations; it does not answer whether an entire
+  incident should be archived or deleted from the workspace dashboard.
+- A schema-compatibility helper that inspects columns before issuing DDL still
+  races across process startups. Isolate each `ALTER TABLE` in its own
+  transaction and ignore only the database's duplicate-column error.
+- Validate configured provider URL schemes when constructing an authenticated
+  client. Reject unsupported protocols before creating requests with bearer
+  authorization headers.
+- When a model documents an exactly-one relational owner invariant, encode it
+  at the database layer. For legacy SQLite upgrades, validate existing rows and
+  install equivalent write triggers because SQLite cannot append table checks.
+- A mutation is not complete if only its success path is visible. Surface
+  command failures near the affected Review Surface action, even when no
+  optimistic cache update needs reverting.

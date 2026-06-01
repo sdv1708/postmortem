@@ -68,10 +68,12 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByText(/Timeline candidates/)).toBeVisible();
   await expect(page.getByText("api-errors.log:2")).toBeVisible();
   await expect(page.getByText("inferred").first()).toBeVisible();
+  await page.getByRole("button", { name: /api-errors\.log:2/ }).click();
+  await expect(page.getByRole("rowheader", { name: "2" })).toHaveClass(/bg-amber-100/);
 
   // The included evidence is now locked: it shows the lock badge and the
   // delete control is disabled.
-  await page.getByRole("button", { name: /api-errors\.log/ }).click();
+  await page.getByRole("button", { name: "api-errors.log Logs 2 lines" }).click();
   await expect(page.getByText("Locked · in analysis")).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete" })).toBeDisabled();
 

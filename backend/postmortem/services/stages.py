@@ -2,11 +2,24 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..chunking import ChunkingStrategy, SourceAwareLineWindowChunker
-from ..models import AnalysisRun, Artifact, EvidenceChunk, EvidenceRef, RunArtifact, TimelineEvent
+from ..llm import LLMClient, OfflineLLMClient
+from ..models import (
+    ActionItem,
+    AnalysisRun,
+    Artifact,
+    EvidenceChunk,
+    EvidenceRef,
+    Hypothesis,
+    ImpactClaim,
+    TimelineEvent,
+    RunArtifact,
+)
+from ..rca import RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
 from ..timestamps import parse_timestamp
 
 
@@ -37,9 +50,18 @@ class PipelineStageRunner:
     failure (ADR 0029).
     """
 
-    def __init__(self, session: Session, chunker: ChunkingStrategy | None = None) -> None:
+    def __init__(
+        self,
+        session: Session,
+        chunker: ChunkingStrategy | None = None,
+        llm_client: LLMClient | None = None,
+    ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
+        # Default to the offline client so deterministic stages still complete a
+        # run when no provider is configured; real runs inject a configured
+        # client (ADR 0011).
+        self._llm = llm_client or OfflineLLMClient()
         self._artifacts_cache: dict[str, list[Artifact]] = {}
 
     def __call__(self, stage: str, attempt: int, run: AnalysisRun) -> dict | None:
@@ -47,8 +69,10 @@ class PipelineStageRunner:
             return self._normalize_evidence(run)
         if stage == "extracting_timeline_candidates":
             return self._extract_timeline(run)
-        # Stages 3-6 (RCA, verification, drafting, flagging) stay no-ops until
-        # later slices wire them up.
+        if stage == "generating_rca_hypotheses":
+            return self._generate_rca(run)
+        # Stages 4-6 (verification, drafting, flagging) stay no-ops until later
+        # slices wire them up.
         return None
 
     def _normalize_evidence(self, run: AnalysisRun) -> dict | None:
@@ -147,6 +171,123 @@ class PipelineStageRunner:
         self._session.flush()
         return None
 
+    def _generate_rca(self, run: AnalysisRun) -> dict | None:
+        """Generate ranked RCA Hypotheses from the run's cited evidence.
+
+        Calls the configured LLMClient (ADR 0011), validates its output against a
+        strict JSON schema (ADR 0028) — invalid JSON or a schema violation raises,
+        which the executor turns into a stage failure with one retry (ADR 0029) —
+        then persists hypotheses, their impact claims, and remediation items with
+        EvidenceRefs resolved from the actual Artifact lines (ADR 0024). Any Major
+        Claim left without supporting evidence is normalized to an assumption and
+        counted as an `uncited_claim` warning (ADR 0013); that does not fail the
+        run.
+
+        Idempotent across the single retry: prior hypotheses for the run are
+        cleared first, and the chunk/timeline outputs from earlier stages are
+        untouched, so a failed-then-retried RCA never duplicates or corrupts state.
+        """
+        self._clear_hypotheses(run)
+        artifacts = self._run_artifacts(run)
+        if not artifacts:
+            return None
+
+        timeline = list(
+            self._session.scalars(
+                select(TimelineEvent)
+                .where(TimelineEvent.run_id == run.id)
+                .order_by(TimelineEvent.sequence.asc())
+            )
+        )
+        system, user = build_rca_prompt(artifacts, timeline)
+        response = self._llm.complete(system=system, user=user)
+        try:
+            output = RcaGenerationOutput.model_validate_json(response.text)
+        except ValidationError as exc:
+            # Schema-invalid (or non-JSON) model output fails the stage rather
+            # than becoming pipeline state (ADR 0028).
+            raise ValueError(f"RCA output failed schema validation: {exc}") from exc
+
+        by_id = {artifact.id: artifact for artifact in artifacts}
+        warning_codes: list[str] = []
+        for rank, hyp in enumerate(output.hypotheses, start=1):
+            supporting = self._resolve_refs(by_id, hyp.supporting_evidence, "supporting")
+            contradicting = self._resolve_refs(by_id, hyp.contradicting_evidence, "contradicting")
+            assumption = not supporting
+            if assumption:
+                warning_codes.append("uncited_claim")
+            hypothesis = Hypothesis(
+                run_id=run.id,
+                rank=rank,
+                title=hyp.title,
+                summary=hyp.summary,
+                assumption=assumption,
+                review_status="proposed",
+                unknowns=list(hyp.unknowns),
+                validation_steps=list(hyp.validation_steps),
+            )
+            hypothesis.evidence_refs.extend(supporting)
+            hypothesis.evidence_refs.extend(contradicting)
+            for sequence, impact in enumerate(hyp.impact_claims, start=1):
+                evidence = self._resolve_refs(by_id, impact.evidence, "supporting")
+                impact_assumption = not evidence
+                if impact_assumption:
+                    warning_codes.append("uncited_claim")
+                claim = ImpactClaim(
+                    sequence=sequence,
+                    description=impact.description,
+                    assumption=impact_assumption,
+                )
+                claim.evidence_refs.extend(evidence)
+                hypothesis.impact_claims.append(claim)
+            for sequence, remediation in enumerate(hyp.remediation_items, start=1):
+                item = ActionItem(sequence=sequence, description=remediation.description)
+                item.evidence_refs.extend(
+                    self._resolve_refs(by_id, remediation.evidence, "supporting")
+                )
+                hypothesis.action_items.append(item)
+            self._session.add(hypothesis)
+
+        self._session.flush()
+        outcome: dict = {}
+        if warning_codes:
+            outcome["warning_codes"] = _dedupe(warning_codes)
+        if response.usage:
+            outcome["usage"] = response.usage
+        return outcome or None
+
+    def _resolve_refs(
+        self, by_id: dict[str, Artifact], refs: list[RcaEvidenceRef], role: str
+    ) -> list[EvidenceRef]:
+        return [self._resolve_ref(by_id, ref, role) for ref in refs]
+
+    def _resolve_ref(
+        self, by_id: dict[str, Artifact], ref: RcaEvidenceRef, role: str
+    ) -> EvidenceRef:
+        """Turn a model-cited line range into a citation with an exact snippet.
+
+        The snippet is read from the stored Artifact lines, never from the model,
+        so the citation remains the source of truth (ADR 0024). A ref to an
+        artifact outside the run or to out-of-range lines is rejected here so
+        invalid model output cannot disappear from the auditable run result.
+        """
+        artifact = by_id.get(ref.artifact_id)
+        if artifact is None:
+            raise ValueError("RCA output cited an artifact outside this run")
+        lines = artifact.body.split("\n")
+        if ref.line_start < 1 or ref.line_end < ref.line_start or ref.line_end > len(lines):
+            raise ValueError("RCA output cited an invalid artifact line range")
+        snippet = "\n".join(lines[ref.line_start - 1 : ref.line_end])
+        return EvidenceRef(
+            artifact_id=artifact.id,
+            source_name=artifact.source_name,
+            line_start=ref.line_start,
+            line_end=ref.line_end,
+            snippet=snippet,
+            confidence_score=ref.confidence_score,
+            role=role,
+        )
+
     def _run_artifacts(self, run: AnalysisRun) -> list[Artifact]:
         # The included-artifact set is immutable once a run starts, so both
         # stages share one query. Tiebreak on Artifact.id: artifacts added in
@@ -179,6 +320,15 @@ class PipelineStageRunner:
         )
         for chunk in existing:
             self._session.delete(chunk)
+        self._session.flush()
+
+    def _clear_hypotheses(self, run: AnalysisRun) -> None:
+        existing = self._session.scalars(
+            select(Hypothesis).where(Hypothesis.run_id == run.id)
+        )
+        for hypothesis in existing:
+            # cascade removes impact claims, action items, and all EvidenceRefs
+            self._session.delete(hypothesis)
         self._session.flush()
 
 

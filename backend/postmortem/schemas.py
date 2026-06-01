@@ -136,6 +136,9 @@ class AnalysisRunRead(BaseModel):
     completed_at: datetime | None
 
 
+HypothesisReviewStatus = Literal["proposed", "accepted", "rejected"]
+
+
 class EvidenceRefRead(BaseModel):
     """A relational citation to exact Artifact lines (ADR 0024)."""
 
@@ -162,3 +165,52 @@ class TimelineEventRead(BaseModel):
     uncertain: bool
     description: str
     evidence_refs: list[EvidenceRefRead]
+
+
+class ImpactClaimRead(BaseModel):
+    """An evidence-backed impact statement tied to a hypothesis (ADR 0013)."""
+
+    id: str
+    sequence: int
+    description: str
+    assumption: bool
+    evidence_refs: list[EvidenceRefRead]
+
+
+class ActionItemRead(BaseModel):
+    """A remediation item tied to a hypothesis (PRD user story 16)."""
+
+    id: str
+    sequence: int
+    description: str
+    evidence_refs: list[EvidenceRefRead]
+
+
+class HypothesisRead(BaseModel):
+    """A ranked RCA Hypothesis for the Review Surface (PRD stage 3).
+
+    Supporting and contradicting evidence are pre-split so the reviewer sees both
+    sides without re-deriving the distinction. ``assumption`` marks a hypothesis
+    that carried no supporting citation and was normalized (ADR 0013), and
+    ``review_status`` records the human accept/reject decision (ADR 0016).
+    """
+
+    id: str
+    run_id: str
+    rank: int
+    title: str
+    summary: str
+    assumption: bool
+    review_status: HypothesisReviewStatus
+    unknowns: list[str]
+    validation_steps: list[str]
+    supporting_evidence: list[EvidenceRefRead]
+    contradicting_evidence: list[EvidenceRefRead]
+    impact_claims: list[ImpactClaimRead]
+    action_items: list[ActionItemRead]
+
+
+class HypothesisReviewCreate(BaseModel):
+    """Command payload to accept or reject a hypothesis (ADR 0016 / 0022)."""
+
+    decision: Literal["accepted", "rejected", "proposed"]

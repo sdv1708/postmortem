@@ -26,6 +26,13 @@ class Settings:
     api_token: str | None
     dev_bypass: bool
     cors_origins: tuple[str, ...]
+    # Generation provider config behind the LLMClient boundary (ADR 0011). The
+    # provider is model-agnostic: switch models/providers by changing these three
+    # values only. An empty api_key means "no provider configured" — the pipeline
+    # falls back to the offline client.
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str | None = None
+    llm_model: str = "gpt-4o-mini"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -41,4 +48,7 @@ class Settings:
                 ).split(",")
                 if origin.strip()
             ),
+            llm_base_url=os.environ.get("POSTMORTEM_LLM_BASE_URL", "https://api.openai.com/v1"),
+            llm_api_key=os.environ.get("POSTMORTEM_LLM_API_KEY") or None,
+            llm_model=os.environ.get("POSTMORTEM_LLM_MODEL", "gpt-4o-mini"),
         )

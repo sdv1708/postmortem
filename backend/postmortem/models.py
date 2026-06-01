@@ -3,10 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .db import Base
+from .db import Base, EVIDENCE_REF_OWNER_CHECK, EVIDENCE_REF_ROLE_CHECK
 
 
 def _uuid() -> str:
@@ -246,6 +246,113 @@ class TimelineEvent(Base):
     )
 
 
+class Hypothesis(Base):
+    """A ranked RCA Hypothesis generated for ambiguous incident evidence.
+
+    Produced by the "generating RCA hypotheses" stage (ADR 0026) from a strict
+    structured model output (ADR 0028). The hypothesis statement is a Major Claim,
+    so it carries supporting EvidenceRefs or is normalized to ``assumption=true``
+    with an `uncited_claim` warning (ADR 0013). Contradicting evidence, unknowns,
+    and validation steps are persisted so a reviewer can judge it like an engineer
+    would, and impact claims + remediation items hang off the hypothesis context
+    (PRD stage 3). Reviewers accept/reject without rewriting the generated claims
+    (ADR 0016); ``review_status`` records that decision separately.
+    """
+
+    __tablename__ = "hypotheses"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 1-based rank; lower is the more strongly supported hypothesis.
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    # True when the statement has no supporting citation (ADR 0013). The narrative
+    # stays auditable but is not presented as an evidence-backed claim.
+    assumption: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Human review decision (ADR 0016): proposed | accepted | rejected. Kept apart
+    # from the generated claims so accepting/rejecting never edits the output.
+    review_status: Mapped[str] = mapped_column(String(16), nullable=False, default="proposed")
+    # Open questions and how to confirm/refute the hypothesis. These are reviewer
+    # context, not factual incident claims, so they are plain string lists rather
+    # than cited claims.
+    unknowns: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    validation_steps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship()
+    evidence_refs: Mapped[list["EvidenceRef"]] = relationship(
+        back_populates="hypothesis",
+        cascade="all, delete-orphan",
+        order_by="(EvidenceRef.role, EvidenceRef.line_start)",
+    )
+    impact_claims: Mapped[list["ImpactClaim"]] = relationship(
+        back_populates="hypothesis",
+        cascade="all, delete-orphan",
+        order_by="ImpactClaim.sequence",
+    )
+    action_items: Mapped[list["ActionItem"]] = relationship(
+        back_populates="hypothesis",
+        cascade="all, delete-orphan",
+        order_by="ActionItem.sequence",
+    )
+
+
+class ImpactClaim(Base):
+    """An evidence-backed statement of incident impact tied to a hypothesis.
+
+    Impact is a Major Claim (severity/customer impact must not be invented, PRD
+    user story 15), so it follows the same citation-or-assumption contract as a
+    hypothesis (ADR 0013).
+    """
+
+    __tablename__ = "impact_claims"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    hypothesis_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("hypotheses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    assumption: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    hypothesis: Mapped[Hypothesis] = relationship(back_populates="impact_claims")
+    evidence_refs: Mapped[list["EvidenceRef"]] = relationship(
+        back_populates="impact_claim",
+        cascade="all, delete-orphan",
+        order_by="EvidenceRef.line_start",
+    )
+
+
+class ActionItem(Base):
+    """A remediation item tied to a hypothesis's context (PRD user story 16).
+
+    Remediation items are forward-looking actions rather than factual claims
+    about the incident, so they may cite supporting evidence but are not subject
+    to the Major-Claim citation contract.
+    """
+
+    __tablename__ = "action_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    hypothesis_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("hypotheses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    hypothesis: Mapped[Hypothesis] = relationship(back_populates="action_items")
+    evidence_refs: Mapped[list["EvidenceRef"]] = relationship(
+        back_populates="action_item",
+        cascade="all, delete-orphan",
+        order_by="EvidenceRef.line_start",
+    )
+
+
 class EvidenceRef(Base):
     """A relational citation to an exact Artifact line range (ADR 0024 / 0027).
 
@@ -255,16 +362,41 @@ class EvidenceRef(Base):
     panel, eval aggregation, and referential integrity depend on. ``snippet`` is
     the exact stored text of those lines so later citation-integrity
     verification can confirm an exact match.
+
+    One ref belongs to exactly one owner via the nullable owner FKs below
+    (timeline event, hypothesis, impact claim, or action item). ``role`` lets a
+    hypothesis distinguish ``supporting`` evidence from ``contradicting``
+    evidence (PRD stage 3); other owners use ``supporting``.
     """
 
     __tablename__ = "evidence_refs"
+    __table_args__ = (
+        CheckConstraint(
+            EVIDENCE_REF_OWNER_CHECK,
+            name="ck_evidence_refs_exactly_one_owner",
+        ),
+        CheckConstraint(
+            EVIDENCE_REF_ROLE_CHECK,
+            name="ck_evidence_refs_allowed_role",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    # Nullable owner FK: timeline events cite evidence now; hypotheses, impact
-    # claims, etc. reuse this table in later slices.
     timeline_event_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("timeline_events.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    hypothesis_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("hypotheses.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    impact_claim_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("impact_claims.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    action_item_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("action_items.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # supporting | contradicting (ADR 0024 / PRD stage 3). Defaults to supporting
+    # for non-hypothesis owners.
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="supporting")
     artifact_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False, index=True
     )
@@ -276,4 +408,7 @@ class EvidenceRef(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     timeline_event: Mapped["TimelineEvent"] = relationship(back_populates="evidence_refs")
+    hypothesis: Mapped["Hypothesis"] = relationship(back_populates="evidence_refs")
+    impact_claim: Mapped["ImpactClaim"] = relationship(back_populates="evidence_refs")
+    action_item: Mapped["ActionItem"] = relationship(back_populates="evidence_refs")
     artifact: Mapped[Artifact] = relationship()
