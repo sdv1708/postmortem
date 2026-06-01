@@ -166,6 +166,12 @@ Apply only the concrete review findings. No pipeline redesign.
   removal from the workspace dashboard. Decide explicitly between archiving
   analyzed incidents and hard-deleting the full incident aggregate. Individual
   evidence locked into an analysis run must remain protected.
+- [ ] Add a dedicated prompt-quality phase after the MVP slices. Improve RCA
+  depth beyond schema compliance: require evidence-backed causal chains,
+  separate customer impact from inferred mechanism, produce executable
+  validation checks, propose concrete remediation, identify contradicting
+  evidence, and compare competing hypotheses. Evaluate changes against the
+  synthetic incident fixtures before changing the default prompt version.
 
 ## Review Follow-Up Batch
 
@@ -179,3 +185,19 @@ Apply only the concrete review findings. No pipeline redesign.
   without changing the existing success-only cache update.
 - [ ] Run focused regressions while review findings arrive, then run the full
   backend suite and hygiene checks once the batch is complete.
+
+## Application Logging Plan
+
+Add useful pipeline visibility without logging secrets or raw incident evidence
+by default.
+
+- [ ] Add structured application logs for analysis-run queue/start/finish,
+  stage attempt/success/failure, artifact/chunk counts, timeline candidate
+  counts, RCA provider/model invocation, validated RCA output counts, and
+  hypothesis review decisions.
+- [ ] Keep API keys, bearer headers, raw provider envelopes, full prompts, raw
+  evidence bodies, and citation snippets out of default logs.
+- [ ] Decide whether local development also needs an explicit opt-in payload
+  logging mode for raw prompts and model completions. If added, default it off
+  and document the data-exposure risk.
+- [ ] Add focused logging regressions and run backend validation.

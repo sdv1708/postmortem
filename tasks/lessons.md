@@ -34,3 +34,6 @@
 - A mutation is not complete if only its success path is visible. Surface
   command failures near the affected Review Surface action, even when no
   optimistic cache update needs reverting.
+- A schema-valid RCA response can still be analytically shallow. Treat prompt
+  quality as an evaluated phase: distinguish causal mechanism from customer
+  impact and require concrete validation and remediation before tuning prompts.
