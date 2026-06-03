@@ -117,6 +117,16 @@ export function isTerminalRunStatus(status: RunStatus): boolean {
   return status === "succeeded" || status === "failed";
 }
 
+// Deterministic citation-integrity outcome stamped by the verifying_citations
+// stage (ADR 0014). `unverified` is the pre-verification default; the rest mirror
+// the backend CitationIntegrityStatus.
+export type CitationVerifierStatus =
+  | "unverified"
+  | "verified"
+  | "artifact_missing"
+  | "line_range_invalid"
+  | "snippet_mismatch";
+
 export interface EvidenceRef {
   id: string;
   artifact_id: string;
@@ -125,6 +135,7 @@ export interface EvidenceRef {
   line_end: number;
   snippet: string;
   confidence_score: number;
+  verifier_status: CitationVerifierStatus;
 }
 
 export type HypothesisReviewStatus = "proposed" | "accepted" | "rejected";

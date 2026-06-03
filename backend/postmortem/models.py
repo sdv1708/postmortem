@@ -405,6 +405,11 @@ class EvidenceRef(Base):
     line_end: Mapped[int] = mapped_column(Integer, nullable=False)
     snippet: Mapped[str] = mapped_column(Text, nullable=False)
     confidence_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    # Deterministic citation-integrity outcome stamped by the verifying_citations
+    # stage (ADR 0014). ``unverified`` until that stage runs; afterwards one of the
+    # CitationIntegrityStatus values. A derived, mutable status (not an ownership
+    # invariant), so it is not encoded as a DB CHECK constraint.
+    verifier_status: Mapped[str] = mapped_column(String(24), nullable=False, default="unverified")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     timeline_event: Mapped["TimelineEvent"] = relationship(back_populates="evidence_refs")

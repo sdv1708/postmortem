@@ -39,7 +39,7 @@ def _create_issue_6_evidence_refs_table(engine):
         )
 
 
-def _insert_evidence_ref(engine, ref_id, *, role="supporting", **owners):
+def _insert_evidence_ref(engine, ref_id, *, role="supporting", verifier_status="unverified", **owners):
     values = {
         "id": ref_id,
         "timeline_event_id": None,
@@ -47,6 +47,7 @@ def _insert_evidence_ref(engine, ref_id, *, role="supporting", **owners):
         "impact_claim_id": None,
         "action_item_id": None,
         "role": role,
+        "verifier_status": verifier_status,
         **owners,
     }
     with engine.begin() as connection:
@@ -55,12 +56,13 @@ def _insert_evidence_ref(engine, ref_id, *, role="supporting", **owners):
                 """
                 INSERT INTO evidence_refs (
                     id, timeline_event_id, hypothesis_id, impact_claim_id,
-                    action_item_id, role, artifact_id, source_name, line_start,
-                    line_end, snippet, confidence_score, created_at
+                    action_item_id, role, verifier_status, artifact_id,
+                    source_name, line_start, line_end, snippet, confidence_score,
+                    created_at
                 ) VALUES (
                     :id, :timeline_event_id, :hypothesis_id, :impact_claim_id,
-                    :action_item_id, :role, 'artifact-id', 'api.log', 1, 1,
-                    'line one', 1.0, '2026-06-01 00:00:00'
+                    :action_item_id, :role, :verifier_status, 'artifact-id',
+                    'api.log', 1, 1, 'line one', 1.0, '2026-06-01 00:00:00'
                 )
                 """
             ),
@@ -111,7 +113,13 @@ def test_create_app_upgrades_issue_6_evidence_refs_table(tmp_path):
 
     inspector = inspect(engine)
     columns = {column["name"] for column in inspector.get_columns("evidence_refs")}
-    assert {"hypothesis_id", "impact_claim_id", "action_item_id", "role"} <= columns
+    assert {
+        "hypothesis_id",
+        "impact_claim_id",
+        "action_item_id",
+        "role",
+        "verifier_status",
+    } <= columns
     indexes = {index["name"] for index in inspector.get_indexes("evidence_refs")}
     assert {
         "ix_evidence_refs_hypothesis_id",

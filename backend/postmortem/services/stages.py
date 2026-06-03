@@ -21,6 +21,11 @@ from ..models import (
 )
 from ..rca import RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
 from ..timestamps import parse_timestamp
+from ..verification import (
+    CitationTarget,
+    CitationVerifier,
+    DeterministicCitationIntegrityVerifier,
+)
 
 
 def _as_naive_utc(value: datetime | None) -> datetime | None:
@@ -55,6 +60,7 @@ class PipelineStageRunner:
         session: Session,
         chunker: ChunkingStrategy | None = None,
         llm_client: LLMClient | None = None,
+        verifier: CitationVerifier | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
@@ -62,6 +68,9 @@ class PipelineStageRunner:
         # run when no provider is configured; real runs inject a configured
         # client (ADR 0011).
         self._llm = llm_client or OfflineLLMClient()
+        # The citation verifier is a swappable boundary (ADR 0014 / 0009); the
+        # MVP default is the deterministic integrity pass.
+        self._verifier = verifier or DeterministicCitationIntegrityVerifier()
         self._artifacts_cache: dict[str, list[Artifact]] = {}
 
     def __call__(self, stage: str, attempt: int, run: AnalysisRun) -> dict | None:
@@ -71,8 +80,10 @@ class PipelineStageRunner:
             return self._extract_timeline(run)
         if stage == "generating_rca_hypotheses":
             return self._generate_rca(run)
-        # Stages 4-6 (verification, drafting, flagging) stay no-ops until later
-        # slices wire them up.
+        if stage == "verifying_citations":
+            return self._verify_citations(run)
+        # Stages 5-6 (drafting, flagging) stay no-ops until later slices wire
+        # them up.
         return None
 
     def _normalize_evidence(self, run: AnalysisRun) -> dict | None:
@@ -287,6 +298,73 @@ class PipelineStageRunner:
             confidence_score=ref.confidence_score,
             role=role,
         )
+
+    def _verify_citations(self, run: AnalysisRun) -> dict | None:
+        """Deterministically verify every EvidenceRef the run produced (ADR 0014).
+
+        For each citation owned by the run (timeline, hypothesis, impact claim, or
+        action item) the CitationIntegrityVerifier confirms the cited Artifact is
+        in the run, the line range exists, and the stored snippet matches those
+        exact lines. The outcome is stamped on ``EvidenceRef.verifier_status`` so
+        citation trust is visible end to end. This stage only annotates existing
+        claims — it never introduces new ones (ADR 0026).
+
+        A broken citation is flagged with a `citation_integrity_failure` warning,
+        not deleted and not a run failure (ADR 0015 / CONTEXT "flagged, not
+        deleted"). Idempotent across the single stage retry (ADR 0029): it
+        recomputes the same statuses in place and adds no rows.
+        """
+        bodies = {artifact.id: artifact.body for artifact in self._run_artifacts(run)}
+        warning_codes: list[str] = []
+        for ref in self._run_evidence_refs(run):
+            status = self._verifier.verify(
+                CitationTarget(
+                    artifact_id=ref.artifact_id,
+                    line_start=ref.line_start,
+                    line_end=ref.line_end,
+                    snippet=ref.snippet,
+                ),
+                bodies,
+            )
+            ref.verifier_status = status.value
+            if not status.ok:
+                warning_codes.append("citation_integrity_failure")
+        self._session.flush()
+        return {"warning_codes": _dedupe(warning_codes)} if warning_codes else None
+
+    def _run_evidence_refs(self, run: AnalysisRun) -> list[EvidenceRef]:
+        """Every EvidenceRef owned by the run, across all four owner types.
+
+        EvidenceRefs hang off timeline events and hypotheses directly, and off
+        impact claims / action items through their parent hypothesis, so this
+        walks each owner's relationship to the run rather than assuming a single
+        join path.
+        """
+        refs: list[EvidenceRef] = list(
+            self._session.scalars(
+                select(EvidenceRef)
+                .join(TimelineEvent, EvidenceRef.timeline_event_id == TimelineEvent.id)
+                .where(TimelineEvent.run_id == run.id)
+            )
+        )
+        refs += self._session.scalars(
+            select(EvidenceRef)
+            .join(Hypothesis, EvidenceRef.hypothesis_id == Hypothesis.id)
+            .where(Hypothesis.run_id == run.id)
+        )
+        refs += self._session.scalars(
+            select(EvidenceRef)
+            .join(ImpactClaim, EvidenceRef.impact_claim_id == ImpactClaim.id)
+            .join(Hypothesis, ImpactClaim.hypothesis_id == Hypothesis.id)
+            .where(Hypothesis.run_id == run.id)
+        )
+        refs += self._session.scalars(
+            select(EvidenceRef)
+            .join(ActionItem, EvidenceRef.action_item_id == ActionItem.id)
+            .join(Hypothesis, ActionItem.hypothesis_id == Hypothesis.id)
+            .where(Hypothesis.run_id == run.id)
+        )
+        return refs
 
     def _run_artifacts(self, run: AnalysisRun) -> list[Artifact]:
         # The included-artifact set is immutable once a run starts, so both

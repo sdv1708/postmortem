@@ -11,6 +11,7 @@ from ..llm import LLMClient
 from ..models import AnalysisRun, Artifact, Hypothesis, RunArtifact, TimelineEvent
 from ..rca import PROMPT_VERSION
 from ..schemas import AnalysisRunCreate
+from ..verification import CITATION_VERIFIER_VERSION
 from .artifacts import ArtifactNotFoundError
 from .incidents import IncidentService
 from .run_executor import RunExecutor, StagedRunExecutor, StageRecorder
@@ -83,7 +84,13 @@ class AnalysisService:
         # the RCA prompt version, and the configured model behind the LLMClient
         # (ADR 0011). When no client is injected the model defaults stay as the
         # offline placeholder.
-        metadata = {**DEFAULT_EXPERIMENT_METADATA, "chunking_strategy": CHUNKING_STRATEGY_VERSION}
+        # The chunker and the deterministic citation verifier always run, so stamp
+        # their real versions; the model/prompt only when a provider is injected.
+        metadata = {
+            **DEFAULT_EXPERIMENT_METADATA,
+            "chunking_strategy": CHUNKING_STRATEGY_VERSION,
+            "verifier_version": CITATION_VERIFIER_VERSION,
+        }
         if self._llm_client is not None:
             metadata["model_provider"] = self._llm_client.label
             metadata["prompt_version"] = PROMPT_VERSION

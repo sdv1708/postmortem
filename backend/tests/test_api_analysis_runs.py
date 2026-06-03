@@ -285,6 +285,8 @@ def test_timeline_endpoint_returns_sorted_cited_events(client: TestClient, auth_
     assert first_ref["line_start"] == 2  # the 14:28 line is line 2 of the body
     assert first_ref["snippet"] == "2026-05-09T14:28:31Z deploy v184 rolled out"
     assert first_ref["confidence_score"] == 1.0
+    # Stage 4 verified the citation resolves to its exact immutable line (ADR 0014).
+    assert first_ref["verifier_status"] == "verified"
 
 
 def test_timeline_endpoint_marks_inferred_timestamps_uncertain(client: TestClient, auth_headers):

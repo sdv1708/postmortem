@@ -68,8 +68,15 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByText(/Timeline candidates/)).toBeVisible();
   await expect(page.getByText("api-errors.log:2")).toBeVisible();
   await expect(page.getByText("inferred").first()).toBeVisible();
-  await page.getByRole("button", { name: /api-errors\.log:2/ }).click();
+  // The verifying_citations stage stamped each citation, so its integrity badge
+  // shows verified next to the citation (ADR 0014).
+  await expect(page.getByRole("img", { name: /Citation verified/ }).first()).toBeVisible();
+  const citedSnippet = "14:32 api 500s spike";
+  const citation = page.getByRole("button", { name: /api-errors\.log:2/ });
+  await expect(citation).toContainText(citedSnippet);
+  await citation.click();
   await expect(page.getByRole("rowheader", { name: "2" })).toHaveClass(/bg-amber-100/);
+  await expect(page.getByRole("cell", { name: citedSnippet })).toHaveClass(/bg-amber-50/);
 
   // The included evidence is now locked: it shows the lock badge and the
   // delete control is disabled.
