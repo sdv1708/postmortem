@@ -11,6 +11,7 @@ import {
   type AnalysisRun,
   type Artifact,
   type ArtifactSourceType,
+  type ClaimSupportStatus,
   type EvidenceRef,
   type Hypothesis,
   type HypothesisReviewStatus,
@@ -952,33 +953,55 @@ function RunHypotheses({
     );
   }
 
+  // Separate the authoritative narrative (supported + partially-supported) from
+  // unsupported claims, which stay visible as auditable Review Findings rather
+  // than being presented as fact (ADR 0014 / 0015).
+  const authoritative = hypotheses.filter((h) => h.support_status !== "unsupported");
+  const findings = hypotheses.filter((h) => h.support_status === "unsupported");
+
+  const renderHypothesis = (hypothesis: Hypothesis) => (
+    <li key={hypothesis.id}>
+      <HypothesisCard
+        hypothesis={hypothesis}
+        onReview={(decision) =>
+          reviewMutation.mutate({ hypothesisId: hypothesis.id, decision })
+        }
+        isReviewing={
+          reviewMutation.isPending &&
+          reviewMutation.variables?.hypothesisId === hypothesis.id
+        }
+        onFocusEvidence={onFocusEvidence}
+      />
+    </li>
+  );
+
   return (
     <div className="border-t border-slate-200">
-      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
-        RCA hypotheses · {hypotheses.length}
-      </p>
       {reviewError && (
         <p className="mx-5 mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
           {reviewError}
         </p>
       )}
-      <ol className="space-y-4 p-5">
-        {hypotheses.map((hypothesis) => (
-          <li key={hypothesis.id}>
-            <HypothesisCard
-              hypothesis={hypothesis}
-              onReview={(decision) =>
-                reviewMutation.mutate({ hypothesisId: hypothesis.id, decision })
-              }
-              isReviewing={
-                reviewMutation.isPending &&
-                reviewMutation.variables?.hypothesisId === hypothesis.id
-              }
-              onFocusEvidence={onFocusEvidence}
-            />
-          </li>
-        ))}
-      </ol>
+      {authoritative.length > 0 && (
+        <>
+          <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+            RCA hypotheses · {authoritative.length}
+          </p>
+          <ol className="space-y-4 p-5">{authoritative.map(renderHypothesis)}</ol>
+        </>
+      )}
+      {findings.length > 0 && (
+        <div className="border-t border-slate-200 bg-slate-50/50">
+          <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-rose-700">
+            Review findings · unsupported · {findings.length}
+          </p>
+          <p className="px-5 pt-1 text-xs text-slate-500">
+            The cited evidence does not support these claims. They stay visible for
+            audit but are not part of the authoritative postmortem narrative.
+          </p>
+          <ol className="space-y-4 p-5">{findings.map(renderHypothesis)}</ol>
+        </div>
+      )}
     </div>
   );
 }
@@ -1007,9 +1030,14 @@ function HypothesisCard({
               {hypothesis.assumption && (
                 <span className="badge bg-amber-50 text-amber-700 ring-amber-200">assumption</span>
               )}
+              <ClaimSupportBadge status={hypothesis.support_status} />
               <ReviewStatusBadge status={hypothesis.review_status} />
             </div>
             <p className="mt-1 text-sm leading-relaxed text-slate-700">{hypothesis.summary}</p>
+            <SupportRationale
+              status={hypothesis.support_status}
+              rationale={hypothesis.support_rationale}
+            />
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -1061,7 +1089,12 @@ function HypothesisCard({
                         assumption
                       </span>
                     )}
+                    <ClaimSupportBadge status={claim.support_status} />
                   </span>
+                  <SupportRationale
+                    status={claim.support_status}
+                    rationale={claim.support_rationale}
+                  />
                   {claim.evidence_refs.length > 0 && (
                     <EvidenceRefList
                       refs={claim.evidence_refs}
@@ -1236,6 +1269,48 @@ function ReviewStatusBadge({ status }: { status: HypothesisReviewStatus }) {
     rejected: "bg-rose-50 text-rose-700 ring-rose-200",
   };
   return <span className={`badge ${map[status]}`}>{status}</span>;
+}
+
+// Semantic claim-support verdict (ADR 0014). `unevaluated` shows nothing — the
+// claim has not reached the flagging stage yet.
+const CLAIM_SUPPORT_BADGE: Record<
+  ClaimSupportStatus,
+  { label: string; cls: string } | null
+> = {
+  unevaluated: null,
+  supported: { label: "supported", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
+  partial: { label: "partial support", cls: "bg-amber-50 text-amber-700 ring-amber-200" },
+  unsupported: { label: "unsupported", cls: "bg-rose-50 text-rose-700 ring-rose-200" },
+};
+
+function ClaimSupportBadge({ status }: { status: ClaimSupportStatus }) {
+  const config = CLAIM_SUPPORT_BADGE[status];
+  if (!config) {
+    return null;
+  }
+  return <span className={`badge ${config.cls}`}>{config.label}</span>;
+}
+
+function SupportRationale({
+  status,
+  rationale,
+}: {
+  status: ClaimSupportStatus;
+  rationale: string | null;
+}) {
+  // Caution context only matters when support is less than full (AC #3).
+  if (!rationale || status === "supported" || status === "unevaluated") {
+    return null;
+  }
+  const tone =
+    status === "unsupported"
+      ? "border-rose-200 bg-rose-50/60 text-rose-700"
+      : "border-amber-200 bg-amber-50/60 text-amber-700";
+  return (
+    <p className={`mt-1.5 rounded-md border px-2.5 py-1.5 text-xs leading-relaxed ${tone}`}>
+      {rationale}
+    </p>
+  );
 }
 
 function RunTimeline({

@@ -50,3 +50,12 @@
   citation is flagged with a warning code, never deleted and never a run failure
   (ADR 0015). Reuse the same `"\n".join` snippet resolution the claim-generating
   stages use so a `verified` status actually proves source-of-truth equality.
+- When a previously no-op pipeline stage starts calling the LLM, every existing
+  full-pipeline test that seeded a single-response `FakeLLMClient` for an earlier
+  stage will now exhaust it and the run fails late (hypotheses persisted from
+  stage 3 stay, so content assertions pass "accidentally" while the run is
+  actually failed). Don't paper over it by seeding more raw LLM responses — give
+  the new stage a swappable verifier boundary and inject a deterministic fake
+  (shared `tests/_fakes.py`) into `AnalysisService`/`PipelineStageRunner`, and
+  assert `run.status == "succeeded"` in the shared seed helpers so the failure
+  can't hide. Expect the same when stage 5 (drafting) becomes real in #10.

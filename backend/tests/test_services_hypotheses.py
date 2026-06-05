@@ -21,6 +21,8 @@ from postmortem.services import (
     hypothesis_read,
 )
 
+from tests._fakes import FakeClaimSupportVerifier
+
 
 def _run_with_hypotheses(session):
     incident = IncidentService(session).create(IncidentCreate(title="Ambiguous"))
@@ -65,9 +67,14 @@ def _run_with_hypotheses(session):
             ]
         }
     )
-    service = AnalysisService(session, llm_client=FakeLLMClient([payload], label="fake-model"))
+    service = AnalysisService(
+        session,
+        llm_client=FakeLLMClient([payload], label="fake-model"),
+        claim_support_verifier=FakeClaimSupportVerifier(),
+    )
     run = service.start_run(incident.id, AnalysisRunCreate())
     session.commit()
+    assert run.status == "succeeded"
     return service, incident, run
 
 

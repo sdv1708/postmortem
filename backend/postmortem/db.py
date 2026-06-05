@@ -99,42 +99,68 @@ def _ensure_evidence_ref_constraints(engine: Engine) -> None:
                     raise
 
 
+def _add_columns_if_missing(
+    engine: Engine, inspector, table: str, additions: dict[str, str]
+) -> None:
+    """Idempotently add columns to ``table`` if it exists and lacks them.
+
+    Each ``ALTER TABLE ADD COLUMN`` runs in its own transaction so a column that
+    another process added concurrently is tolerated via the duplicate-column
+    error rather than aborting the rest of the batch.
+    """
+    if table not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns(table)}
+    for column, ddl in additions.items():
+        if column in existing:
+            continue
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+        except DBAPIError as exc:
+            if not _is_duplicate_column_error(exc, engine.dialect.name):
+                raise
+
+
 def ensure_schema_compatibility(engine: Engine) -> None:
     """Apply the narrow schema additions needed by existing MVP databases.
 
     The project does not have a migration framework yet. ``create_all`` creates
     new tables but does not add columns to tables created by earlier slices, so
-    keep the small evidence_refs upgrade explicit and idempotent.
+    keep these small, explicit, idempotent column upgrades per table.
     """
     inspector = inspect(engine)
     if "evidence_refs" not in inspector.get_table_names():
         return
 
-    existing = {column["name"] for column in inspector.get_columns("evidence_refs")}
-    additions = {
-        "hypothesis_id": "VARCHAR(36) REFERENCES hypotheses(id) ON DELETE CASCADE",
-        "impact_claim_id": "VARCHAR(36) REFERENCES impact_claims(id) ON DELETE CASCADE",
-        "action_item_id": "VARCHAR(36) REFERENCES action_items(id) ON DELETE CASCADE",
-        "role": "VARCHAR(16) NOT NULL DEFAULT 'supporting'",
-        # Citation-integrity status added in slice #7 (ADR 0014); existing refs
-        # default to 'unverified' until a run re-verifies them.
-        "verifier_status": "VARCHAR(24) NOT NULL DEFAULT 'unverified'",
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "evidence_refs",
+        {
+            "hypothesis_id": "VARCHAR(36) REFERENCES hypotheses(id) ON DELETE CASCADE",
+            "impact_claim_id": "VARCHAR(36) REFERENCES impact_claims(id) ON DELETE CASCADE",
+            "action_item_id": "VARCHAR(36) REFERENCES action_items(id) ON DELETE CASCADE",
+            "role": "VARCHAR(16) NOT NULL DEFAULT 'supporting'",
+            # Citation-integrity status added in slice #7 (ADR 0014); existing refs
+            # default to 'unverified' until a run re-verifies them.
+            "verifier_status": "VARCHAR(24) NOT NULL DEFAULT 'unverified'",
+        },
+    )
+    # Semantic claim-support columns added in slice #8 (ADR 0014); existing Major
+    # Claims default to 'unevaluated' until the flagging stage classifies them.
+    support_columns = {
+        "support_status": "VARCHAR(16) NOT NULL DEFAULT 'unevaluated'",
+        "support_rationale": "TEXT",
     }
+    _add_columns_if_missing(engine, inspector, "hypotheses", support_columns)
+    _add_columns_if_missing(engine, inspector, "impact_claims", support_columns)
+
     indexes = {
         "hypothesis_id": "ix_evidence_refs_hypothesis_id",
         "impact_claim_id": "ix_evidence_refs_impact_claim_id",
         "action_item_id": "ix_evidence_refs_action_item_id",
     }
-    for column, ddl in additions.items():
-        if column not in existing:
-            try:
-                with engine.begin() as connection:
-                    connection.execute(
-                        text(f"ALTER TABLE evidence_refs ADD COLUMN {column} {ddl}")
-                    )
-            except DBAPIError as exc:
-                if not _is_duplicate_column_error(exc, engine.dialect.name):
-                    raise
     with engine.begin() as connection:
         for column, index in indexes.items():
             connection.execute(

@@ -24,7 +24,11 @@ from ..timestamps import parse_timestamp
 from ..verification import (
     CitationTarget,
     CitationVerifier,
+    ClaimSupportStatus,
+    ClaimSupportVerifier,
+    ClaimToVerify,
     DeterministicCitationIntegrityVerifier,
+    LLMClaimSupportVerifier,
 )
 
 
@@ -61,6 +65,7 @@ class PipelineStageRunner:
         chunker: ChunkingStrategy | None = None,
         llm_client: LLMClient | None = None,
         verifier: CitationVerifier | None = None,
+        claim_support_verifier: ClaimSupportVerifier | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
@@ -71,6 +76,11 @@ class PipelineStageRunner:
         # The citation verifier is a swappable boundary (ADR 0014 / 0009); the
         # MVP default is the deterministic integrity pass.
         self._verifier = verifier or DeterministicCitationIntegrityVerifier()
+        # The semantic claim-support verifier is the second swappable verifier
+        # boundary (ADR 0014); the MVP default judges support with the configured
+        # LLM. It is only consulted when there are Major Claims to evaluate, so an
+        # offline run with no hypotheses never calls a model.
+        self._claim_support = claim_support_verifier or LLMClaimSupportVerifier(self._llm)
         self._artifacts_cache: dict[str, list[Artifact]] = {}
 
     def __call__(self, stage: str, attempt: int, run: AnalysisRun) -> dict | None:
@@ -82,8 +92,10 @@ class PipelineStageRunner:
             return self._generate_rca(run)
         if stage == "verifying_citations":
             return self._verify_citations(run)
-        # Stages 5-6 (drafting, flagging) stay no-ops until later slices wire
-        # them up.
+        if stage == "flagging_unsupported_claims":
+            return self._flag_unsupported_claims(run)
+        # Stage 5 (drafting the postmortem) stays a no-op until a later slice
+        # wires it up.
         return None
 
     def _normalize_evidence(self, run: AnalysisRun) -> dict | None:
@@ -365,6 +377,65 @@ class PipelineStageRunner:
             .where(Hypothesis.run_id == run.id)
         )
         return refs
+
+    def _flag_unsupported_claims(self, run: AnalysisRun) -> dict | None:
+        """Classify each Major Claim's evidence support and flag the weak ones.
+
+        The semantic ClaimSupportVerifier (ADR 0014) judges whether the cited
+        evidence supports each hypothesis statement and impact claim, recording
+        SUPPORTED / PARTIAL / UNSUPPORTED plus a rationale. A claim with no
+        supporting citation is an assumption and recorded UNSUPPORTED without
+        calling the model. This stage only annotates existing claims (ADR 0026)
+        and is idempotent across the single retry: it overwrites the support
+        fields in place and adds no rows.
+
+        Unsupported and partially-supported claims are flagged with Warning Codes
+        so they surface as Review Findings, but they never fail the run or trigger
+        a retry (ADR 0015 / 0029).
+        """
+        hypotheses = list(
+            self._session.scalars(
+                select(Hypothesis).where(Hypothesis.run_id == run.id).order_by(Hypothesis.rank.asc())
+            )
+        )
+        warning_codes: list[str] = []
+        for hypothesis in hypotheses:
+            self._classify_claim(
+                hypothesis, f"{hypothesis.title}: {hypothesis.summary}", warning_codes
+            )
+            for claim in hypothesis.impact_claims:
+                self._classify_claim(claim, claim.description, warning_codes)
+        self._session.flush()
+        return {"warning_codes": _dedupe(warning_codes)} if warning_codes else None
+
+    def _classify_claim(self, claim, claim_text: str, warning_codes: list[str]) -> None:
+        """Stamp one Major Claim's support status + rationale (ADR 0014).
+
+        Contradicting evidence is excluded — support is judged on the supporting
+        citations only. Snippets come from the stored EvidenceRefs, which are the
+        citation source of truth (ADR 0024), so the verifier never sees
+        model-invented text.
+        """
+        supporting = [ref for ref in claim.evidence_refs if ref.role != "contradicting"]
+        if not supporting:
+            # An uncited Major Claim is an assumption (already flagged in the RCA
+            # stage); there is no evidence to support, so it is UNSUPPORTED.
+            claim.support_status = ClaimSupportStatus.UNSUPPORTED.value
+            claim.support_rationale = (
+                "No supporting evidence was cited, so this is recorded as an assumption "
+                "rather than an evidence-backed claim."
+            )
+            warning_codes.append("unsupported_claim")
+            return
+        judgment = self._claim_support.verify(
+            ClaimToVerify(claim_text=claim_text, evidence=tuple(ref.snippet for ref in supporting))
+        )
+        claim.support_status = judgment.status.value
+        claim.support_rationale = judgment.rationale
+        if judgment.status is ClaimSupportStatus.UNSUPPORTED:
+            warning_codes.append("unsupported_claim")
+        elif judgment.status is ClaimSupportStatus.PARTIAL:
+            warning_codes.append("partial_claim_support")
 
     def _run_artifacts(self, run: AnalysisRun) -> list[Artifact]:
         # The included-artifact set is immutable once a run starts, so both
