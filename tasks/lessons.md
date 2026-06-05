@@ -37,3 +37,16 @@
 - A schema-valid RCA response can still be analytically shallow. Treat prompt
   quality as an evaluated phase: distinguish causal mechanism from customer
   impact and require concrete validation and remediation before tuning prompts.
+- `scripts/e2e.sh` hardcodes `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`, which
+  only exists in the Linux/CI image. On this Windows dev box the Playwright
+  browsers live in the default `~/AppData/Local/ms-playwright`, so run the suite
+  without overriding that env var: start uvicorn (`POSTMORTEM_DEV_BYPASS=1`) on
+  :8000 and `next start` on :3000 (the prod build bakes the API base to
+  localhost:8000), wait on `/healthz` + `/incidents`, then `npx playwright test`.
+  Tear both servers down and delete `backend/_e2e.db` afterward.
+- Citation integrity (deterministic: artifact/line/snippet) and claim support
+  (semantic) are separate verifier passes (ADR 0014). Keep the deterministic
+  pass ORM-free and behind a swappable `CitationVerifier` boundary; a broken
+  citation is flagged with a warning code, never deleted and never a run failure
+  (ADR 0015). Reuse the same `"\n".join` snippet resolution the claim-generating
+  stages use so a `verified` status actually proves source-of-truth equality.

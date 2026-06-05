@@ -251,8 +251,8 @@ export default function IncidentOverviewPage() {
 
       <Section title="Postmortem" description="Drafted from evidence with line-level citations.">
         <Placeholder
-          tag="Coming in slices 8–10"
-          body="Verified citations and drafted postmortems arrive in #8, #9, #10."
+          tag="Coming in slices 9-10"
+          body="Drafted postmortems and unsupported-claim flagging arrive in #9 and #10."
         />
       </Section>
     </div>
@@ -1135,17 +1135,84 @@ function EvidenceRefList({
           <button
             type="button"
             onClick={() => onFocusEvidence(ref)}
-            className="block w-full truncate text-left text-xs text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+            className="block w-full rounded-sm text-left text-xs text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
           >
+            <CitationStatusBadge status={ref.verifier_status} />{" "}
             <span className="font-medium text-slate-600">
               {ref.source_name}:{ref.line_start}
               {ref.line_end !== ref.line_start ? `-${ref.line_end}` : ""}
             </span>{" "}
-            <span className="font-mono">{ref.snippet}</span>
+            <CitationSnippet snippet={ref.snippet} />
           </button>
         </li>
       ))}
     </ul>
+  );
+}
+
+function CitationSnippet({ snippet }: { snippet: string }) {
+  return (
+    <span className="whitespace-pre-wrap break-words font-mono text-slate-500">
+      {snippet}
+    </span>
+  );
+}
+
+const CITATION_STATUS_LABEL: Record<EvidenceRef["verifier_status"], string> = {
+  verified: "Citation verified — resolves to its exact immutable artifact lines",
+  unverified: "Citation not yet verified",
+  artifact_missing: "Broken citation — the cited artifact is missing",
+  line_range_invalid: "Broken citation — the cited line range does not exist",
+  snippet_mismatch: "Broken citation — the snippet no longer matches the cited lines",
+};
+
+function CitationStatusBadge({
+  status,
+}: {
+  status: EvidenceRef["verifier_status"];
+}) {
+  const label = CITATION_STATUS_LABEL[status];
+  if (status === "verified") {
+    return (
+      <svg
+        className="inline-block shrink-0 text-emerald-600 align-[-1px]"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        role="img"
+        aria-label={label}
+      >
+        <title>{label}</title>
+        <path d="M20 6 9 17l-5-5" />
+      </svg>
+    );
+  }
+  const tone =
+    status === "unverified" ? "text-slate-400" : "text-rose-600";
+  return (
+    <svg
+      className={`inline-block shrink-0 ${tone} align-[-1px]`}
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      role="img"
+      aria-label={label}
+    >
+      <title>{label}</title>
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </svg>
   );
 }
 
@@ -1235,13 +1302,14 @@ function RunTimeline({
                   type="button"
                   key={ref.id}
                   onClick={() => onFocusEvidence(ref)}
-                  className="mt-0.5 block w-full truncate text-left text-xs text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  className="mt-0.5 block w-full rounded-sm text-left text-xs text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
                 >
+                  <CitationStatusBadge status={ref.verifier_status} />{" "}
                   <span className="font-medium text-slate-600">
                     {ref.source_name}:{ref.line_start}
                     {ref.line_end !== ref.line_start ? `-${ref.line_end}` : ""}
                   </span>{" "}
-                  <span className="font-mono">{ref.snippet}</span>
+                  <CitationSnippet snippet={ref.snippet} />
                 </button>
               ))}
             </div>

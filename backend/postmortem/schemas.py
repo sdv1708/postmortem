@@ -138,9 +138,24 @@ class AnalysisRunRead(BaseModel):
 
 HypothesisReviewStatus = Literal["proposed", "accepted", "rejected"]
 
+# Deterministic citation-integrity status surfaced beside each citation (ADR 0014).
+# ``unverified`` is the pre-stage-4 default; the rest are CitationIntegrityStatus.
+CitationVerifierStatus = Literal[
+    "unverified",
+    "verified",
+    "artifact_missing",
+    "line_range_invalid",
+    "snippet_mismatch",
+]
+
 
 class EvidenceRefRead(BaseModel):
-    """A relational citation to exact Artifact lines (ADR 0024)."""
+    """A relational citation to exact Artifact lines (ADR 0024).
+
+    ``verifier_status`` is the deterministic citation-integrity outcome so the
+    Review Surface can show whether a citation provably resolves to its exact
+    immutable lines (ADR 0014).
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -151,6 +166,7 @@ class EvidenceRefRead(BaseModel):
     line_end: int
     snippet: str
     confidence_score: float
+    verifier_status: CitationVerifierStatus
 
 
 class TimelineEventRead(BaseModel):

@@ -110,6 +110,11 @@ def test_list_hypotheses_returns_ranked_with_split_evidence(app, client: TestCli
     # Snippets are resolved from the stored artifact lines (ADR 0024).
     assert top["supporting_evidence"][0]["snippet"] == "alpha line"
     assert top["contradicting_evidence"][0]["snippet"] == "beta line"
+    # The deterministic citation-integrity pass ran (stage 4) and stamped each
+    # citation verified, so the Review Surface can show citation trust (ADR 0014).
+    assert top["supporting_evidence"][0]["verifier_status"] == "verified"
+    assert top["contradicting_evidence"][0]["verifier_status"] == "verified"
+    assert top["impact_claims"][0]["evidence_refs"][0]["verifier_status"] == "verified"
     assert top["impact_claims"][0]["description"] == "Customers errored"
     assert top["action_items"][0]["description"] == "Roll back"
     assert top["unknowns"] == ["one open question"]

@@ -116,6 +116,9 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         "impact_claim_id": "VARCHAR(36) REFERENCES impact_claims(id) ON DELETE CASCADE",
         "action_item_id": "VARCHAR(36) REFERENCES action_items(id) ON DELETE CASCADE",
         "role": "VARCHAR(16) NOT NULL DEFAULT 'supporting'",
+        # Citation-integrity status added in slice #7 (ADR 0014); existing refs
+        # default to 'unverified' until a run re-verifies them.
+        "verifier_status": "VARCHAR(24) NOT NULL DEFAULT 'unverified'",
     }
     indexes = {
         "hypothesis_id": "ix_evidence_refs_hypothesis_id",

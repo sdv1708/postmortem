@@ -1,203 +1,146 @@
-# Slice 6: Generate and review ambiguous RCA hypotheses from cited evidence
+# Slice 7: Verify citations and focus exact Artifact lines from claims
 
 ## Objective
 
-Implement GitHub issue #7 (blocked-by #6, merged → unblocked). Stage 3
-(`generating_rca_hypotheses`) becomes real: an `LLMClient` turns the run's
-normalized evidence + timeline into multiple ranked RCA Hypotheses, each with
-supporting evidence, contradicting evidence, unknowns, validation steps, impact
-claims, and remediation items. These persist in explicit structured tables with
-relational EvidenceRefs and render in the Review Surface where a human can
-accept/reject hypotheses without rewriting generated claims.
+Implement GitHub issue #8 (blocked-by #7, merged → unblocked). Stage 4
+(`verifying_citations`) becomes real: a deterministic **CitationIntegrityVerifier**
+checks every EvidenceRef from the timeline and RCA stages for Artifact existence,
+line-range existence, and exact snippet match, then stamps the outcome on
+`EvidenceRef.verifier_status`. The Review Surface surfaces that status beside each
+citation, and clicking a citation still focuses the Evidence Panel on the exact
+immutable Artifact lines.
 
-This is the first slice with an LLM in the pipeline. Tests use fake/replay
-clients; real runs use one configured generation provider.
+Note: citation-click focus + exact-line highlight (AC #4/#5) already shipped in the
+Slice 6 review-fix batch (`focusEvidence` / `LineViewer`), for both timeline and
+hypothesis citations. This slice adds the deterministic verifier, the verifier-status
+field, its API exposure, and its UI surfacing.
 
 ## Relevant ADRs / PRD
 
-- 0011 one default LLM provider behind `LLMClient`; fakes/replay for tests.
-- 0028 strict structured JSON output; invalid JSON / schema-invalid fails the stage.
-- 0013 every Major Claim carries EvidenceRefs or `assumption=true`; an uncited
-  Major Claim is normalized to assumption, logs a warning, counts `uncited_claim`
-  (does NOT fail/retry the run).
-- 0024 explicit structured tables (hypotheses, impact_claims, action_items) +
-  relational EvidenceRefs reused across owners.
-- 0029 stage fails → one retry → fail run; prior persisted outputs stay intact.
-- 0016 review = accept/reject + notes, no full inline editing of claims.
-- 0022 resource APIs + explicit command endpoints (start run, record review).
-- 0009 `LLMClient` is a kept interface; swappability shown via fakes in tests.
-- PRD stage 3: produces `Hypothesis[]`, `ImpactClaim[]`, `RemediationItem[]`
-  (ranked; supporting + contradicting evidence + unknowns + validation steps).
+- 0014 split citation **integrity** (deterministic: artifact/line/snippet) from claim
+  **support** (semantic). This slice ships only the integrity pass.
+- 0002 / 0010 working-citation contract + deterministic trust floor: a citation must
+  jump to immutable artifact lines and its snippet must match exactly.
+- 0024 relational EvidenceRefs reused across owners; line-addressed, not chunk-addressed.
+- 0026 stage 4 may verify/annotate only — it must not introduce new factual claims.
+- 0015 / CONTEXT "flagged, not deleted": a broken citation is a non-fatal warning, not
+  a run failure.
+- 0029 idempotent across the single retry; 0025 verifier version in experiment metadata.
+- 0009 the citation verifier is a swappable boundary, proven via a fake in tests.
 
 ## Plan
 
 ### Backend
-- [x] `llm.py`: `LLMClient` Protocol (`complete(system, user) -> LLMResponse`),
-  `LLMResponse(text, usage)`, `FakeLLMClient` (canned/replay for tests),
-  `OpenAICompatibleLLMClient` (provider-agnostic, stdlib urllib; base_url + key +
-  model from settings), `OfflineLLMClient`, `build_llm_client(settings)`.
-- [x] `config.py`: settings for llm base_url/api_key/model (defaults); offline
-  default documented (empty-hypotheses) so runs without a key still succeed.
-- [x] `rca.py`: strict Pydantic output contract (`RcaGenerationOutput` →
-  hypotheses w/ supporting/contradicting refs, unknowns, validation_steps,
-  impact_claims, remediation_items) + prompt builder from evidence/timeline.
-- [x] `models.py`: `Hypothesis`, `ImpactClaim`, `ActionItem`; extend `EvidenceRef`
-  with nullable owner FKs (hypothesis_id, impact_claim_id, action_item_id) + `role`
-  (supporting/contradicting). `assumption` + `review_status` on Hypothesis.
-- [x] `services/stages.py`: real `_generate_rca` stage — call LLM, parse+validate
-  (raise on invalid → stage fail), resolve EvidenceRef snippets from actual
-  artifact lines, normalize uncited Major Claims to assumptions (`uncited_claim`),
-  persist; idempotent across retry (clear prior hypotheses first).
-- [x] `services/analysis.py`: thread `llm_client`; `list_hypotheses`,
-  `review_hypothesis`; read-shapers for the new schemas.
-- [x] `schemas.py`: `HypothesisRead` (+ impact_claims, action_items, split
-  evidence), `HypothesisReviewCreate`.
-- [x] `api/analysis_runs.py`: `GET .../{run_id}/hypotheses`,
-  `POST .../{run_id}/hypotheses/{hypothesis_id}/review`; thread client into the
-  background executor via settings.
+- [x] `verification.py`: `CitationIntegrityStatus` enum, `CitationTarget` dataclass,
+  `CitationVerifier` Protocol, `DeterministicCitationIntegrityVerifier`,
+  `CITATION_VERIFIER_VERSION`.
+- [x] `models.py`: add `verifier_status` to `EvidenceRef` (default `unverified`).
+- [x] `db.py`: add `verifier_status` to the idempotent `ensure_schema_compatibility`
+  column upgrade for issue-6/issue-7 databases.
+- [x] `services/stages.py`: route `verifying_citations` → `_verify_citations`; gather
+  every run-owned EvidenceRef (`_run_evidence_refs`, all four owner types), verify,
+  stamp status, emit `citation_integrity_failure` for any broken ref; verifier is an
+  injectable param.
+- [x] `services/analysis.py`: stamp `verifier_version` in run experiment metadata.
+- [x] `schemas.py`: `CitationVerifierStatus` Literal + `verifier_status` on
+  `EvidenceRefRead`.
 
 ### Frontend
-- [x] `lib/api.ts`: Hypothesis/ImpactClaim/ActionItem types; `listRunHypotheses`,
-  `reviewHypothesis`.
-- [x] Incident page: ranked hypotheses under a succeeded run — supporting/
-  contradicting evidence, unknowns, validation steps, impact claims, remediation
-  items, assumption badges, accept/reject controls.
+- [x] `lib/api.ts`: `CitationVerifierStatus` type + `verifier_status` on `EvidenceRef`.
+- [x] Incident page: `CitationStatusBadge` rendered beside every hypothesis/impact/
+  action and timeline citation (verified check vs broken/unverified alert, with a
+  descriptive title). Focus/highlight behavior unchanged.
+- [x] Review follow-up: citation rows no longer truncate snippets; displayed snippets
+  preserve whitespace so multi-line citations can visually match highlighted lines.
 
 ### Tests
-- [x] Ambiguous fixture evidence + seeded FakeLLMClient → multiple hypotheses.
-- [x] Schema-invalid model output fails the stage; chunks+timeline persist, no
-  hypotheses, run failed (no corruption).
-- [x] Uncited Major Claim normalized to assumption + `uncited_claim` warning.
-- [x] Accept/reject updates review_status without altering generated claims.
-- [x] `LLMClient` swappability (fake/replay) + API endpoint tests.
-- [x] Backend pytest (103 passed) + frontend typecheck/build pass; e2e unchanged.
-
-## Notes
-
-- EvidenceRef table already anticipated reuse (nullable timeline_event_id). Add
-  sibling nullable owner FKs + `role`; tables are created via `create_all`.
-- Stage 3 needs an LLM; AnalysisService default uses an offline fake (no
-  hypotheses) so deterministic timeline tests stay green. Real runs inject the
-  configured client through the background route.
+- [x] `test_verification.py`: valid / missing artifact / missing line / mismatched
+  snippet, short-circuit order, stable enum values.
+- [x] `test_stages_citations.py`: full pipeline stamps every citation `verified` +
+  `verifier_version`; tampered snippet re-verifies to `snippet_mismatch` with a
+  non-fatal warning; the verifier boundary is swappable (fake verifier).
+- [x] `test_api_hypotheses.py` / `test_api_analysis_runs.py`: `verifier_status` present
+  and `verified` on hypothesis and timeline citations.
+- [x] `test_db_compatibility.py`: issue-6 upgrade adds the `verifier_status` column.
+- [x] Review follow-up: e2e now asserts the displayed citation snippet text is the same
+  snippet shown on the highlighted Artifact line.
+- [ ] Review follow-up verification: rerun backend/frontend/e2e commands before final
+  acceptance. Not run during this targeted follow-up at user request.
 
 ## Review
 
-Stage 3 (`generating_rca_hypotheses`) is now real and end-to-end.
+Stage 4 (`verifying_citations`) is now real and end-to-end. Citation trust is visible
+from the deterministic verifier all the way to a badge beside every citation.
 
 ### What landed
-- **Provider-agnostic LLM boundary** (`llm.py`). Per the user's call, the real
-  client is `OpenAICompatibleLLMClient` (stdlib urllib, `/chat/completions`,
-  `response_format: json_object`), switchable by base_url + api_key + model alone —
-  not an Anthropic-specific client as the original plan sketched. `FakeLLMClient`
-  (list or callable) drives all tests; `OfflineLLMClient` returns empty hypotheses
-  so keyless runs still complete six stages. `build_llm_client` picks provider vs
-  offline from settings.
-- **Strict output contract** (`rca.py`, `PROMPT_VERSION="rca-1"`). Model output is
-  validated with `RcaGenerationOutput.model_validate_json`; a `ValidationError`
-  becomes a `ValueError` that fails the stage (ADR 0028) before anything persists.
-- **Structured tables + relational citations** (`models.py`). `Hypothesis`,
-  `ImpactClaim`, `ActionItem`; `EvidenceRef` gained nullable owner FKs +
-  `role`. Snippets are resolved from the stored artifact lines, never the model.
-- **Citation contract** (ADR 0013). Uncited hypotheses/impact claims → `assumption`
-  + deduped `uncited_claim` warning on the stage event; does not fail the run.
-  Out-of-range / foreign-artifact citations are dropped.
-- **Idempotent retry** (ADR 0029): `_clear_hypotheses` runs first, so a
-  failed-then-retried stage never duplicates; chunks + timeline are untouched.
-- **Review Surface**: read endpoints + accept/reject command; the incident page
-  renders ranked hypotheses with split evidence, claims, remediation, and badges.
-  Review flips `review_status` only (ADR 0016).
+- **Swappable deterministic verifier** (`verification.py`).
+  `DeterministicCitationIntegrityVerifier` checks artifact existence → line-range
+  existence → exact snippet match, short-circuiting in that order. It works on an
+  ORM-free `CitationTarget` + an `{artifact_id: body}` map, so the check is trivially
+  unit-testable and the `CitationVerifier` boundary is genuinely swappable (ADR 0009 /
+  0014). The snippet is rebuilt the same way the timeline/RCA stages resolve it, so a
+  `verified` citation is provably the source of truth (ADR 0002).
+- **`verifier_status` on EvidenceRef** (`models.py`, `db.py`). New nullable-free column
+  defaulting to `unverified`; an idempotent `ALTER TABLE ADD COLUMN` upgrades issue-6/7
+  databases. It is a derived, mutable status (not an ownership invariant), so unlike the
+  owner/role checks it carries no DB CHECK constraint.
+- **Stage 4 work** (`services/stages.py`). `_verify_citations` gathers every EvidenceRef
+  owned by the run across all four owner types (`_run_evidence_refs`), stamps each
+  status, and emits a deduped `citation_integrity_failure` warning for any broken ref.
+  It only annotates existing claims (ADR 0026) and is naturally idempotent across the
+  single retry (recomputes in place, adds no rows). A broken citation is flagged, never
+  deleted, and never fails the run (ADR 0015).
+- **Experiment metadata** (`services/analysis.py`): `verifier_version` is now stamped
+  with the real `citation-integrity-1`, alongside the chunker version (ADR 0025).
+- **API + Review Surface**: `EvidenceRefRead` carries `verifier_status`; the incident
+  page renders a compact `CitationStatusBadge` (emerald check for verified, rose alert
+  for broken, slate for unverified) beside every timeline and hypothesis citation, with
+  a descriptive hover title. Citation rows preserve the displayed snippet text instead
+  of truncating it, and click-to-focus still highlights the exact Artifact line range.
 
 ### Verification
-- Backend: 103 passed (18 new across `test_stages_rca.py`,
-  `test_services_hypotheses.py`, `test_api_hypotheses.py`). Covers all six
-  acceptance criteria including the two required proofs (ambiguous → multiple
-  hypotheses; schema-invalid fails the stage without corrupting prior outputs).
-- Frontend: `tsc --noEmit` clean; `next build` succeeds. e2e unchanged (offline
-  path shows "No RCA hypotheses"; the spec asserts only the kept "Postmortem"
-  heading).
+- Backend: **127 passed** (+11). New `test_verification.py` (8) and
+  `test_stages_citations.py` (3) cover all required cases — valid, missing artifact,
+  missing line, mismatched snippet, swappability, and the non-fatal tampered-citation
+  path. API + db-compatibility tests extended for `verifier_status`.
+- Frontend: `npm run typecheck` and `npm run build` clean.
+- e2e: `npx playwright test` **2 passed** in the original Slice 7 run. This targeted
+  review follow-up added the missing assertion that the displayed citation snippet also
+  appears on the highlighted Artifact line; rerun e2e before final acceptance.
+- Follow-up tests were not run during this edit pass at user request.
 
-### Deviations from the original plan
-- Provider client is OpenAI-compatible/model-agnostic (user decision), not
-  `AnthropicLLMClient`.
-- Background settings are resolved inside `execute_analysis_run_background`
-  (defaulting to `Settings.from_env()`) rather than threaded through the scheduler,
-  to keep the existing scheduler-override test's 3-arg signature intact.
-- `ImpactClaim` and `ActionItem` both carry a `hypothesis_id` (user decision:
-  per-hypothesis ownership for both).
-
-## Review Fix Plan
-
-Apply only the concrete review findings. No pipeline redesign.
-
-- [x] Add a minimal schema-compatibility upgrade for issue-6-era databases so
-  the existing `evidence_refs` table receives the new nullable owner columns and
-  `role` column before ORM queries run. Add a regression that starts from the old
-  table shape.
-- [x] Thread the app's configured LLM settings into the default background task
-  so queued-run metadata and execution always describe the same provider/model.
-  Preserve the existing scheduler override test hook.
-- [x] Make RCA Pydantic output models reject unknown keys (`extra="forbid"`) so
-  typo fields fail the stage per ADR 0028.
-- [x] Reject foreign-artifact and out-of-range model citations instead of
-  silently dropping them, so invalid refs fail stage 3 and prior stage outputs
-  remain inspectable.
-- [x] Make Review Surface citation rows focus the cited artifact and highlight
-  its exact line range in the existing Evidence panel.
-- [x] Record provider identity alongside model name in run experiment metadata,
-  without introducing a provider picker or provider-matrix abstraction.
-- [x] Sanitize provider exceptions persisted in Run Stage Events; keep raw
-  provider response bodies out of structured event state.
-- [x] Add focused regressions for each fix, run targeted backend tests, full
-  backend pytest, frontend typecheck/build, and the existing end-to-end suite.
-
-## Review Fix Verification
-
-- Focused backend regression suite: 36 passed.
-- Full backend suite: 109 passed.
-- Frontend: `npm run typecheck` and `npm run build` passed.
-- Browser regression: `npm run e2e` passed (2 tests), including timeline
-  citation click -> exact line highlight.
-- Hygiene: `git diff --check` passed; local e2e services and generated output
-  were removed after the run.
+### Deviations from the plan
+- None of substance. `verifier_status` uses a Python-side default only (no
+  `server_default`), matching the existing `role` precedent; the schema-compatibility
+  test helper passes the column explicitly, as it already did for `role`.
 
 ## Deferred Backlog
 
 - [ ] After all planned slices are complete, define and implement incident-level
-  removal from the workspace dashboard. Decide explicitly between archiving
-  analyzed incidents and hard-deleting the full incident aggregate. Individual
-  evidence locked into an analysis run must remain protected.
-- [ ] Add a dedicated prompt-quality phase after the MVP slices. Improve RCA
-  depth beyond schema compliance: require evidence-backed causal chains,
-  separate customer impact from inferred mechanism, produce executable
-  validation checks, propose concrete remediation, identify contradicting
-  evidence, and compare competing hypotheses. Evaluate changes against the
-  synthetic incident fixtures before changing the default prompt version.
-
-## Review Follow-Up Batch
-
-- [x] Make the issue-6 `evidence_refs` column upgrade tolerate concurrent
-  startups without swallowing non-duplicate database failures.
-- [x] Reject non-HTTP(S) configured LLM base URLs before constructing requests
-  with bearer authorization headers.
-- [x] Enforce `EvidenceRef` ownership and role invariants at the database layer
-  for fresh schemas and upgraded SQLite/Postgres databases.
-- [x] Surface hypothesis accept/reject failures inline in the Review Surface
-  without changing the existing success-only cache update.
-- [ ] Run focused regressions while review findings arrive, then run the full
-  backend suite and hygiene checks once the batch is complete.
+  removal from the workspace dashboard. Decide explicitly between archiving analyzed
+  incidents and hard-deleting the full incident aggregate. Individual evidence locked
+  into an analysis run must remain protected.
+- [ ] Add a dedicated prompt-quality phase after the MVP slices. Improve RCA depth
+  beyond schema compliance: require evidence-backed causal chains, separate customer
+  impact from inferred mechanism, produce executable validation checks, propose concrete
+  remediation, identify contradicting evidence, and compare competing hypotheses.
+  Evaluate changes against the synthetic incident fixtures before changing the default
+  prompt version.
+- [ ] Semantic `ClaimSupportVerifier` (SUPPORTED / PARTIAL / UNSUPPORTED) behind the same
+  `CitationVerifier`-style boundary (ADR 0014), once an LLM judgment layer is justified.
 
 ## Application Logging Plan
 
-Add useful pipeline visibility without logging secrets or raw incident evidence
-by default.
+Add useful pipeline visibility without logging secrets or raw incident evidence by
+default. (Carried forward; not part of slice #7.)
 
-- [ ] Add structured application logs for analysis-run queue/start/finish,
-  stage attempt/success/failure, artifact/chunk counts, timeline candidate
-  counts, RCA provider/model invocation, validated RCA output counts, and
-  hypothesis review decisions.
-- [ ] Keep API keys, bearer headers, raw provider envelopes, full prompts, raw
-  evidence bodies, and citation snippets out of default logs.
-- [ ] Decide whether local development also needs an explicit opt-in payload
-  logging mode for raw prompts and model completions. If added, default it off
-  and document the data-exposure risk.
+- [ ] Add structured application logs for analysis-run queue/start/finish, stage
+  attempt/success/failure, artifact/chunk counts, timeline candidate counts, RCA
+  provider/model invocation, validated RCA output counts, citation-integrity outcomes,
+  and hypothesis review decisions.
+- [ ] Keep API keys, bearer headers, raw provider envelopes, full prompts, raw evidence
+  bodies, and citation snippets out of default logs.
+- [ ] Decide whether local development also needs an explicit opt-in payload logging mode
+  for raw prompts and model completions. If added, default it off and document the
+  data-exposure risk.
 - [ ] Add focused logging regressions and run backend validation.
