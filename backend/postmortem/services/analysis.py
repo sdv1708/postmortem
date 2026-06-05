@@ -66,6 +66,11 @@ class AnalysisService:
     ) -> None:
         self._session = session
         self._llm_client = llm_client
+        self._claim_support_verifier_version = (
+            claim_support_verifier.version
+            if claim_support_verifier is not None
+            else CLAIM_SUPPORT_VERIFIER_VERSION
+        )
         # Default to the real six-stage pipeline whose stage work (chunking,
         # timeline extraction, RCA generation, verification, flagging) reads and
         # writes through this session (ADR 0026). The RCA and claim-support stages
@@ -100,7 +105,7 @@ class AnalysisService:
         metadata = {
             **DEFAULT_EXPERIMENT_METADATA,
             "chunking_strategy": CHUNKING_STRATEGY_VERSION,
-            "verifier_version": f"{CITATION_VERIFIER_VERSION}+{CLAIM_SUPPORT_VERIFIER_VERSION}",
+            "verifier_version": f"{CITATION_VERIFIER_VERSION}+{self._claim_support_verifier_version}",
         }
         if self._llm_client is not None:
             metadata["model_provider"] = self._llm_client.label

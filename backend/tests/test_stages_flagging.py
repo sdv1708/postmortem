@@ -7,7 +7,12 @@ from postmortem.models import Hypothesis, RunStageEvent
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService, StagedRunExecutor
 from postmortem.services.stages import PipelineStageRunner
-from postmortem.verification import ClaimSupportJudgment, ClaimSupportStatus
+from postmortem.verification import (
+    CITATION_VERIFIER_VERSION,
+    CitationIntegrityStatus,
+    ClaimSupportJudgment,
+    ClaimSupportStatus,
+)
 
 from tests._fakes import FakeClaimSupportVerifier
 
@@ -89,6 +94,11 @@ def _flag_event(session, run_id):
     )
 
 
+class _BrokenCitationVerifier:
+    def verify(self, target, artifact_bodies):
+        return CitationIntegrityStatus.SNIPPET_MISMATCH
+
+
 def test_flagging_classifies_each_major_claim(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
@@ -130,6 +140,32 @@ def test_flagging_classifies_each_major_claim(fresh_session):
     assert set(event.warning_codes) == {"unsupported_claim", "partial_claim_support"}
 
 
+def test_flagging_does_not_treat_broken_citations_as_support(fresh_session):
+    incident = _incident(fresh_session)
+    artifact = _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    claim_support = FakeClaimSupportVerifier()
+    runner = PipelineStageRunner(
+        fresh_session,
+        llm_client=FakeLLMClient([_rca_json(artifact.id)]),
+        verifier=_BrokenCitationVerifier(),
+        claim_support_verifier=claim_support,
+    )
+    run = AnalysisService(
+        fresh_session, executor=StagedRunExecutor(stage_runner=runner)
+    ).start_run(incident.id, AnalysisRunCreate())
+    fresh_session.commit()
+
+    assert run.status == "succeeded"
+    by_title = {h.title: h for h in _hypotheses(fresh_session, run.id)}
+    assert by_title["Deploy regressed the pool"].support_status == "unsupported"
+    assert by_title["Cache pressure cascaded"].support_status == "unsupported"
+    assert "No verified supporting citations" in by_title["Deploy regressed the pool"].support_rationale
+    assert claim_support.calls == []
+    assert _flag_event(fresh_session, run.id).warning_codes == ["unsupported_claim"]
+
+
 def test_all_supported_emits_no_warnings(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
@@ -150,6 +186,22 @@ def test_all_supported_emits_no_warnings(fresh_session):
     # The uncited assumption is still flagged.
     event = _flag_event(fresh_session, run.id)
     assert event.warning_codes == ["unsupported_claim"]
+
+
+def test_run_metadata_records_injected_claim_support_verifier_version(fresh_session):
+    incident = _incident(fresh_session)
+    artifact = _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    verifier = FakeClaimSupportVerifier()
+    run = AnalysisService(
+        fresh_session,
+        llm_client=FakeLLMClient([_rca_json(artifact.id)]),
+        claim_support_verifier=verifier,
+    ).start_run(incident.id, AnalysisRunCreate())
+    fresh_session.commit()
+
+    assert run.verifier_version == f"{CITATION_VERIFIER_VERSION}+{verifier.version}"
 
 
 def test_flagging_is_idempotent_across_retry(fresh_session):

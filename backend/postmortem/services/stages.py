@@ -22,6 +22,7 @@ from ..models import (
 from ..rca import RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
 from ..timestamps import parse_timestamp
 from ..verification import (
+    CitationIntegrityStatus,
     CitationTarget,
     CitationVerifier,
     ClaimSupportStatus,
@@ -417,6 +418,9 @@ class PipelineStageRunner:
         model-invented text.
         """
         supporting = [ref for ref in claim.evidence_refs if ref.role != "contradicting"]
+        verified_supporting = [
+            ref for ref in supporting if ref.verifier_status == CitationIntegrityStatus.VERIFIED.value
+        ]
         if not supporting:
             # An uncited Major Claim is an assumption (already flagged in the RCA
             # stage); there is no evidence to support, so it is UNSUPPORTED.
@@ -427,8 +431,22 @@ class PipelineStageRunner:
             )
             warning_codes.append("unsupported_claim")
             return
+        if not verified_supporting:
+            # Semantic support cannot rescue a broken citation. Citation integrity
+            # is the deterministic trust floor (ADR 0014), so claims with only
+            # unverified/broken support citations stay out of the authoritative narrative.
+            claim.support_status = ClaimSupportStatus.UNSUPPORTED.value
+            claim.support_rationale = (
+                "No verified supporting citations were available, so this is recorded as "
+                "unsupported until the cited evidence resolves to immutable artifact lines."
+            )
+            warning_codes.append("unsupported_claim")
+            return
         judgment = self._claim_support.verify(
-            ClaimToVerify(claim_text=claim_text, evidence=tuple(ref.snippet for ref in supporting))
+            ClaimToVerify(
+                claim_text=claim_text,
+                evidence=tuple(ref.snippet for ref in verified_supporting),
+            )
         )
         claim.support_status = judgment.status.value
         claim.support_rationale = judgment.rationale

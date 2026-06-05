@@ -1,3 +1,39 @@
+# Senior Review: Local Changes Against Domain Standards
+
+## Review Plan
+
+- [x] Read project brief, context, and the ADRs most relevant to the changed files.
+- [x] Inventory the local diff and identify the behavioral surfaces touched.
+- [x] Review backend schema, verification, and pipeline logic for security, data integrity, and ADR alignment.
+- [x] Review API schema and frontend rendering for evidence-handling and UX correctness.
+- [x] Review tests and run targeted verification where practical.
+- [x] Add a concise review section with findings, residual risks, and verification results.
+
+## Senior Review Results
+
+Fix plan:
+- [x] Make stage 6 semantic support use only verified supporting citations.
+- [x] Record the actual injected claim-support verifier version in run metadata.
+- [x] Add focused regressions for broken citations and swapped verifier metadata.
+- [x] Run targeted backend verification.
+
+Findings:
+- [x] Stage 6 can mark a claim as supported using citations whose integrity stage already marked them broken. `_classify_claim` sends every non-contradicting `EvidenceRef.snippet` to the semantic verifier without checking `ref.verifier_status == "verified"`, while the UI routes authoritative vs review findings solely by `support_status`. A claim with `snippet_mismatch`, `artifact_missing`, or `line_range_invalid` can therefore still show as supported/authoritative. This cuts against CONTEXT's working-citation contract and ADR 0014's deterministic trust floor.
+- [x] `AnalysisService` accepts a swappable `claim_support_verifier`, but run metadata always records `citation-integrity-1+claim-support-1`, even when the injected verifier has a different `version`. That weakens ADR 0025 experiment tracking and the client brief's A/B-able tradeoff requirement.
+
+Positive checks:
+- The claim-support verifier is schema-validated with `extra="forbid"` and fails the stage on invalid/non-JSON output.
+- Stage 6 annotates existing hypotheses and impact claims in place; it does not introduce new factual claims.
+- Unsupported and partial claims remain non-fatal warning-code outcomes.
+- The API surfaces support status/rationale on hypotheses and impact claims, and the frontend separates unsupported top-level hypotheses into Review Findings.
+
+Verification:
+- `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider tests/test_claim_support.py` passed: 8 passed.
+- Broader targeted backend tests were blocked before assertions by pytest temp-directory permission errors (`PermissionError: [WinError 5] Access is denied` under both the default Windows temp root and explicit repo basetemp attempts). The blocked tests all failed during fixture setup (`tmp_path`), not from code assertions.
+- After applying fixes, the targeted backend suite passed outside the sandbox:
+  `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider tests/test_claim_support.py tests/test_stages_flagging.py tests/test_stages_citations.py tests/test_api_hypotheses.py tests/test_db_compatibility.py` -> 29 passed.
+- `git diff --check` passed; only line-ending warnings were reported.
+
 # Slice 8: Separate unsupported and assumed claims from the authoritative narrative
 
 ## Objective

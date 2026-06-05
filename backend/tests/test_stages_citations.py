@@ -9,7 +9,6 @@ from postmortem.services import AnalysisService, ArtifactService, IncidentServic
 from postmortem.services.stages import PipelineStageRunner
 from postmortem.verification import (
     CITATION_VERIFIER_VERSION,
-    CLAIM_SUPPORT_VERIFIER_VERSION,
     CitationIntegrityStatus,
 )
 
@@ -107,14 +106,15 @@ def test_pipeline_stamps_every_citation_verified(fresh_session):
     fresh_session.commit()
 
     fake = FakeLLMClient([_hypotheses_json(artifact.id)], label="fake-model")
+    claim_support = FakeClaimSupportVerifier()
     run = AnalysisService(
-        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+        fresh_session, llm_client=fake, claim_support_verifier=claim_support
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
     assert run.status == "succeeded"
     # Both verifier passes (integrity + claim support) are stamped (ADR 0025).
-    assert run.verifier_version == f"{CITATION_VERIFIER_VERSION}+{CLAIM_SUPPORT_VERIFIER_VERSION}"
+    assert run.verifier_version == f"{CITATION_VERIFIER_VERSION}+{claim_support.version}"
 
     refs = _all_refs(fresh_session, run.id)
     # Timeline (3 timestamped lines) + hypothesis supporting/contradicting +
