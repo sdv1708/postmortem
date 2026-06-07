@@ -130,6 +130,61 @@ def test_create_app_upgrades_issue_6_evidence_refs_table(tmp_path):
     _insert_evidence_ref(engine, "valid-ref", timeline_event_id="timeline-id")
 
 
+def _create_issue_7_claim_tables(engine):
+    """Hypotheses + impact_claims as they existed before slice #8 (no support cols)."""
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE hypotheses (
+                    id VARCHAR(36) NOT NULL PRIMARY KEY,
+                    run_id VARCHAR(36) NOT NULL,
+                    rank INTEGER NOT NULL,
+                    title VARCHAR(255) NOT NULL,
+                    summary TEXT NOT NULL,
+                    assumption BOOLEAN NOT NULL,
+                    review_status VARCHAR(16) NOT NULL,
+                    unknowns JSON NOT NULL,
+                    validation_steps JSON NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE impact_claims (
+                    id VARCHAR(36) NOT NULL PRIMARY KEY,
+                    hypothesis_id VARCHAR(36) NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    description TEXT NOT NULL,
+                    assumption BOOLEAN NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+
+
+def test_create_app_upgrades_issue_7_claim_tables(tmp_path):
+    database_url = f"sqlite:///{tmp_path}/issue-7.db"
+    engine = make_engine(database_url)
+    # evidence_refs must exist for the upgrade to run; pre-create the claim tables
+    # without the slice-#8 support columns.
+    _create_issue_6_evidence_refs_table(engine)
+    _create_issue_7_claim_tables(engine)
+
+    create_app(
+        Settings(database_url=database_url, api_token=None, dev_bypass=True, cors_origins=())
+    )
+
+    inspector = inspect(engine)
+    for table in ("hypotheses", "impact_claims"):
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        assert {"support_status", "support_rationale"} <= columns
+
+
 def test_schema_compatibility_rejects_existing_orphaned_evidence_ref(tmp_path):
     database_url = f"sqlite:///{tmp_path}/orphaned-ref.db"
     engine = make_engine(database_url)

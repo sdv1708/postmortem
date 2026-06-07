@@ -7,6 +7,8 @@ from postmortem.models import EvidenceChunk, Hypothesis, RunStageEvent, Timeline
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 
+from tests._fakes import FakeClaimSupportVerifier
+
 
 AMBIGUOUS_BODY = (
     "2026-05-09T14:28:31Z deploy v184 rolled out\n"
@@ -103,9 +105,11 @@ def test_ambiguous_evidence_yields_multiple_ranked_hypotheses(fresh_session):
         label="fake-model",
         usage={"total_tokens": 321},
     )
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    # Inject a fake claim-support verifier so stage 6 does not consume seeded RCA
+    # responses; this test only asserts RCA generation behavior.
+    run = AnalysisService(
+        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
     assert run.status == "succeeded"
@@ -328,7 +332,9 @@ def test_rca_generation_is_idempotent_across_retry(fresh_session):
             _two_competing_hypotheses(artifact.id),
         ]
     )
-    real = PipelineStageRunner(fresh_session, llm_client=fake)
+    real = PipelineStageRunner(
+        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+    )
 
     def flaky(stage, attempt, run):
         if stage == "generating_rca_hypotheses":

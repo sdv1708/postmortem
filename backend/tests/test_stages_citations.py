@@ -7,7 +7,12 @@ from postmortem.models import EvidenceRef, RunStageEvent
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 from postmortem.services.stages import PipelineStageRunner
-from postmortem.verification import CITATION_VERIFIER_VERSION, CitationIntegrityStatus
+from postmortem.verification import (
+    CITATION_VERIFIER_VERSION,
+    CitationIntegrityStatus,
+)
+
+from tests._fakes import FakeClaimSupportVerifier
 
 
 BODY = (
@@ -101,14 +106,15 @@ def test_pipeline_stamps_every_citation_verified(fresh_session):
     fresh_session.commit()
 
     fake = FakeLLMClient([_hypotheses_json(artifact.id)], label="fake-model")
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    claim_support = FakeClaimSupportVerifier()
+    run = AnalysisService(
+        fresh_session, llm_client=fake, claim_support_verifier=claim_support
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
     assert run.status == "succeeded"
-    # The configured verifier version is stamped in experiment metadata (ADR 0025).
-    assert run.verifier_version == CITATION_VERIFIER_VERSION
+    # Both verifier passes (integrity + claim support) are stamped (ADR 0025).
+    assert run.verifier_version == f"{CITATION_VERIFIER_VERSION}+{claim_support.version}"
 
     refs = _all_refs(fresh_session, run.id)
     # Timeline (3 timestamped lines) + hypothesis supporting/contradicting +
@@ -127,9 +133,9 @@ def test_reverification_flags_a_tampered_snippet_without_failing_the_run(fresh_s
     fresh_session.commit()
 
     fake = FakeLLMClient([_hypotheses_json(artifact.id)], label="fake-model")
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    run = AnalysisService(
+        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
     assert run.status == "succeeded"
 

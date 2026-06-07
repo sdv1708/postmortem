@@ -8,6 +8,8 @@ from postmortem.llm import FakeLLMClient
 from postmortem.schemas import AnalysisRunCreate
 from postmortem.services import AnalysisService
 
+from tests._fakes import FakeClaimSupportVerifier
+
 
 def create_incident(client: TestClient, auth_headers) -> str:
     resp = client.post("/api/incidents", json={"title": "Hyp incident"}, headers=auth_headers)
@@ -25,13 +27,13 @@ def add_artifact(client: TestClient, auth_headers, incident_id: str) -> str:
     return resp.json()["id"]
 
 
-def _seed_run_with_hypotheses(app, client, auth_headers):
+def _seed_run_with_hypotheses(app, client, auth_headers, claim_support_verifier=None):
     """Start a run via HTTP but execute it with a seeded provider.
 
     The scheduler is stubbed so the POST only queues the run; the run is then
-    executed against the app's own DB with a FakeLLMClient so the HTTP read
-    endpoints surface real persisted hypotheses (the configured provider is not
-    called in tests).
+    executed against the app's own DB with a FakeLLMClient (and a fake
+    claim-support verifier so stage 6 does not need seeded LLM responses) so the
+    HTTP read endpoints surface real persisted hypotheses.
     """
     captured: list[str] = []
     app.state.run_scheduler = lambda background_tasks, session_factory, run_id: captured.append(
@@ -82,9 +84,12 @@ def _seed_run_with_hypotheses(app, client, auth_headers):
     )
     session = app.state.session_factory()
     try:
-        AnalysisService(
-            session, llm_client=FakeLLMClient([payload], label="fake-model")
+        run = AnalysisService(
+            session,
+            llm_client=FakeLLMClient([payload], label="fake-model"),
+            claim_support_verifier=claim_support_verifier or FakeClaimSupportVerifier(),
         ).execute_run(run_id, commit_progress=True)
+        assert run.status == "succeeded"
         session.commit()
     finally:
         session.close()
@@ -119,6 +124,39 @@ def test_list_hypotheses_returns_ranked_with_split_evidence(app, client: TestCli
     assert top["action_items"][0]["description"] == "Roll back"
     assert top["unknowns"] == ["one open question"]
     assert top["validation_steps"] == ["confirm via metrics"]
+    # Stage 6 classified each Major Claim's support and exposes it for the Review
+    # Surface to separate authoritative from auditable-only (ADR 0014).
+    assert top["support_status"] == "supported"
+    assert top["support_rationale"]
+    assert top["impact_claims"][0]["support_status"] == "supported"
+
+
+def test_support_status_separates_unsupported_and_partial_claims(
+    app, client: TestClient, auth_headers
+):
+    from postmortem.verification import ClaimSupportJudgment, ClaimSupportStatus
+
+    def judge(claim):
+        # The top hypothesis statement is unsupported; everything else partial.
+        if claim.claim_text.startswith("Primary cause"):
+            return ClaimSupportJudgment(ClaimSupportStatus.UNSUPPORTED, "Evidence does not establish this.")
+        return ClaimSupportJudgment(ClaimSupportStatus.PARTIAL, "Only partially established.")
+
+    incident_id, run_id = _seed_run_with_hypotheses(
+        app, client, auth_headers, claim_support_verifier=FakeClaimSupportVerifier(judge)
+    )
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/hypotheses", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    hyps = {h["title"]: h for h in resp.json()}
+    # Unsupported claims stay visible (auditable) but carry the unsupported status
+    # and a rationale so the UI can route them to Review Findings (ADR 0015).
+    assert hyps["Primary cause"]["support_status"] == "unsupported"
+    assert hyps["Primary cause"]["support_rationale"] == "Evidence does not establish this."
+    # The impact claim under the primary hypothesis was judged partial.
+    assert hyps["Primary cause"]["impact_claims"][0]["support_status"] == "partial"
+    assert hyps["Alternative cause"]["support_status"] == "partial"
 
 
 def test_review_hypothesis_sets_status_without_altering_claims(

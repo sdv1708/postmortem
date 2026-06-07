@@ -138,6 +138,10 @@ class AnalysisRunRead(BaseModel):
 
 HypothesisReviewStatus = Literal["proposed", "accepted", "rejected"]
 
+# Semantic claim-support judgment surfaced on each Major Claim (ADR 0014).
+# ``unevaluated`` is the pre-flagging default; the rest are ClaimSupportStatus.
+ClaimSupportStatus = Literal["unevaluated", "supported", "partial", "unsupported"]
+
 # Deterministic citation-integrity status surfaced beside each citation (ADR 0014).
 # ``unverified`` is the pre-stage-4 default; the rest are CitationIntegrityStatus.
 CitationVerifierStatus = Literal[
@@ -184,12 +188,18 @@ class TimelineEventRead(BaseModel):
 
 
 class ImpactClaimRead(BaseModel):
-    """An evidence-backed impact statement tied to a hypothesis (ADR 0013)."""
+    """An evidence-backed impact statement tied to a hypothesis (ADR 0013).
+
+    ``support_status`` carries the semantic claim-support judgment so the Review
+    Surface can separate supported impact from partial/unsupported (ADR 0014).
+    """
 
     id: str
     sequence: int
     description: str
     assumption: bool
+    support_status: ClaimSupportStatus
+    support_rationale: str | None
     evidence_refs: list[EvidenceRefRead]
 
 
@@ -218,6 +228,8 @@ class HypothesisRead(BaseModel):
     summary: str
     assumption: bool
     review_status: HypothesisReviewStatus
+    support_status: ClaimSupportStatus
+    support_rationale: str | None
     unknowns: list[str]
     validation_steps: list[str]
     supporting_evidence: list[EvidenceRefRead]

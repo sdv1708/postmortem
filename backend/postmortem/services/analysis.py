@@ -11,7 +11,11 @@ from ..llm import LLMClient
 from ..models import AnalysisRun, Artifact, Hypothesis, RunArtifact, TimelineEvent
 from ..rca import PROMPT_VERSION
 from ..schemas import AnalysisRunCreate
-from ..verification import CITATION_VERIFIER_VERSION
+from ..verification import (
+    CITATION_VERIFIER_VERSION,
+    CLAIM_SUPPORT_VERIFIER_VERSION,
+    ClaimSupportVerifier,
+)
 from .artifacts import ArtifactNotFoundError
 from .incidents import IncidentService
 from .run_executor import RunExecutor, StagedRunExecutor, StageRecorder
@@ -58,16 +62,27 @@ class AnalysisService:
         session: Session,
         executor: RunExecutor | None = None,
         llm_client: LLMClient | None = None,
+        claim_support_verifier: ClaimSupportVerifier | None = None,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
+        self._claim_support_verifier_version = (
+            claim_support_verifier.version
+            if claim_support_verifier is not None
+            else CLAIM_SUPPORT_VERIFIER_VERSION
+        )
         # Default to the real six-stage pipeline whose stage work (chunking,
-        # timeline extraction, RCA generation) reads and writes through this
-        # session (ADR 0026). The RCA stage uses the injected LLMClient, or the
-        # offline default when none is configured (ADR 0011). Tests inject their
-        # own executor and/or client to exercise edge cases.
+        # timeline extraction, RCA generation, verification, flagging) reads and
+        # writes through this session (ADR 0026). The RCA and claim-support stages
+        # use the injected LLMClient, or the offline default when none is
+        # configured (ADR 0011). Tests inject their own executor, client, and/or a
+        # fake claim-support verifier to exercise edge cases deterministically.
         self._executor = executor or StagedRunExecutor(
-            stage_runner=PipelineStageRunner(session, llm_client=llm_client)
+            stage_runner=PipelineStageRunner(
+                session,
+                llm_client=llm_client,
+                claim_support_verifier=claim_support_verifier,
+            )
         )
 
     def start_run(
@@ -84,12 +99,13 @@ class AnalysisService:
         # the RCA prompt version, and the configured model behind the LLMClient
         # (ADR 0011). When no client is injected the model defaults stay as the
         # offline placeholder.
-        # The chunker and the deterministic citation verifier always run, so stamp
-        # their real versions; the model/prompt only when a provider is injected.
+        # The chunker and both verifier passes (deterministic citation integrity +
+        # semantic claim support) always run, so stamp their real versions; the
+        # model/prompt only when a provider is injected (ADR 0025).
         metadata = {
             **DEFAULT_EXPERIMENT_METADATA,
             "chunking_strategy": CHUNKING_STRATEGY_VERSION,
-            "verifier_version": CITATION_VERIFIER_VERSION,
+            "verifier_version": f"{CITATION_VERIFIER_VERSION}+{self._claim_support_verifier_version}",
         }
         if self._llm_client is not None:
             metadata["model_provider"] = self._llm_client.label
@@ -258,6 +274,8 @@ def _impact_claim_read(claim) -> dict:
         "sequence": claim.sequence,
         "description": claim.description,
         "assumption": claim.assumption,
+        "support_status": claim.support_status,
+        "support_rationale": claim.support_rationale,
         "evidence_refs": list(claim.evidence_refs),
     }
 
@@ -288,6 +306,8 @@ def hypothesis_read(hypothesis: Hypothesis) -> dict:
         "summary": hypothesis.summary,
         "assumption": hypothesis.assumption,
         "review_status": hypothesis.review_status,
+        "support_status": hypothesis.support_status,
+        "support_rationale": hypothesis.support_rationale,
         "unknowns": list(hypothesis.unknowns),
         "validation_steps": list(hypothesis.validation_steps),
         "supporting_evidence": supporting,

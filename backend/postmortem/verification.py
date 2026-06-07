@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final, Mapping, Protocol
+from typing import Final, Literal, Mapping, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .llm import LLMClient
 
 # Versioned verifier identity recorded in Experiment Metadata (ADR 0025). Bump
 # when the integrity contract or its outcomes change so runs stay comparable.
 CITATION_VERIFIER_VERSION: Final[str] = "citation-integrity-1"
+# Versioned identity for the semantic claim-support pass (ADR 0014 / 0025). Bump
+# when its prompt or output contract changes so runs stay comparable.
+CLAIM_SUPPORT_VERIFIER_VERSION: Final[str] = "claim-support-1"
 
 
 class CitationIntegrityStatus(str, Enum):
@@ -90,3 +97,129 @@ class DeterministicCitationIntegrityVerifier:
         if expected != target.snippet:
             return CitationIntegrityStatus.SNIPPET_MISMATCH
         return CitationIntegrityStatus.VERIFIED
+
+
+# --- Semantic claim-support verification (ADR 0014) -------------------------
+#
+# The second verification pass. Where citation integrity is a deterministic
+# address check, claim support is an LLM judgment about whether the cited
+# evidence actually backs a Major Claim. It is honest by construction: it judges
+# the stored citation snippets (already the source of truth) and is allowed to
+# say PARTIAL or UNSUPPORTED rather than overstate. Unsupported claims are
+# flagged, never deleted, and never fail the run (ADR 0015).
+
+
+class ClaimSupportStatus(str, Enum):
+    """How well the cited evidence supports a Major Claim (ADR 0014)."""
+
+    SUPPORTED = "supported"
+    PARTIAL = "partial"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True)
+class ClaimToVerify:
+    """A Major Claim and the exact cited snippets that should back it.
+
+    ORM-free so the verifier boundary stays swappable and unit-testable
+    (ADR 0009 / 0014); ``evidence`` holds the stored citation snippets, which are
+    the citation source of truth (ADR 0024), never model-invented text.
+    """
+
+    claim_text: str
+    evidence: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ClaimSupportJudgment:
+    status: ClaimSupportStatus
+    rationale: str
+
+
+class ClaimSupportVerifier(Protocol):
+    """Swappable semantic claim-support boundary (ADR 0014 / 0009, client brief).
+
+    The MVP implementation is LLM-backed; tests inject fakes/replays so support
+    classification is exercised without a live model.
+    """
+
+    @property
+    def version(self) -> str: ...
+
+    def verify(self, claim: ClaimToVerify) -> ClaimSupportJudgment: ...
+
+
+class ClaimSupportOutput(BaseModel):
+    """Strict structured output contract for the claim-support pass (ADR 0028).
+
+    Free-form prose is not pipeline truth; the model must return exactly this
+    JSON, which is validated before becoming claim state.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["supported", "partial", "unsupported"]
+    rationale: str = Field(min_length=1)
+
+
+_CLAIM_SUPPORT_SYSTEM_PROMPT = """\
+You are a skeptical incident reviewer judging whether cited evidence supports a
+claim. You are not writing prose; you are auditing support.
+
+Rules:
+- Output ONLY a single JSON object. No prose, no markdown fences.
+- Judge ONLY the evidence snippets provided. Do not use outside knowledge and do
+  not invent facts beyond the snippets.
+- "supported": the snippets clearly and directly establish the claim.
+- "partial": the snippets are related and consistent but do not fully establish
+  the claim (e.g. correlation without causation, or only part of the claim).
+- "unsupported": the snippets do not establish the claim, or contradict it.
+- Always include a one-sentence rationale grounded in the snippets.
+
+The JSON object must match this shape:
+{"status": "supported|partial|unsupported", "rationale": "one sentence"}
+"""
+
+
+def build_claim_support_prompt(claim: ClaimToVerify) -> tuple[str, str]:
+    """Assemble the (system, user) prompt judging one claim against its evidence."""
+    if claim.evidence:
+        evidence = "\n".join(
+            f"[{index}] {snippet}" for index, snippet in enumerate(claim.evidence, start=1)
+        )
+    else:
+        evidence = "(no evidence was cited)"
+    user = (
+        f"CLAIM:\n{claim.claim_text}\n\n"
+        f"CITED EVIDENCE:\n{evidence}\n\n"
+        "Judge how well the cited evidence supports the claim and return the JSON "
+        "object described in the system message."
+    )
+    return _CLAIM_SUPPORT_SYSTEM_PROMPT, user
+
+
+class LLMClaimSupportVerifier:
+    """Default claim-support verifier: one configured LLM behind the interface.
+
+    Builds a strict prompt, calls the LLMClient (ADR 0011), and validates the
+    completion against ``ClaimSupportOutput`` (ADR 0028). Schema-invalid or
+    non-JSON output raises, which the flagging stage turns into a stage failure
+    with one retry (ADR 0029) rather than persisting an unverifiable verdict.
+    """
+
+    version: Final[str] = CLAIM_SUPPORT_VERIFIER_VERSION
+
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+
+    def verify(self, claim: ClaimToVerify) -> ClaimSupportJudgment:
+        system, user = build_claim_support_prompt(claim)
+        response = self._llm.complete(system=system, user=user)
+        try:
+            output = ClaimSupportOutput.model_validate_json(response.text)
+        except ValidationError as exc:
+            raise ValueError(f"claim support output failed schema validation: {exc}") from exc
+        return ClaimSupportJudgment(
+            status=ClaimSupportStatus(output.status),
+            rationale=output.rationale,
+        )

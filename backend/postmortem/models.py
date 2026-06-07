@@ -280,6 +280,11 @@ class Hypothesis(Base):
     # than cited claims.
     unknowns: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     validation_steps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Semantic claim-support outcome stamped by the flagging stage (ADR 0014):
+    # unevaluated | supported | partial | unsupported, with a one-line rationale.
+    # A derived, mutable annotation (not an invariant), so no DB CHECK constraint.
+    support_status: Mapped[str] = mapped_column(String(16), nullable=False, default="unevaluated")
+    support_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     run: Mapped[AnalysisRun] = relationship()
@@ -317,6 +322,10 @@ class ImpactClaim(Base):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     assumption: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Semantic claim-support outcome stamped by the flagging stage (ADR 0014),
+    # mirroring Hypothesis: unevaluated | supported | partial | unsupported.
+    support_status: Mapped[str] = mapped_column(String(16), nullable=False, default="unevaluated")
+    support_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     hypothesis: Mapped[Hypothesis] = relationship(back_populates="impact_claims")

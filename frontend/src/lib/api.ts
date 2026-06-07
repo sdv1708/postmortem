@@ -140,11 +140,21 @@ export interface EvidenceRef {
 
 export type HypothesisReviewStatus = "proposed" | "accepted" | "rejected";
 
+// Semantic claim-support judgment on each Major Claim (ADR 0014). `unevaluated`
+// is the pre-flagging default; the rest are the verifier's verdict.
+export type ClaimSupportStatus =
+  | "unevaluated"
+  | "supported"
+  | "partial"
+  | "unsupported";
+
 export interface ImpactClaim {
   id: string;
   sequence: number;
   description: string;
   assumption: boolean;
+  support_status: ClaimSupportStatus;
+  support_rationale: string | null;
   evidence_refs: EvidenceRef[];
 }
 
@@ -163,6 +173,8 @@ export interface Hypothesis {
   summary: string;
   assumption: boolean;
   review_status: HypothesisReviewStatus;
+  support_status: ClaimSupportStatus;
+  support_rationale: string | null;
   unknowns: string[];
   validation_steps: string[];
   supporting_evidence: EvidenceRef[];
