@@ -6,11 +6,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from ..auth import require_user
 from ..config import Settings
 from ..llm import build_llm_client
+from ..markdown_export import ExportMode, render_markdown
 from ..schemas import (
     AnalysisRunCreate,
     AnalysisRunRead,
     HypothesisRead,
     HypothesisReviewCreate,
+    MarkdownExportCreate,
+    MarkdownExportRead,
+    PostmortemRead,
     TimelineEventRead,
 )
 from ..services import (
@@ -20,6 +24,7 @@ from ..services import (
     HypothesisNotFoundError,
     IncidentNotFoundError,
     NoArtifactsError,
+    PostmortemNotFoundError,
     analysis_run_read,
     hypothesis_read,
     timeline_event_read,
@@ -157,6 +162,64 @@ def list_run_hypotheses(
     except AnalysisRunNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
     return [HypothesisRead.model_validate(hypothesis_read(h)) for h in hypotheses]
+
+
+@router.get("/{run_id}/postmortem", response_model=PostmortemRead)
+def get_run_postmortem(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> PostmortemRead:
+    """The structured Postmortem, the primary Review Surface artifact (ADR 0012).
+
+    404 until the run has reached the drafting stage; the timeline and hypotheses
+    are composed from the run's existing structured rows.
+    """
+    try:
+        document = AnalysisService(db).get_postmortem_document(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except PostmortemNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="this run has not produced a postmortem yet",
+        )
+    return PostmortemRead.model_validate(document)
+
+
+@router.post("/{run_id}/postmortem/export", response_model=MarkdownExportRead)
+def export_run_postmortem(
+    incident_id: str,
+    run_id: str,
+    payload: MarkdownExportCreate,
+    db: Session = Depends(get_db),
+) -> MarkdownExportRead:
+    """Render Markdown from the structured Postmortem on request (ADR 0022).
+
+    Rendering is a command, not a resource read: the Markdown is derived from the
+    structured source of truth and is never parsed back into truth (ADR 0012). A
+    clean export omits unsupported claims and assumptions; an audit export retains
+    them, labeled, for review (ADR 0015).
+    """
+    try:
+        document = AnalysisService(db).get_postmortem_document(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except PostmortemNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="this run has not produced a postmortem yet",
+        )
+    postmortem = PostmortemRead.model_validate(document)
+    markdown = render_markdown(postmortem, ExportMode(payload.mode))
+    return MarkdownExportRead(
+        run_id=run_id,
+        mode=payload.mode,
+        filename=f"postmortem-{run_id}-{payload.mode}.md",
+        markdown=markdown,
+    )
 
 
 @router.post("/{run_id}/hypotheses/{hypothesis_id}/review", response_model=HypothesisRead)

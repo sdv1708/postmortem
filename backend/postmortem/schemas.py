@@ -242,3 +242,47 @@ class HypothesisReviewCreate(BaseModel):
     """Command payload to accept or reject a hypothesis (ADR 0016 / 0022)."""
 
     decision: Literal["accepted", "rejected", "proposed"]
+
+
+# How a Markdown export treats unsupported/assumption claims (ADR 0015).
+ExportMode = Literal["clean", "audit"]
+
+
+class PostmortemRead(BaseModel):
+    """The structured Postmortem for the Review Surface (ADR 0012).
+
+    The composed ``summary`` and ``lessons_learned`` come from the Postmortem
+    row; ``timeline`` and ``hypotheses`` (with their nested impact analysis and
+    remediation) are composed from the run's existing structured rows so the
+    citation source of truth stays the EvidenceRefs (ADR 0024).
+    """
+
+    id: str
+    run_id: str
+    incident_title: str
+    incident_severity: str | None
+    summary: str
+    lessons_learned: list[str]
+    composer_version: str
+    timeline: list[TimelineEventRead]
+    hypotheses: list[HypothesisRead]
+    created_at: datetime
+
+
+class MarkdownExportCreate(BaseModel):
+    """Command payload to render a Markdown export (ADR 0015 / 0022).
+
+    Defaults to the clean, shareable postmortem; ``audit`` additionally surfaces
+    unsupported claims and assumptions for review.
+    """
+
+    mode: ExportMode = "clean"
+
+
+class MarkdownExportRead(BaseModel):
+    """A rendered Markdown export (ADR 0012): derived from structured data only."""
+
+    run_id: str
+    mode: ExportMode
+    filename: str
+    markdown: str

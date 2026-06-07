@@ -59,3 +59,16 @@
   (shared `tests/_fakes.py`) into `AnalysisService`/`PipelineStageRunner`, and
   assert `run.status == "succeeded"` in the shared seed helpers so the failure
   can't hide. Expect the same when stage 5 (drafting) becomes real in #10.
+- Resolution for #10: stage 5 (`drafting_postmortem`) was implemented as a
+  *deterministic* composer (`DeterministicPostmortemComposer`), not an LLM call.
+  That choice does double duty — it satisfies ADR 0026 ("no new factual claims
+  after citation verification") by construction, and because it makes no
+  `complete()` call it never exhausts a seeded `FakeLLMClient`, so the prior
+  full-pipeline tests needed no changes. When a stage only *composes* existing
+  verified outputs, prefer a deterministic implementation behind a swappable
+  Protocol (so an LLM template stays a future drop-in) over wiring the LLM in and
+  paying the seeded-response tax. The structured Postmortem stores only the
+  composed narrative (summary + lessons); the factual sections stay their own
+  rows so EvidenceRefs remain the citation source of truth, and clean-vs-audit
+  export filtering is a render-time concern off the final `support_status`, not
+  baked into the persisted row.

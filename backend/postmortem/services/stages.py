@@ -7,6 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..chunking import ChunkingStrategy, SourceAwareLineWindowChunker
+from ..drafting import (
+    DeterministicPostmortemComposer,
+    HypothesisDigest,
+    PostmortemComposer,
+    PostmortemComposerContext,
+)
 from ..llm import LLMClient, OfflineLLMClient
 from ..models import (
     ActionItem,
@@ -16,6 +22,8 @@ from ..models import (
     EvidenceRef,
     Hypothesis,
     ImpactClaim,
+    Incident,
+    Postmortem,
     TimelineEvent,
     RunArtifact,
 )
@@ -67,6 +75,7 @@ class PipelineStageRunner:
         llm_client: LLMClient | None = None,
         verifier: CitationVerifier | None = None,
         claim_support_verifier: ClaimSupportVerifier | None = None,
+        postmortem_composer: PostmortemComposer | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
@@ -82,6 +91,11 @@ class PipelineStageRunner:
         # LLM. It is only consulted when there are Major Claims to evaluate, so an
         # offline run with no hypotheses never calls a model.
         self._claim_support = claim_support_verifier or LLMClaimSupportVerifier(self._llm)
+        # The Postmortem template is a swappable boundary (client brief, ADR 0009).
+        # The MVP default composes deterministically from the verified structured
+        # outputs and makes no model call, so it introduces no new factual claims
+        # (ADR 0026) and never consumes an LLM response the RCA stage seeded.
+        self._composer = postmortem_composer or DeterministicPostmortemComposer()
         self._artifacts_cache: dict[str, list[Artifact]] = {}
 
     def __call__(self, stage: str, attempt: int, run: AnalysisRun) -> dict | None:
@@ -93,10 +107,10 @@ class PipelineStageRunner:
             return self._generate_rca(run)
         if stage == "verifying_citations":
             return self._verify_citations(run)
+        if stage == "drafting_postmortem":
+            return self._draft_postmortem(run)
         if stage == "flagging_unsupported_claims":
             return self._flag_unsupported_claims(run)
-        # Stage 5 (drafting the postmortem) stays a no-op until a later slice
-        # wires it up.
         return None
 
     def _normalize_evidence(self, run: AnalysisRun) -> dict | None:
@@ -378,6 +392,87 @@ class PipelineStageRunner:
             .where(Hypothesis.run_id == run.id)
         )
         return refs
+
+    def _draft_postmortem(self, run: AnalysisRun) -> dict | None:
+        """Compose the structured Postmortem from the verified outputs (ADR 0012).
+
+        Drafting runs after citation verification, so it may only compose existing
+        claims, never introduce new factual ones (ADR 0026). The composer is fed an
+        ORM-free digest of the run's timeline and hypotheses and returns connective
+        narrative (summary + lessons) only; the factual sections stay their own
+        rows and are assembled at read/export time. This stage adds no EvidenceRefs
+        and mutates no claim.
+
+        Idempotent across the single stage retry (ADR 0029): the run's prior
+        Postmortem (if any) is replaced in place, so a failed-then-retried draft
+        never leaves two postmortems for one run.
+        """
+        self._clear_postmortem(run)
+        incident = self._session.get(Incident, run.incident_id)
+        timeline = list(
+            self._session.scalars(
+                select(TimelineEvent)
+                .where(TimelineEvent.run_id == run.id)
+                .order_by(TimelineEvent.sequence.asc())
+            )
+        )
+        hypotheses = list(
+            self._session.scalars(
+                select(Hypothesis).where(Hypothesis.run_id == run.id).order_by(Hypothesis.rank.asc())
+            )
+        )
+        draft = self._composer.compose(
+            self._build_compose_context(run, incident, timeline, hypotheses)
+        )
+        self._session.add(
+            Postmortem(
+                run_id=run.id,
+                summary=draft.summary,
+                lessons_learned=list(draft.lessons_learned),
+                composer_version=self._composer.version,
+            )
+        )
+        self._session.flush()
+        return None
+
+    def _build_compose_context(
+        self,
+        run: AnalysisRun,
+        incident: Incident | None,
+        timeline: list[TimelineEvent],
+        hypotheses: list[Hypothesis],
+    ) -> PostmortemComposerContext:
+        # Anchor the timeline span on the normalized-timestamp events only, in
+        # chronological order, so the summary never claims a span from an inferred
+        # or unparseable timestamp.
+        dated = [event for event in timeline if event.normalized_ts is not None]
+        earliest = dated[0].original_ts_text if dated else None
+        latest = dated[-1].original_ts_text if dated else None
+        return PostmortemComposerContext(
+            incident_title=incident.title if incident is not None else "Incident",
+            incident_severity=incident.severity if incident is not None else None,
+            artifact_count=len(self._run_artifacts(run)),
+            timeline_event_count=len(timeline),
+            earliest_ts_text=earliest,
+            latest_ts_text=latest,
+            hypotheses=tuple(
+                HypothesisDigest(
+                    rank=hypothesis.rank,
+                    title=hypothesis.title,
+                    assumption=hypothesis.assumption,
+                    unknowns=tuple(hypothesis.unknowns),
+                )
+                for hypothesis in hypotheses
+            ),
+        )
+
+    def _clear_postmortem(self, run: AnalysisRun) -> None:
+        existing = self._session.scalars(
+            select(Postmortem).where(Postmortem.run_id == run.id)
+        )
+        for postmortem in existing:
+            self._session.delete(postmortem)
+        self._session.flush()
 
     def _flag_unsupported_claims(self, run: AnalysisRun) -> dict | None:
         """Classify each Major Claim's evidence support and flag the weak ones.

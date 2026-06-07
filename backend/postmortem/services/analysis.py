@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 
 from ..chunking import CHUNKING_STRATEGY_VERSION
 from ..config import DEFAULT_EXPERIMENT_METADATA
+from ..drafting import PostmortemComposer
 from ..llm import LLMClient
-from ..models import AnalysisRun, Artifact, Hypothesis, RunArtifact, TimelineEvent
+from ..models import AnalysisRun, Artifact, Hypothesis, Postmortem, RunArtifact, TimelineEvent
 from ..rca import PROMPT_VERSION
 from ..schemas import AnalysisRunCreate
 from ..verification import (
@@ -28,6 +29,10 @@ class AnalysisRunNotFoundError(LookupError):
 
 class HypothesisNotFoundError(LookupError):
     pass
+
+
+class PostmortemNotFoundError(LookupError):
+    """Raised when a run has not yet produced a structured Postmortem."""
 
 
 class NoArtifactsError(ValueError):
@@ -63,6 +68,7 @@ class AnalysisService:
         executor: RunExecutor | None = None,
         llm_client: LLMClient | None = None,
         claim_support_verifier: ClaimSupportVerifier | None = None,
+        postmortem_composer: PostmortemComposer | None = None,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
@@ -82,6 +88,7 @@ class AnalysisService:
                 session,
                 llm_client=llm_client,
                 claim_support_verifier=claim_support_verifier,
+                postmortem_composer=postmortem_composer,
             )
         )
 
@@ -181,6 +188,44 @@ class AnalysisService:
             .order_by(Hypothesis.rank.asc())
         )
         return list(self._session.scalars(stmt))
+
+    def get_postmortem(self, incident_id: str, run_id: str) -> Postmortem:
+        """The structured Postmortem composed for a run (ADR 0012).
+
+        Validates the run belongs to the incident first so the endpoint cannot
+        leak another incident's postmortem. Raises if the run has not reached the
+        drafting stage (e.g. it failed earlier, or is still running).
+        """
+        self.get_run(incident_id, run_id)
+        postmortem = self._session.scalar(
+            select(Postmortem).where(Postmortem.run_id == run_id)
+        )
+        if postmortem is None:
+            raise PostmortemNotFoundError(run_id)
+        return postmortem
+
+    def get_postmortem_document(self, incident_id: str, run_id: str) -> dict:
+        """Assemble the full structured Postmortem read model for a run.
+
+        Composes the persisted Postmortem row (summary + lessons) with the run's
+        timeline and ranked hypotheses (impact + remediation hang off each
+        hypothesis). The structured document is the single source of truth that
+        both the Review Surface and the Markdown export render from (ADR 0012).
+        """
+        postmortem = self.get_postmortem(incident_id, run_id)
+        timeline = list(
+            self._session.scalars(
+                select(TimelineEvent)
+                .where(TimelineEvent.run_id == run_id)
+                .order_by(TimelineEvent.sequence.asc())
+            )
+        )
+        hypotheses = list(
+            self._session.scalars(
+                select(Hypothesis).where(Hypothesis.run_id == run_id).order_by(Hypothesis.rank.asc())
+            )
+        )
+        return postmortem_read(postmortem, postmortem.run.incident, timeline, hypotheses)
 
     def review_hypothesis(
         self, incident_id: str, run_id: str, hypothesis_id: str, decision: str
@@ -314,6 +359,27 @@ def hypothesis_read(hypothesis: Hypothesis) -> dict:
         "contradicting_evidence": contradicting,
         "impact_claims": [_impact_claim_read(claim) for claim in hypothesis.impact_claims],
         "action_items": [_action_item_read(item) for item in hypothesis.action_items],
+    }
+
+
+def postmortem_read(postmortem, incident, timeline_events, hypotheses) -> dict:
+    """Shape a Postmortem (with its run's timeline/hypotheses) for PostmortemRead.
+
+    The factual sections are composed from the existing structured rows rather
+    than duplicated onto the Postmortem, so the citation source of truth stays
+    the EvidenceRefs (ADR 0024). ``incident`` provides the title/severity header.
+    """
+    return {
+        "id": postmortem.id,
+        "run_id": postmortem.run_id,
+        "incident_title": incident.title if incident is not None else "Incident",
+        "incident_severity": incident.severity if incident is not None else None,
+        "summary": postmortem.summary,
+        "lessons_learned": list(postmortem.lessons_learned),
+        "composer_version": postmortem.composer_version,
+        "timeline": [timeline_event_read(event) for event in timeline_events],
+        "hypotheses": [hypothesis_read(hypothesis) for hypothesis in hypotheses],
+        "created_at": postmortem.created_at,
     }
 
 

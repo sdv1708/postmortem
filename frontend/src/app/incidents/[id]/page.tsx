@@ -13,9 +13,11 @@ import {
   type ArtifactSourceType,
   type ClaimSupportStatus,
   type EvidenceRef,
+  type ExportMode,
   type Hypothesis,
   type HypothesisReviewStatus,
   type Incident,
+  type Postmortem,
   type RunStage,
   type RunStageEvent,
   type RunStatus,
@@ -251,10 +253,11 @@ export default function IncidentOverviewPage() {
       </Section>
 
       <Section title="Postmortem" description="Drafted from evidence with line-level citations.">
-        <Placeholder
-          tag="Coming in slices 9-10"
-          body="Drafted postmortems and unsupported-claim flagging arrive in #9 and #10."
-        />
+        <div className="card-padded text-sm text-slate-600">
+          Each succeeded analysis run above drafts a structured postmortem — summary, timeline,
+          impact, ranked hypotheses, remediation, and lessons learned — with clean and audit
+          Markdown exports. Open a run to review and export it.
+        </div>
       </Section>
     </div>
   );
@@ -882,8 +885,108 @@ function RunStatusCard({
       {run.status === "succeeded" && (
         <RunHypotheses incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
       )}
+      {run.status === "succeeded" && (
+        <RunPostmortem incidentId={incidentId} runId={run.id} />
+      )}
     </div>
   );
+}
+
+function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: string }) {
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [pendingMode, setPendingMode] = useState<ExportMode | null>(null);
+
+  const postmortemQuery = useQuery<Postmortem>({
+    queryKey: ["run-postmortem", incidentId, runId],
+    queryFn: () => api.getRunPostmortem(incidentId, runId),
+  });
+
+  async function exportMarkdown(mode: ExportMode) {
+    setExportError(null);
+    setPendingMode(mode);
+    try {
+      const result = await api.exportRunPostmortem(incidentId, runId, mode);
+      downloadMarkdown(result.filename, result.markdown);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "Export failed.");
+    } finally {
+      setPendingMode(null);
+    }
+  }
+
+  if (postmortemQuery.isPending) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        <Spinner /> Loading postmortem…
+      </div>
+    );
+  }
+
+  if (postmortemQuery.isError) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-rose-600">
+        Postmortem could not be loaded.
+      </div>
+    );
+  }
+
+  const postmortem = postmortemQuery.data;
+
+  return (
+    <div className="border-t border-slate-200 bg-slate-50/40">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-3">
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Postmortem</p>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void exportMarkdown("clean")}
+            disabled={pendingMode !== null}
+            className="button-secondary"
+          >
+            {pendingMode === "clean" ? "Exporting…" : "Export clean"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void exportMarkdown("audit")}
+            disabled={pendingMode !== null}
+            className="button-secondary"
+          >
+            {pendingMode === "audit" ? "Exporting…" : "Export audit"}
+          </button>
+        </div>
+      </div>
+
+      <p className="px-5 pt-1 text-xs text-slate-500">
+        Clean export omits unsupported claims and assumptions; audit export keeps them, labeled,
+        for review.
+      </p>
+
+      {exportError && (
+        <p className="mx-5 mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {exportError}
+        </p>
+      )}
+
+      <div className="space-y-3 p-5">
+        <p className="text-sm leading-relaxed text-slate-700">{postmortem.summary}</p>
+        {postmortem.lessons_learned.length > 0 && (
+          <BulletGroup label="Lessons learned" items={postmortem.lessons_learned} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function downloadMarkdown(filename: string, markdown: string) {
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function RunHypotheses({
@@ -1461,15 +1564,6 @@ function Section({
       </div>
       {children}
     </section>
-  );
-}
-
-function Placeholder({ tag, body }: { tag: string; body: string }) {
-  return (
-    <div className="card-padded flex flex-wrap items-center justify-between gap-3 border-dashed bg-white/60">
-      <p className="text-sm text-slate-600">{body}</p>
-      <span className="badge bg-slate-100 text-slate-600 ring-slate-200">{tag}</span>
-    </div>
   );
 }
 
