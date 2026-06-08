@@ -1,0 +1,8 @@
+2026-05-09T14:28:31Z INFO deploy v184 rollout reached the api-gateway fleet
+2026-05-09T14:29:02Z INFO request latency p95 nominal at 180ms
+2026-05-09T14:31:10Z WARN upstream database connection acquire wait 1200ms
+2026-05-09T14:32:02Z ERROR HTTP 500 rate climbing: 6% of requests failing
+2026-05-09T14:33:20Z ERROR HTTP 500 rate 22% on checkout and cart endpoints
+2026-05-09T14:36:45Z WARN cache node cache-2 evicted under memory pressure
+2026-05-09T14:41:12Z INFO error rate falling after connection pool resize
+2026-05-09T14:44:50Z INFO HTTP 500 rate back to baseline at 0.2%

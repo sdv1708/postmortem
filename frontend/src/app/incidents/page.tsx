@@ -1,13 +1,18 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { api, type Incident } from "@/lib/api";
+import { api, type Incident, type ScenarioSummary } from "@/lib/api";
 import { SeverityBadge, StatusBadge } from "./_components/badges";
 
 export default function IncidentsPage() {
+  const router = useRouter();
   const [incidents, setIncidents] = useState<Incident[] | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [seeding, setSeeding] = useState<string | null>(null);
+  const [seedError, setSeedError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -25,10 +30,33 @@ export default function IncidentsPage() {
         }
       });
 
+    api
+      .listScenarios()
+      .then((items) => {
+        if (active) {
+          setScenarios(items);
+        }
+      })
+      .catch(() => {
+        // The demo-seed affordance is optional; ignore if scenarios can't load.
+      });
+
     return () => {
       active = false;
     };
   }, []);
+
+  async function seedScenario(scenarioId: string) {
+    setSeeding(scenarioId);
+    setSeedError(null);
+    try {
+      const result = await api.seedScenario(scenarioId);
+      router.push(`/incidents/${result.incident_id}`);
+    } catch (err) {
+      setSeedError(err instanceof Error ? err.message : "Failed to seed the scenario");
+      setSeeding(null);
+    }
+  }
 
   return (
     <div className="space-y-8">
@@ -48,6 +76,54 @@ export default function IncidentsPage() {
           New incident
         </Link>
       </header>
+
+      {scenarios.length > 0 && (
+        <section className="card-padded border-indigo-200 bg-indigo-50/40">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="space-y-1">
+              <p className="label">Demo</p>
+              <h2 className="text-base font-semibold text-slate-900">Seed a synthetic incident</h2>
+              <p className="max-w-prose text-sm text-slate-600">
+                Load a realistic, file-based scenario with evidence and run the full
+                analysis — multiple ranked hypotheses, exact citations, and an honest
+                postmortem — without using real production logs.
+              </p>
+            </div>
+          </div>
+          {seedError && <p className="mt-3 text-sm text-rose-600">{seedError}</p>}
+          <ul className="mt-4 grid gap-3 sm:grid-cols-2">
+            {scenarios.map((scenario) => (
+              <li
+                key={scenario.id}
+                className="flex flex-col gap-3 rounded-xl border border-indigo-200 bg-white p-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-slate-900">{scenario.title}</h3>
+                  {scenario.severity && <SeverityBadge severity={scenario.severity} />}
+                </div>
+                {scenario.ambiguity_notes && (
+                  <p className="line-clamp-3 text-xs leading-relaxed text-slate-600">
+                    {scenario.ambiguity_notes}
+                  </p>
+                )}
+                <div className="mt-auto flex items-center justify-between gap-3">
+                  <span className="text-xs text-slate-500">
+                    {scenario.evidence_count} evidence files
+                  </span>
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    disabled={seeding !== null}
+                    onClick={() => seedScenario(scenario.id)}
+                  >
+                    {seeding === scenario.id ? "Seeding…" : "Seed demo scenario"}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {!incidents && !error && <ListSkeleton />}
 
