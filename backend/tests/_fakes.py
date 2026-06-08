@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from postmortem.drafting import PostmortemComposerContext, PostmortemDraft
 from postmortem.verification import (
     ClaimSupportJudgment,
     ClaimSupportStatus,
@@ -38,3 +39,28 @@ class FakeClaimSupportVerifier:
         if self._judge is not None:
             return self._judge(claim)
         return ClaimSupportJudgment(status=self._status, rationale=self._rationale)
+
+
+class FakePostmortemComposer:
+    """Deterministic Postmortem composer for tests (ADR 0009 swappability).
+
+    Proves the drafting-stage template boundary is real without coupling tests to
+    the production composition. Records the contexts it was handed so a test can
+    assert what structured outputs drafting fed it.
+    """
+
+    version = "fake-template-0"
+
+    def __init__(
+        self,
+        *,
+        summary: str = "Fake composed summary.",
+        lessons: tuple[str, ...] = ("Fake lesson.",),
+    ) -> None:
+        self._summary = summary
+        self._lessons = lessons
+        self.calls: list[PostmortemComposerContext] = []
+
+    def compose(self, context: PostmortemComposerContext) -> PostmortemDraft:
+        self.calls.append(context)
+        return PostmortemDraft(summary=self._summary, lessons_learned=self._lessons)

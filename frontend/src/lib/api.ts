@@ -193,6 +193,33 @@ export interface TimelineEvent {
   evidence_refs: EvidenceRef[];
 }
 
+// The structured Postmortem composed by the drafting stage (ADR 0012). The
+// summary and lessons come from the Postmortem itself; timeline and hypotheses
+// (with nested impact + remediation) are composed from the run's structured rows.
+export interface Postmortem {
+  id: string;
+  run_id: string;
+  incident_title: string;
+  incident_severity: string | null;
+  summary: string;
+  lessons_learned: string[];
+  composer_version: string;
+  timeline: TimelineEvent[];
+  hypotheses: Hypothesis[];
+  created_at: string;
+}
+
+// How a Markdown export treats unsupported/assumption claims (ADR 0015): a clean
+// export omits them; an audit export retains them, labeled, for review.
+export type ExportMode = "clean" | "audit";
+
+export interface MarkdownExport {
+  run_id: string;
+  mode: ExportMode;
+  filename: string;
+  markdown: string;
+}
+
 export interface IncidentCreate {
   title: string;
   summary?: string | null;
@@ -329,6 +356,23 @@ export const api = {
     return request<Hypothesis>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/hypotheses/${hypothesisId}/review`,
       { method: "POST", body: JSON.stringify({ decision }) },
+    );
+  },
+
+  getRunPostmortem(incidentId: string, runId: string): Promise<Postmortem> {
+    return request<Postmortem>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/postmortem`,
+    );
+  },
+
+  exportRunPostmortem(
+    incidentId: string,
+    runId: string,
+    mode: ExportMode,
+  ): Promise<MarkdownExport> {
+    return request<MarkdownExport>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/postmortem/export`,
+      { method: "POST", body: JSON.stringify({ mode }) },
     );
   },
 };

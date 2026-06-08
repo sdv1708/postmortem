@@ -78,6 +78,11 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByRole("rowheader", { name: "2" })).toHaveClass(/bg-amber-100/);
   await expect(page.getByRole("cell", { name: citedSnippet })).toHaveClass(/bg-amber-50/);
 
+  // The drafting stage composed a structured postmortem; its summary and the
+  // clean/audit Markdown export controls render under the succeeded run.
+  await expect(page.getByRole("button", { name: "Export clean" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Export audit" })).toBeVisible();
+
   // The included evidence is now locked: it shows the lock badge and the
   // delete control is disabled.
   await page.getByRole("button", { name: "api-errors.log Logs 2 lines" }).click();

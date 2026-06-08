@@ -362,6 +362,40 @@ class ActionItem(Base):
     )
 
 
+class Postmortem(Base):
+    """The structured Postmortem composed for one Analysis Run (ADR 0012).
+
+    Produced by the ``drafting_postmortem`` stage from already-verified structured
+    outputs (ADR 0026): it stores the composed narrative that is not itself a
+    structured claim — the ``summary`` overview and ``lessons_learned`` follow-ups
+    (CONTEXT "Major Claim vs Generic Text"). The factual sections (timeline,
+    hypotheses, impact, remediation) remain their own run-scoped rows and are
+    composed into the read model and Markdown export, never duplicated here.
+
+    Exactly one Postmortem per run (``run_id`` unique). ``composer_version``
+    records which template produced it for experiment tracking (ADR 0025).
+    """
+
+    __tablename__ = "postmortems"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    # Reflective follow-ups, stored as a JSON string list like a hypothesis's
+    # unknowns; not Major Claims, so they carry no citations.
+    lessons_learned: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    composer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship()
+
+
 class EvidenceRef(Base):
     """A relational citation to an exact Artifact line range (ADR 0024 / 0027).
 

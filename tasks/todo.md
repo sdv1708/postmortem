@@ -1,3 +1,144 @@
+# Slice 9: Draft structured postmortems and render Markdown exports (#10)
+
+## Status of #9 (Slice 8)
+Already implemented and merged via PR #22 (commit 98c7a33). Verified the code,
+tests, and UI are present on `main`; closed issue #9 as completed. This plan
+covers the genuinely-next unimplemented slice, **#10 / Slice 9**.
+
+## Objective
+Make **stage 5 (`drafting_postmortem`)** real: compose a structured Postmortem
+from the already-verified pipeline outputs and persist it as the product source
+of truth (ADR 0012). Add a **command endpoint** that renders Markdown on request
+(ADR 0022), with **clean vs audit** modes (ADR 0015): clean must not present
+unsupported/assumption claims as final fact; audit includes them for review.
+
+## Key design decisions
+- **Deterministic composition, no LLM in stage 5.** ADR 0026 forbids new factual
+  claims after citation verification; a deterministic composer provably invents
+  nothing. This also sidesteps the `lessons.md` pitfall (a no-op stage that
+  starts calling the LLM exhausts seeded `FakeLLMClient`s) — drafting makes no
+  model call, so prior full-pipeline tests are unaffected.
+- **Swappable `PostmortemComposer` boundary** (client brief lists "Postmortem
+  template" as swappable; ADR 0009). Default `DeterministicPostmortemComposer`;
+  tests inject an alternate to prove the seam.
+- **Structured Postmortem = source of truth** (ADR 0012). A new `postmortems`
+  row stores the composed `summary` + `lessons_learned` + `composer_version`;
+  timeline / hypotheses / impact / remediation are already run-scoped rows, so
+  the read model and Markdown renderer compose over them — nothing is duplicated
+  or re-asserted.
+- **Clean vs audit applied at render time.** Stage 5 runs before stage 6
+  (flagging), so `support_status` is final only at export time. The renderer
+  filters by the live `support_status`/`assumption`, keeping the persisted
+  Postmortem mode-agnostic.
+- New table auto-created by `create_all`; no `ensure_schema_compatibility`
+  column upgrade needed (that helper only adds columns to existing tables).
+
+## Plan
+
+### Backend
+- [x] `drafting.py` (new): `POSTMORTEM_COMPOSER_VERSION`; `PostmortemComposer`
+  Protocol; ORM-free `PostmortemComposerContext` + `HypothesisDigest`;
+  `PostmortemDraft`; `DeterministicPostmortemComposer` (summary + lessons from
+  structured context only); `ExportMode` enum; `render_markdown(read, mode)`.
+- [x] `models.py`: `Postmortem` (id, run_id unique FK CASCADE, summary,
+  lessons_learned JSON, composer_version, created_at).
+- [x] `services/stages.py`: route `drafting_postmortem` → `_draft_postmortem`;
+  build context from incident + hypotheses + timeline, compose, persist a single
+  Postmortem row; idempotent across retry (overwrite in place). Inject composer
+  (default `DeterministicPostmortemComposer`).
+- [x] `services/analysis.py`: thread `postmortem_composer`; `get_postmortem`,
+  `postmortem_read` shaper, `export_markdown`; `PostmortemNotFoundError`.
+- [x] `schemas.py`: `PostmortemRead`, `ExportMode`, `MarkdownExportCreate`,
+  `MarkdownExportRead`.
+- [x] `api/analysis_runs.py`: `GET /{run_id}/postmortem` (resource),
+  `POST /{run_id}/postmortem/export` (command, ADR 0022).
+- [x] `services/__init__.py`: export new symbols.
+
+### Frontend
+- [x] `lib/api.ts`: `Postmortem`, `ExportMode`, `MarkdownExport` types;
+  `getRunPostmortem`, `exportRunPostmortem`.
+- [x] Incident page: `RunPostmortem` inside the succeeded run card (summary +
+  lessons learned + clean/audit export buttons that download the `.md`); retire
+  the "Coming in slices 9-10" placeholder.
+
+### Tests
+- [x] `test_drafting.py`: deterministic composer (summary/lessons from context,
+  no invention); `render_markdown` clean omits unsupported/assumption assertions,
+  audit includes them with annotations; output derived only from structured data.
+- [x] `test_stages_drafting.py`: full pipeline persists one Postmortem row;
+  composer swappable (inject fake); drafting adds no EvidenceRefs/claims (counts
+  unchanged across stage 5); run succeeds; idempotent across retry.
+- [x] `test_api_postmortem.py`: GET structured postmortem (+404 before drafted);
+  export clean vs audit; clean excludes an unsupported claim's assertion.
+- [x] Backend pytest green; frontend typecheck/build; e2e.
+
+All plan items are complete (checkboxes above flipped to `[x]`).
+
+## Review Follow-up
+
+- [x] Remove hypothesis titles from persisted summaries so clean exports cannot
+  present an unsupported or assumption root-cause hypothesis as authoritative
+  narrative before stage 6 support filtering has run.
+- [x] Add a composer regression that asserts hypothesis titles are omitted from
+  the summary while counts and timeline context remain.
+
+Verification:
+- `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider` -> 161 passed, 1 warning.
+- `npm run typecheck` -> passed.
+- `npm run build` -> passed after allowing Next.js to fetch Google Fonts.
+- `git diff --check` -> no whitespace errors; Git reported line-ending warnings only.
+
+## Review
+
+Stage 5 (`drafting_postmortem`) is now real. The pipeline composes a structured
+Postmortem from the verified outputs, the Review Surface renders it, and a
+command endpoint renders clean/audit Markdown on request.
+
+### What landed
+- **Deterministic composer** (`drafting.py`). `DeterministicPostmortemComposer`
+  builds the `summary` (restating real counts and timestamp anchors without
+  naming a leading hypothesis before support filtering) and `lessons_learned`
+  (deduped hypothesis unknowns) from an ORM-free
+  `PostmortemComposerContext`. No LLM call, so it provably introduces no new
+  factual claims (ADR 0026) and never disturbs the RCA stage's seeded responses.
+  Behind a swappable `PostmortemComposer` Protocol (client brief template seam).
+- **Structured Postmortem as source of truth** (`models.py`). One `postmortems`
+  row per run holds summary + lessons + `composer_version`; timeline / hypotheses
+  / impact / remediation stay their own rows and are composed into the read model
+  and export — never duplicated, so EvidenceRefs remain the citation truth.
+- **Stage 6-safe ordering.** Drafting runs before flagging, so the persisted
+  Postmortem is mode-agnostic; the clean/audit split is applied at render time
+  off the now-final `support_status`.
+- **Markdown renderer** (`markdown_export.py`). `render_markdown(read, mode)` is
+  pure formatting over the structured read model. Clean omits unsupported claims
+  and assumptions; audit retains them in a labeled "Review findings" section with
+  rationale (ADR 0015). Never parses Markdown back into truth (ADR 0012).
+- **API** (`api/analysis_runs.py`). `GET …/postmortem` (resource read, 404 until
+  drafted) and `POST …/postmortem/export` (command, ADR 0022) with a clean/audit
+  body param.
+- **Review Surface** (`incidents/[id]/page.tsx`). Each succeeded run shows the
+  composed summary + lessons and clean/audit export buttons that download the
+  `.md`; the "coming soon" placeholder is retired.
+
+### Verification
+- Backend: **161 passed** (+21). `test_drafting.py` (composer + renderer clean/
+  audit + derived-from-structured-data), `test_stages_drafting.py` (one row,
+  swappable composer, no new claims across stage 5, idempotent retry, success),
+  `test_api_postmortem.py` (structured read, 404s, clean omits / audit includes
+  unsupported, default clean, auth).
+- Frontend: `npm run typecheck` and `npm run build` clean.
+- e2e: `npx playwright test` **2 passed** — the offline run drafts a postmortem
+  and the export controls render; servers torn down and `_e2e.db` removed.
+
+### Deviations from the plan
+- None of substance. Chose a deterministic composer over an LLM-backed one
+  (Simplicity first + ADR 0026 honesty); the swappable seam keeps an LLM template
+  a future drop-in. `composer_version` lives on the Postmortem row rather than
+  `ExperimentMetadata` to avoid an `analysis_runs` column migration (the new
+  `postmortems` table is created by `create_all`).
+
+---
+
 # Senior Review: Local Changes Against Domain Standards
 
 ## Review Plan
