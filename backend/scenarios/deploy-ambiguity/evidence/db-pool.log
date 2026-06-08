@@ -1,0 +1,6 @@
+2026-05-09T14:31:08Z pool=primary acquired=40 idle=0 pending=37 wait_ms=1200
+2026-05-09T14:32:15Z pool=primary acquired=40 idle=0 pending=58 wait_ms=2600
+2026-05-09T14:33:40Z evt=cache_evict node=cache-2 reason=memory_pressure freed_mb=512
+2026-05-09T14:34:05Z pool=primary acquired=40 idle=0 pending=61 wait_ms=3100
+2026-05-09T14:40:30Z action=pool_resize max_connections=40->80 by=oncall
+2026-05-09T14:41:00Z pool=primary acquired=52 idle=12 pending=0 wait_ms=40

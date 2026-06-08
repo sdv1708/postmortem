@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.analysis_runs import router as analysis_runs_router
 from .api.artifacts import router as artifacts_router
 from .api.incidents import router as incidents_router
+from .api.scenarios import router as scenarios_router
 from .auth import configure_auth
 from .config import Settings
 from .db import Base, ensure_schema_compatibility, make_engine, make_session_factory
@@ -45,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(incidents_router)
     app.include_router(artifacts_router)
     app.include_router(analysis_runs_router)
+    app.include_router(scenarios_router)
     return app
 
 

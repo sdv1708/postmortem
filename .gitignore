@@ -66,6 +66,9 @@ cover/
 
 # Django stuff:
 *.log
+# Scenario fixture evidence is source, not transient logs: keep .log evidence
+# files tracked so the canonical demo seeds from a clean checkout (ADR 0007).
+!backend/scenarios/**/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -167,6 +170,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+/key
 
 # Spyder project settings
 .spyderproject

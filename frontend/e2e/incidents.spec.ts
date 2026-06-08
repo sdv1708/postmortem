@@ -94,6 +94,42 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByText(title)).toBeVisible();
 });
 
+test("seed the canonical demo scenario and review its multi-hypothesis postmortem", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/incidents`);
+
+  // The demo-seed affordance lists the file-based scenario fixtures (ADR 0007).
+  await expect(
+    page.getByRole("heading", { name: "Seed a synthetic incident" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Seed demo scenario" }).first().click();
+
+  // Seeding creates the incident, runs the pipeline on the bundled replay, and
+  // lands on the populated Review Surface.
+  await page.waitForURL(/\/incidents\/[0-9a-f-]{36}$/);
+  await expect(
+    page.getByRole("heading", { name: "Ambiguous deploy-related API error spike" }),
+  ).toBeVisible();
+  await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
+
+  // Multiple ranked hypotheses with verified citations and contradicting
+  // evidence — the founder-demo trust path (ADR 0032).
+  await expect(page.getByText(/RCA hypotheses · 2/)).toBeVisible();
+  await expect(
+    page.getByText("Deploy v184 connection-pool refactor regressed connection handling"),
+  ).toBeVisible();
+  await expect(page.getByRole("img", { name: /Citation verified/ }).first()).toBeVisible();
+
+  // The unevidenced suspicion is separated into auditable Review Findings rather
+  // than presented as fact (ADR 0015).
+  await expect(page.getByText(/Review findings · unsupported · 1/)).toBeVisible();
+
+  // The structured postmortem and its clean/audit exports rendered.
+  await expect(page.getByRole("button", { name: "Export clean" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Export audit" })).toBeVisible();
+});
+
 test("home page links into the incident list", async ({ page }) => {
   await page.goto(BASE);
   await page.getByRole("link", { name: "View incidents" }).click();

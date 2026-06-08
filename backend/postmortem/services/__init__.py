@@ -20,6 +20,7 @@ from .artifacts import (
     canonicalize_body,
 )
 from .incidents import IncidentService, IncidentNotFoundError
+from .scenarios import ScenarioNotFoundError, ScenarioSeedService
 from .run_executor import (
     PlaceholderRunExecutor,
     RunExecutor,
@@ -49,6 +50,8 @@ __all__ = [
     "canonicalize_body",
     "IncidentService",
     "IncidentNotFoundError",
+    "ScenarioNotFoundError",
+    "ScenarioSeedService",
     "PlaceholderRunExecutor",
     "RunExecutor",
     "StageFailedError",

@@ -1,0 +1,54 @@
+# Canonical demo scenario: ambiguous deploy-related API error spike (ADR 0006).
+# File-based fixture (ADR 0007): metadata + evidence + a bundled model replay so
+# the demo runs deterministically and offline (ADR 0011). The Ground-Truth
+# Postmortem is evaluation reference material, not generated product output.
+id: deploy-ambiguity
+title: Ambiguous deploy-related API error spike
+severity: sev2
+status: resolved
+summary: >-
+  API HTTP 500s spiked minutes after the v184 rollout, but a connection pool
+  resize and a coincident cache eviction leave the root cause ambiguous.
+started_at: 2026-05-09T14:28:00Z
+detected_at: 2026-05-09T14:32:00Z
+resolved_at: 2026-05-09T14:45:00Z
+
+ambiguity_notes: >-
+  The deploy, an undersized connection pool, and a cache eviction are all
+  temporally plausible. The pool resize that resolved the incident does not by
+  itself identify the trigger.
+evaluation_tags: [deploy, ambiguous, multi-hypothesis, connection-pool]
+expected_hypothesis_families:
+  - deploy-regression
+  - connection-pool-capacity
+  - upstream-dependency
+
+ground_truth_postmortem: ground_truth_postmortem.md
+
+evidence:
+  - source_type: deployment_notes
+    source_name: deploy-notes.md
+    path: evidence/deploy-notes.md
+  - source_type: logs
+    source_name: api-gateway.log
+    path: evidence/api-gateway.log
+  - source_type: logs
+    source_name: db-pool.log
+    path: evidence/db-pool.log
+  - source_type: incident_notes
+    source_name: oncall-notes.md
+    path: evidence/oncall-notes.md
+
+# Deterministic model behavior for the demo/test path (ADR 0011 fakes/replay).
+# The RCA output cites evidence by source_name; the loader resolves those to the
+# seeded artifact ids. claim_support_overrides drive the semantic verifier so the
+# demo shows the full support spectrum (supported / partial / unsupported).
+replay:
+  rca: replay/rca.json
+  claim_support_overrides:
+    - match: undersized
+      status: partial
+      rationale: >-
+        Pool saturation and the resize that resolved the incident are consistent
+        with a capacity limit but do not establish it as the root cause over the
+        concurrent deploy.

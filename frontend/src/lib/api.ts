@@ -220,6 +220,26 @@ export interface MarkdownExport {
   markdown: string;
 }
 
+// A file-based Incident Scenario the demo operator can seed (ADR 0006 / 0007).
+export interface ScenarioSummary {
+  id: string;
+  title: string;
+  severity: Severity | null;
+  summary: string | null;
+  ambiguity_notes: string | null;
+  evaluation_tags: string[];
+  expected_hypothesis_families: string[];
+  evidence_count: number;
+}
+
+// Result of seeding a scenario: the created incident and its started run.
+export interface ScenarioSeedResult {
+  scenario_id: string;
+  incident_id: string;
+  run_id: string;
+  run_status: RunStatus;
+}
+
 export interface IncidentCreate {
   title: string;
   summary?: string | null;
@@ -278,6 +298,16 @@ export const api = {
 
   getIncident(id: string): Promise<Incident> {
     return request<Incident>(`/api/incidents/${id}`);
+  },
+
+  listScenarios(): Promise<ScenarioSummary[]> {
+    return request<ScenarioSummary[]>("/api/scenarios");
+  },
+
+  seedScenario(scenarioId: string): Promise<ScenarioSeedResult> {
+    return request<ScenarioSeedResult>(`/api/scenarios/${scenarioId}/seed`, {
+      method: "POST",
+    });
   },
 
   createIncident(payload: IncidentCreate): Promise<Incident> {

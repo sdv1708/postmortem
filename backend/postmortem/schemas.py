@@ -286,3 +286,25 @@ class MarkdownExportRead(BaseModel):
     mode: ExportMode
     filename: str
     markdown: str
+
+
+class ScenarioSummaryRead(BaseModel):
+    """A file-based Incident Scenario the demo operator can seed (ADR 0006 / 0007)."""
+
+    id: str
+    title: str
+    severity: str | None
+    summary: str | None
+    ambiguity_notes: str | None
+    evaluation_tags: list[str]
+    expected_hypothesis_families: list[str]
+    evidence_count: int
+
+
+class ScenarioSeedRead(BaseModel):
+    """Result of seeding a scenario: the created Incident and its started run."""
+
+    scenario_id: str
+    incident_id: str
+    run_id: str
+    run_status: RunStatus

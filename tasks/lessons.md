@@ -59,6 +59,26 @@
   (shared `tests/_fakes.py`) into `AnalysisService`/`PipelineStageRunner`, and
   assert `run.status == "succeeded"` in the shared seed helpers so the failure
   can't hide. Expect the same when stage 5 (drafting) becomes real in #10.
+- Recurrence of the polyglot `.gitignore` pitfall (#11): the stock Python
+  `.gitignore` rule `*.log` silently matched the canonical scenario's `.log`
+  evidence fixtures (`backend/scenarios/.../evidence/*.log`), so the demo would
+  fail to seed from a clean checkout (the loader raises on the missing file).
+  When adding file-based fixtures, `git check-ignore -v` every new asset and add
+  a scoped negation (`!backend/scenarios/**/*.log`) for source files that a
+  transient-artifact rule would otherwise swallow. Fixture evidence is source.
+- Slice #10 (#11) demo determinism: the canonical scenario ships its own
+  fakes/replay (ADR 0011) — `replay/rca.json` cites evidence by `source_name`,
+  resolved to seeded artifact ids at seed time, plus claim-support overrides — so
+  the founder-demo trust path runs offline and identically every time. Keep the
+  replay honest in Experiment Metadata (`model_provider=scenario-replay:<id>`, a
+  distinct verifier version) so a replayed run is never mistaken for a live model.
+  Validate the fixture at load time (missing/empty files, unknown source refs,
+  out-of-range line cites, and strict RCA schema) so a broken demo fails fast
+  before any product rows are created instead of half-seeding a failed run.
+- Never leave local credential scratch files in the repo root. If a token-like
+  file appears during development, delete it, add a scoped ignore rule if the
+  filename is likely to recur, and rotate the credential because writing it to
+  disk is already exposure.
 - Resolution for #10: stage 5 (`drafting_postmortem`) was implemented as a
   *deterministic* composer (`DeterministicPostmortemComposer`), not an LLM call.
   That choice does double duty — it satisfies ADR 0026 ("no new factual claims
