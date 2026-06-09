@@ -212,6 +212,18 @@ class ActionItemRead(BaseModel):
     evidence_refs: list[EvidenceRefRead]
 
 
+class ReviewerNoteRead(BaseModel):
+    """A human-authored review annotation separate from generated claims."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    hypothesis_id: str | None
+    body: str
+    created_at: datetime
+
+
 class HypothesisRead(BaseModel):
     """A ranked RCA Hypothesis for the Review Surface (PRD stage 3).
 
@@ -236,12 +248,20 @@ class HypothesisRead(BaseModel):
     contradicting_evidence: list[EvidenceRefRead]
     impact_claims: list[ImpactClaimRead]
     action_items: list[ActionItemRead]
+    reviewer_notes: list[ReviewerNoteRead] = Field(default_factory=list)
 
 
 class HypothesisReviewCreate(BaseModel):
     """Command payload to accept or reject a hypothesis (ADR 0016 / 0022)."""
 
     decision: Literal["accepted", "rejected", "proposed"]
+
+
+class ReviewerNoteCreate(BaseModel):
+    """Command payload to add a Reviewer Note (ADR 0016 / 0022)."""
+
+    body: str = Field(min_length=1, max_length=4000)
+    hypothesis_id: str | None = None
 
 
 # How a Markdown export treats unsupported/assumption claims (ADR 0015).
@@ -308,3 +328,54 @@ class ScenarioSeedRead(BaseModel):
     incident_id: str
     run_id: str
     run_status: RunStatus
+
+
+class EvaluationCheckRead(BaseModel):
+    """One deterministic check outcome in an Evaluation Run (ADR 0010)."""
+
+    name: str
+    passed: bool
+    detail: str
+
+
+class JudgeScoresRead(BaseModel):
+    """Semantic judge rubric scores; never the citation-validity authority (ADR 0010)."""
+
+    scores: dict[str, int]
+    overall: float
+    rationale: str
+
+
+class EvaluationRunCreate(BaseModel):
+    """Command payload to run evaluation (ADR 0022 / 0010).
+
+    Omit ``scenario_id`` to evaluate every available scenario fixture.
+    """
+
+    scenario_id: str | None = None
+
+
+class EvaluationRunRead(BaseModel):
+    """A recorded Evaluation Run for the dev dashboard (ADR 0010 / 0025).
+
+    Citation validity lives in ``citation_verified`` / the ``citation_integrity``
+    check, never in ``judge_scores`` — which may be null when no model is
+    configured.
+    """
+
+    id: str
+    scenario_id: str
+    scenario_title: str
+    status: str
+    analysis_run_status: RunStatus
+    passed: bool
+    experiment_metadata: ExperimentMetadata
+    check_suite_version: str
+    judge_version: str | None
+    citation_total: int
+    citation_verified: int
+    checks: list[EvaluationCheckRead]
+    warning_code_counts: dict[str, int]
+    judge_scores: JudgeScoresRead | None
+    error: str | None
+    created_at: datetime

@@ -28,6 +28,7 @@ from ..models import (
     RunArtifact,
 )
 from ..rca import RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
+from ..retrieval import DeterministicChunkArtifactRetrievalStrategy, RetrievalStrategy
 from ..timestamps import parse_timestamp
 from ..verification import (
     CitationIntegrityStatus,
@@ -76,6 +77,7 @@ class PipelineStageRunner:
         verifier: CitationVerifier | None = None,
         claim_support_verifier: ClaimSupportVerifier | None = None,
         postmortem_composer: PostmortemComposer | None = None,
+        retrieval_strategy: RetrievalStrategy | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
@@ -96,6 +98,10 @@ class PipelineStageRunner:
         # outputs and makes no model call, so it introduces no new factual claims
         # (ADR 0026) and never consumes an LLM response the RCA stage seeded.
         self._composer = postmortem_composer or DeterministicPostmortemComposer()
+        # Retrieval is a swappable deterministic boundary (ADR 0008/0009/0031).
+        # The default uses persisted chunks to select artifact candidates while
+        # preserving Artifact line numbers as the citation source of truth.
+        self._retrieval = retrieval_strategy or DeterministicChunkArtifactRetrievalStrategy()
         self._artifacts_cache: dict[str, list[Artifact]] = {}
 
     def __call__(self, stage: str, attempt: int, run: AnalysisRun) -> dict | None:
@@ -237,7 +243,13 @@ class PipelineStageRunner:
                 .order_by(TimelineEvent.sequence.asc())
             )
         )
-        system, user = build_rca_prompt(artifacts, timeline)
+        retrieval = self._retrieval.select_for_rca(
+            session=self._session,
+            run=run,
+            artifacts=artifacts,
+            timeline_events=timeline,
+        )
+        system, user = build_rca_prompt(retrieval.artifacts, timeline)
         response = self._llm.complete(system=system, user=user)
         try:
             output = RcaGenerationOutput.model_validate_json(response.text)
@@ -246,7 +258,7 @@ class PipelineStageRunner:
             # than becoming pipeline state (ADR 0028).
             raise ValueError(f"RCA output failed schema validation: {exc}") from exc
 
-        by_id = {artifact.id: artifact for artifact in artifacts}
+        by_id = {artifact.id: artifact for artifact in retrieval.artifacts}
         warning_codes: list[str] = []
         for rank, hyp in enumerate(output.hypotheses, start=1):
             supporting = self._resolve_refs(by_id, hyp.supporting_evidence, "supporting")

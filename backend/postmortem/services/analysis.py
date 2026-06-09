@@ -9,9 +9,10 @@ from ..chunking import CHUNKING_STRATEGY_VERSION
 from ..config import DEFAULT_EXPERIMENT_METADATA
 from ..drafting import PostmortemComposer
 from ..llm import LLMClient
-from ..models import AnalysisRun, Artifact, Hypothesis, Postmortem, RunArtifact, TimelineEvent
+from ..models import AnalysisRun, Artifact, Hypothesis, Postmortem, ReviewerNote, RunArtifact, TimelineEvent
 from ..rca import PROMPT_VERSION
-from ..schemas import AnalysisRunCreate
+from ..retrieval import RETRIEVAL_STRATEGY_VERSION, RetrievalStrategy
+from ..schemas import AnalysisRunCreate, ReviewerNoteCreate
 from ..verification import (
     CITATION_VERIFIER_VERSION,
     CLAIM_SUPPORT_VERIFIER_VERSION,
@@ -69,9 +70,15 @@ class AnalysisService:
         llm_client: LLMClient | None = None,
         claim_support_verifier: ClaimSupportVerifier | None = None,
         postmortem_composer: PostmortemComposer | None = None,
+        retrieval_strategy: RetrievalStrategy | None = None,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
+        self._retrieval_strategy_version = (
+            retrieval_strategy.version
+            if retrieval_strategy is not None
+            else RETRIEVAL_STRATEGY_VERSION
+        )
         self._claim_support_verifier_version = (
             claim_support_verifier.version
             if claim_support_verifier is not None
@@ -89,6 +96,7 @@ class AnalysisService:
                 llm_client=llm_client,
                 claim_support_verifier=claim_support_verifier,
                 postmortem_composer=postmortem_composer,
+                retrieval_strategy=retrieval_strategy,
             )
         )
 
@@ -112,6 +120,7 @@ class AnalysisService:
         metadata = {
             **DEFAULT_EXPERIMENT_METADATA,
             "chunking_strategy": CHUNKING_STRATEGY_VERSION,
+            "retrieval_strategy": self._retrieval_strategy_version,
             "verifier_version": f"{CITATION_VERIFIER_VERSION}+{self._claim_support_verifier_version}",
         }
         if self._llm_client is not None:
@@ -241,6 +250,27 @@ class AnalysisService:
         self._session.flush()
         return hypothesis
 
+    def add_reviewer_note(
+        self, incident_id: str, run_id: str, payload: ReviewerNoteCreate
+    ) -> ReviewerNote:
+        """Record a human review note without rewriting generated claims (ADR 0016)."""
+        self.get_run(incident_id, run_id)
+        hypothesis = None
+        if payload.hypothesis_id is not None:
+            hypothesis = self._session.get(Hypothesis, payload.hypothesis_id)
+            if hypothesis is None or hypothesis.run_id != run_id:
+                raise HypothesisNotFoundError(payload.hypothesis_id)
+        body = payload.body.strip()
+        if not body:
+            raise ValueError("reviewer note body cannot be blank")
+        note = ReviewerNote(run_id=run_id, hypothesis_id=payload.hypothesis_id, body=body)
+        if hypothesis is None:
+            self._session.add(note)
+        else:
+            hypothesis.reviewer_notes.append(note)
+        self._session.flush()
+        return note
+
     def _resolve_artifacts(
         self, incident_id: str, artifact_ids: list[str] | None
     ) -> list[Artifact]:
@@ -334,6 +364,20 @@ def _action_item_read(item) -> dict:
     }
 
 
+def reviewer_note_read(note: ReviewerNote) -> dict:
+    """Shape a ReviewerNote with unambiguous UTC timestamps."""
+    created_at = note.created_at
+    if created_at is not None and created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return {
+        "id": note.id,
+        "run_id": note.run_id,
+        "hypothesis_id": note.hypothesis_id,
+        "body": note.body,
+        "created_at": created_at,
+    }
+
+
 def hypothesis_read(hypothesis: Hypothesis) -> dict:
     """Shape a Hypothesis (with claims/citations) for HypothesisRead.
 
@@ -359,6 +403,7 @@ def hypothesis_read(hypothesis: Hypothesis) -> dict:
         "contradicting_evidence": contradicting,
         "impact_claims": [_impact_claim_read(claim) for claim in hypothesis.impact_claims],
         "action_items": [_action_item_read(item) for item in hypothesis.action_items],
+        "reviewer_notes": [reviewer_note_read(note) for note in hypothesis.reviewer_notes],
     }
 
 

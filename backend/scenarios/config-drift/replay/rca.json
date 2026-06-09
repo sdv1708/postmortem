@@ -1,0 +1,71 @@
+{
+  "hypotheses": [
+    {
+      "title": "Config drift disabled response caching and overloaded the database",
+      "summary": "An automated config sync flipped response_cache_enabled to false at 22:10; database read QPS tripled and product-listing latency spiked until the cache was re-enabled.",
+      "supporting_evidence": [
+        {"source_name": "app.log", "line_start": 1, "line_end": 2, "confidence_score": 0.9},
+        {"source_name": "db-metrics.log", "line_start": 1, "line_end": 2, "confidence_score": 0.85},
+        {"source_name": "app.log", "line_start": 4, "line_end": 4, "confidence_score": 0.8}
+      ],
+      "contradicting_evidence": [],
+      "unknowns": [
+        "Why a staging-only config edit propagated to production"
+      ],
+      "validation_steps": [
+        "Trace the config sync pipeline for the r512 revision",
+        "Confirm the cache hit ratio dropped to zero at 22:10"
+      ],
+      "impact_claims": [
+        {
+          "description": "Product listing p99 latency reached 5 seconds during the incident",
+          "evidence": [
+            {"source_name": "app.log", "line_start": 4, "line_end": 4}
+          ]
+        }
+      ],
+      "remediation_items": [
+        {
+          "description": "Gate production config changes behind review and add config drift detection",
+          "evidence": [
+            {"source_name": "config-audit.md", "line_start": 4, "line_end": 4}
+          ]
+        }
+      ]
+    },
+    {
+      "title": "An organic traffic surge overloaded the database",
+      "summary": "The database read QPS rose well above baseline, which an unrelated traffic surge could explain independently of the cache flag.",
+      "supporting_evidence": [
+        {"source_name": "db-metrics.log", "line_start": 1, "line_end": 2, "confidence_score": 0.6}
+      ],
+      "contradicting_evidence": [
+        {"source_name": "app.log", "line_start": 2, "line_end": 2}
+      ],
+      "unknowns": [
+        "Whether edge request volume actually rose at 22:10"
+      ],
+      "validation_steps": [
+        "Compare edge request volume against the database read QPS at 22:10"
+      ],
+      "impact_claims": [],
+      "remediation_items": []
+    },
+    {
+      "title": "A code change regressed the caching layer",
+      "summary": "A code change could have disabled caching, but no application deploy accompanied the incident.",
+      "supporting_evidence": [],
+      "contradicting_evidence": [
+        {"source_name": "config-audit.md", "line_start": 5, "line_end": 5}
+      ],
+      "unknowns": [
+        "Whether any background job altered cache behavior"
+      ],
+      "validation_steps": [
+        "Audit deploy and job history for the cache service around 22:10"
+      ],
+      "impact_claims": [],
+      "remediation_items": []
+    }
+  ]
+}

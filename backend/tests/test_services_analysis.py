@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from postmortem.models import Artifact
+from postmortem.retrieval import RETRIEVAL_STRATEGY_VERSION
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import (
     AnalysisService,
@@ -42,7 +43,7 @@ def test_start_run_persists_experiment_metadata_defaults(fresh_session):
     fresh_session.commit()
 
     assert run.pipeline_version == "mvp-0"
-    assert run.retrieval_strategy == "deterministic-0"
+    assert run.retrieval_strategy == RETRIEVAL_STRATEGY_VERSION
     # Slice 5 wired a real Chunking Strategy; the run records its version.
     assert run.chunking_strategy == "source-aware-1"
 

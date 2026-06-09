@@ -4,6 +4,7 @@ import json
 
 from postmortem.llm import FakeLLMClient
 from postmortem.models import EvidenceChunk, Hypothesis, RunStageEvent, TimelineEvent
+from postmortem.retrieval import RetrievalResult
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 
@@ -142,6 +143,58 @@ def test_ambiguous_evidence_yields_multiple_ranked_hypotheses(fresh_session):
     assert event.status == "succeeded"
     assert event.usage == {"total_tokens": 321}
     assert fake.calls, "the configured client was actually invoked"
+
+
+def test_rca_generation_uses_injected_retrieval_strategy(fresh_session):
+    incident = _incident(fresh_session)
+    ignored = _add(fresh_session, incident.id, body="ignored line", source_name="ignored.log")
+    selected = _add(fresh_session, incident.id, body="selected line", source_name="selected.log")
+    fresh_session.commit()
+
+    class SelectSecondArtifact:
+        version = "test-retrieval-1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def select_for_rca(self, *, session, run, artifacts, timeline_events):
+            self.calls += 1
+            assert {artifact.id for artifact in artifacts} == {ignored.id, selected.id}
+            return RetrievalResult(artifacts=(selected,))
+
+    retrieval = SelectSecondArtifact()
+    fake = FakeLLMClient(
+        [
+            json.dumps(
+                {
+                    "hypotheses": [
+                        {
+                            "title": "Selected evidence only",
+                            "summary": "The injected retrieval strategy selected one artifact.",
+                            "supporting_evidence": [
+                                {"artifact_id": selected.id, "line_start": 1, "line_end": 1}
+                            ],
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    run = AnalysisService(
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        retrieval_strategy=retrieval,
+    ).start_run(incident.id, AnalysisRunCreate())
+    fresh_session.commit()
+
+    assert run.status == "succeeded"
+    assert run.retrieval_strategy == "test-retrieval-1"
+    assert retrieval.calls == 1
+    assert "selected.log" in fake.calls[0][1]
+    assert "ignored.log" not in fake.calls[0][1]
+    hyp = _hypotheses(fresh_session, run.id)[0]
+    assert hyp.evidence_refs[0].artifact_id == selected.id
 
 
 def test_schema_invalid_output_fails_stage_without_corrupting_prior_outputs(fresh_session):

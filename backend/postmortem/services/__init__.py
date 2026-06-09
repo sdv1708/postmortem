@@ -7,10 +7,16 @@ from .analysis import (
     analysis_run_read,
     hypothesis_read,
     postmortem_read,
+    reviewer_note_read,
     run_artifact_ids,
     timeline_event_read,
 )
 from .stages import PipelineStageRunner
+from ..retrieval import (
+    DeterministicChunkArtifactRetrievalStrategy,
+    RetrievalResult,
+    RetrievalStrategy,
+)
 from .artifacts import (
     ArtifactLockedError,
     ArtifactNotFoundError,
@@ -19,6 +25,7 @@ from .artifacts import (
     artifact_lines,
     canonicalize_body,
 )
+from .evaluation import EvaluationRunner, evaluation_run_read
 from .incidents import IncidentService, IncidentNotFoundError
 from .scenarios import ScenarioNotFoundError, ScenarioSeedService
 from .run_executor import (
@@ -39,9 +46,13 @@ __all__ = [
     "analysis_run_read",
     "hypothesis_read",
     "postmortem_read",
+    "reviewer_note_read",
     "run_artifact_ids",
     "timeline_event_read",
     "PipelineStageRunner",
+    "DeterministicChunkArtifactRetrievalStrategy",
+    "RetrievalResult",
+    "RetrievalStrategy",
     "ArtifactLockedError",
     "ArtifactNotFoundError",
     "ArtifactService",
@@ -50,6 +61,8 @@ __all__ = [
     "canonicalize_body",
     "IncidentService",
     "IncidentNotFoundError",
+    "EvaluationRunner",
+    "evaluation_run_read",
     "ScenarioNotFoundError",
     "ScenarioSeedService",
     "PlaceholderRunExecutor",

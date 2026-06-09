@@ -1030,6 +1030,32 @@ function RunHypotheses({
       );
     },
   });
+  const noteMutation = useMutation({
+    mutationFn: ({
+      hypothesisId,
+      body,
+    }: {
+      hypothesisId: string;
+      body: string;
+    }) => api.addReviewerNote(incidentId, runId, { hypothesis_id: hypothesisId, body }),
+    onMutate: () => {
+      setReviewError(null);
+    },
+    onSuccess: (note) => {
+      queryClient.setQueryData<Hypothesis[]>(hypothesesKey, (current) =>
+        current?.map((h) =>
+          h.id === note.hypothesis_id
+            ? { ...h, reviewer_notes: [...h.reviewer_notes, note] }
+            : h,
+        ),
+      );
+    },
+    onError: (error) => {
+      setReviewError(
+        error instanceof Error ? error.message : "Reviewer note could not be saved.",
+      );
+    },
+  });
 
   if (hypothesesQuery.isPending) {
     return (
@@ -1073,6 +1099,13 @@ function RunHypotheses({
           reviewMutation.isPending &&
           reviewMutation.variables?.hypothesisId === hypothesis.id
         }
+        onAddNote={(body) =>
+          noteMutation.mutateAsync({ hypothesisId: hypothesis.id, body }).then(() => undefined)
+        }
+        isSavingNote={
+          noteMutation.isPending &&
+          noteMutation.variables?.hypothesisId === hypothesis.id
+        }
         onFocusEvidence={onFocusEvidence}
       />
     </li>
@@ -1113,13 +1146,28 @@ function HypothesisCard({
   hypothesis,
   onReview,
   isReviewing,
+  onAddNote,
+  isSavingNote,
   onFocusEvidence,
 }: {
   hypothesis: Hypothesis;
   onReview: (decision: HypothesisReviewStatus) => void;
   isReviewing: boolean;
+  onAddNote: (body: string) => Promise<void>;
+  isSavingNote: boolean;
   onFocusEvidence: (ref: EvidenceRef) => void;
 }) {
+  const [noteBody, setNoteBody] = useState("");
+
+  async function submitNote() {
+    const body = noteBody.trim();
+    if (!body) {
+      return;
+    }
+    await onAddNote(body);
+    setNoteBody("");
+  }
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
@@ -1235,6 +1283,49 @@ function HypothesisCard({
         {hypothesis.validation_steps.length > 0 && (
           <BulletGroup label="Validation steps" items={hypothesis.validation_steps} />
         )}
+
+        <div className="space-y-2 border-t border-slate-100 pt-3">
+          <p className="label">Reviewer notes</p>
+          {hypothesis.reviewer_notes.length > 0 && (
+            <ul className="space-y-2">
+              {hypothesis.reviewer_notes.map((note) => (
+                <li
+                  key={note.id}
+                  className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+                >
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
+                    {note.body}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {new Date(note.created_at).toLocaleString()}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form
+            className="space-y-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitNote();
+            }}
+          >
+            <textarea
+              value={noteBody}
+              onChange={(event) => setNoteBody(event.target.value)}
+              rows={3}
+              placeholder="Add reviewer context."
+              className="text-sm leading-relaxed"
+            />
+            <button
+              type="submit"
+              disabled={isSavingNote || !noteBody.trim()}
+              className="button-secondary"
+            >
+              {isSavingNote ? "Saving..." : "Add note"}
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );

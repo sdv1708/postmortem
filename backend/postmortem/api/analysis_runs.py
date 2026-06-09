@@ -15,6 +15,8 @@ from ..schemas import (
     MarkdownExportCreate,
     MarkdownExportRead,
     PostmortemRead,
+    ReviewerNoteCreate,
+    ReviewerNoteRead,
     TimelineEventRead,
 )
 from ..services import (
@@ -27,6 +29,7 @@ from ..services import (
     PostmortemNotFoundError,
     analysis_run_read,
     hypothesis_read,
+    reviewer_note_read,
     timeline_event_read,
 )
 from .deps import get_db
@@ -242,3 +245,24 @@ def review_run_hypothesis(
     except HypothesisNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hypothesis not found")
     return HypothesisRead.model_validate(hypothesis_read(hypothesis))
+
+
+@router.post("/{run_id}/review-notes", response_model=ReviewerNoteRead, status_code=status.HTTP_201_CREATED)
+def add_run_reviewer_note(
+    incident_id: str,
+    run_id: str,
+    payload: ReviewerNoteCreate,
+    db: Session = Depends(get_db),
+) -> ReviewerNoteRead:
+    """Record a Reviewer Note without editing generated claims (ADR 0016)."""
+    try:
+        note = AnalysisService(db).add_reviewer_note(incident_id, run_id, payload)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except HypothesisNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hypothesis not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return ReviewerNoteRead.model_validate(reviewer_note_read(note))

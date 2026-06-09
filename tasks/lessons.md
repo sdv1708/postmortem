@@ -1,3 +1,22 @@
+- Adding scenario fixtures broke a slice-10 Playwright test that clicked
+  `getByRole("button", { name: "Seed demo scenario" }).first()`: with three
+  scenarios listed, `.first()` selected a different (alphabetically-first) card.
+  When a list can grow, never select list controls by `.first()` in e2e — scope
+  the click to the specific row (`getByRole("listitem").filter({ hasText: ... })`).
+  Growing fixtures is a normal future event; order-dependent selectors are a trap.
+- Slice #11 (#12) evaluation independence: to run scenario fixtures "independently
+  of product Incident data", the EvaluationRunner materializes each run in an
+  ephemeral in-memory SQLite engine (StaticPool + check_same_thread=False so the
+  in-memory DB is shared across the session), computes ORM-free check results from
+  it, disposes the engine, and persists only the EvaluationRun row to the real
+  session. This leaves zero product Incident/Artifact rows behind and avoids
+  cascade/lock headaches from deleting a seeded incident. Keep the deterministic
+  check floor (citation integrity, required outputs, timeline ordering,
+  multiplicity) and the LLM judge as separate recorded fields — citation validity
+  is the deterministic `verifier_status` count, never the judge (ADR 0010). Do not
+  bake judge scores into fixtures (unlike the RCA replay): a pre-baked grade makes
+  the judge dimension a tautology, so the judge is null offline and injected as a
+  fake only in tests.
 - For light-themed UI, do not set `color-scheme: light dark` unless every native
   form control has been checked in dark browser mode. Force explicit light
   input/select/textarea colors when the app background and text are light.

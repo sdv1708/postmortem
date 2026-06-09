@@ -1,0 +1,77 @@
+{
+  "hypotheses": [
+    {
+      "title": "Upstream payments provider degradation caused the checkout failures",
+      "summary": "The payments provider returned 504s and our circuit breaker opened minutes before the checkout 502 spike; the provider's own status page confirmed an upstream incident.",
+      "supporting_evidence": [
+        {"source_name": "payments-provider.log", "line_start": 1, "line_end": 2, "confidence_score": 0.9},
+        {"source_name": "status-page.md", "line_start": 2, "line_end": 2, "confidence_score": 0.85},
+        {"source_name": "api-gateway.log", "line_start": 3, "line_end": 4, "confidence_score": 0.85}
+      ],
+      "contradicting_evidence": [],
+      "unknowns": [
+        "Whether a specific charge.create call pattern worsened the provider timeouts"
+      ],
+      "validation_steps": [
+        "Correlate the provider 504 timestamps with our 502 spike",
+        "Confirm the provider incident window against their status API"
+      ],
+      "impact_claims": [
+        {
+          "description": "Checkout returned 502 errors to 31% of requests across all regions",
+          "evidence": [
+            {"source_name": "api-gateway.log", "line_start": 4, "line_end": 4}
+          ]
+        }
+      ],
+      "remediation_items": [
+        {
+          "description": "Add a fallback and circuit-aware handling for charge.create outages",
+          "evidence": [
+            {"source_name": "status-page.md", "line_start": 5, "line_end": 5}
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Missing client-side retry and backoff amplified the provider blip",
+      "summary": "Our integration has no retry or backoff on charge.create, so a transient provider degradation surfaced directly to users as checkout failures.",
+      "supporting_evidence": [
+        {"source_name": "status-page.md", "line_start": 5, "line_end": 5, "confidence_score": 0.7},
+        {"source_name": "oncall-notes.md", "line_start": 6, "line_end": 6, "confidence_score": 0.7}
+      ],
+      "contradicting_evidence": [
+        {"source_name": "api-gateway.log", "line_start": 5, "line_end": 6}
+      ],
+      "unknowns": [
+        "How many 502s a bounded retry would have absorbed"
+      ],
+      "validation_steps": [
+        "Replay the provider timeout window against a retry-enabled client in staging"
+      ],
+      "impact_claims": [],
+      "remediation_items": [
+        {
+          "description": "Implement idempotent retries with jittered backoff on charge.create",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "title": "A local checkout deploy regressed payments handling",
+      "summary": "A recent checkout deploy might have changed payments handling, but no deploy occurred in this window.",
+      "supporting_evidence": [],
+      "contradicting_evidence": [
+        {"source_name": "oncall-notes.md", "line_start": 5, "line_end": 5}
+      ],
+      "unknowns": [
+        "Whether any out-of-band change touched the checkout service"
+      ],
+      "validation_steps": [
+        "Audit the deploy log for the checkout service around 09:00-09:10"
+      ],
+      "impact_claims": [],
+      "remediation_items": []
+    }
+  ]
+}

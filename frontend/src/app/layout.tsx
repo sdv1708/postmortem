@@ -53,6 +53,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 >
                   Incidents
                 </Link>
+                <Link
+                  href="/evaluations"
+                  className="rounded-md px-3 py-1.5 font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+                >
+                  Evaluations
+                </Link>
               </nav>
             </div>
           </header>

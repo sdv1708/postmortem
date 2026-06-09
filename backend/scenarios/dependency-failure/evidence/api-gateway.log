@@ -1,0 +1,6 @@
+2026-03-12T09:02:10Z INFO checkout request volume nominal
+2026-03-12T09:05:44Z WARN payments provider latency 4200ms on charge.create
+2026-03-12T09:06:20Z ERROR checkout 502 from payments upstream: gateway timeout
+2026-03-12T09:07:05Z ERROR checkout 502 rate 31% across all regions
+2026-03-12T09:14:30Z INFO payments provider latency recovering to 600ms
+2026-03-12T09:16:10Z INFO checkout error rate back to baseline

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.analysis_runs import router as analysis_runs_router
 from .api.artifacts import router as artifacts_router
+from .api.evaluations import router as evaluations_router
 from .api.incidents import router as incidents_router
 from .api.scenarios import router as scenarios_router
 from .auth import configure_auth
@@ -47,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(artifacts_router)
     app.include_router(analysis_runs_router)
     app.include_router(scenarios_router)
+    app.include_router(evaluations_router)
     return app
 
 

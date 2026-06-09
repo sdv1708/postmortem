@@ -3,11 +3,48 @@ from __future__ import annotations
 from typing import Callable
 
 from postmortem.drafting import PostmortemComposerContext, PostmortemDraft
+from postmortem.evaluation import JudgeInput, JudgeResult
 from postmortem.verification import (
     ClaimSupportJudgment,
     ClaimSupportStatus,
     ClaimToVerify,
 )
+
+
+class FakePostmortemJudge:
+    """Deterministic LLM-as-judge for tests (ADR 0009 / 0010 swappability).
+
+    Proves the judge boundary is real without a live model. Records the inputs it
+    was handed so a test can assert what the evaluation runner fed it, and returns
+    fixed rubric scores by default.
+    """
+
+    version = "fake-judge-0"
+
+    def __init__(
+        self,
+        *,
+        scores: dict[str, int] | None = None,
+        rationale: str = "Fake judge rationale.",
+    ) -> None:
+        self._scores = scores or {
+            "timeline_accuracy": 5,
+            "root_cause_quality": 4,
+            "evidence_grounding": 5,
+            "uncertainty_honesty": 5,
+        }
+        self._rationale = rationale
+        self.calls: list[JudgeInput] = []
+
+    def judge(self, payload: JudgeInput) -> JudgeResult:
+        self.calls.append(payload)
+        overall = round(sum(self._scores.values()) / len(self._scores), 2)
+        return JudgeResult(
+            scores=dict(self._scores),
+            overall=overall,
+            rationale=self._rationale,
+            version=self.version,
+        )
 
 
 class FakeClaimSupportVerifier:

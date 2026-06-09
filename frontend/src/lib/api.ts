@@ -165,6 +165,14 @@ export interface ActionItem {
   evidence_refs: EvidenceRef[];
 }
 
+export interface ReviewerNote {
+  id: string;
+  run_id: string;
+  hypothesis_id: string | null;
+  body: string;
+  created_at: string;
+}
+
 export interface Hypothesis {
   id: string;
   run_id: string;
@@ -181,6 +189,7 @@ export interface Hypothesis {
   contradicting_evidence: EvidenceRef[];
   impact_claims: ImpactClaim[];
   action_items: ActionItem[];
+  reviewer_notes: ReviewerNote[];
 }
 
 export interface TimelineEvent {
@@ -238,6 +247,40 @@ export interface ScenarioSeedResult {
   incident_id: string;
   run_id: string;
   run_status: RunStatus;
+}
+
+// One deterministic check outcome in an Evaluation Run (ADR 0010 trust floor).
+export interface EvaluationCheck {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+// Semantic judge rubric scores. Never the citation-validity authority (ADR 0010).
+export interface JudgeScores {
+  scores: Record<string, number>;
+  overall: number;
+  rationale: string;
+}
+
+// A recorded Evaluation Run for the dev dashboard (ADR 0010 / 0025).
+export interface EvaluationRun {
+  id: string;
+  scenario_id: string;
+  scenario_title: string;
+  status: string;
+  analysis_run_status: RunStatus;
+  passed: boolean;
+  experiment_metadata: ExperimentMetadata;
+  check_suite_version: string;
+  judge_version: string | null;
+  citation_total: number;
+  citation_verified: number;
+  checks: EvaluationCheck[];
+  warning_code_counts: Record<string, number>;
+  judge_scores: JudgeScores | null;
+  error: string | null;
+  created_at: string;
 }
 
 export interface IncidentCreate {
@@ -307,6 +350,17 @@ export const api = {
   seedScenario(scenarioId: string): Promise<ScenarioSeedResult> {
     return request<ScenarioSeedResult>(`/api/scenarios/${scenarioId}/seed`, {
       method: "POST",
+    });
+  },
+
+  listEvaluations(): Promise<EvaluationRun[]> {
+    return request<EvaluationRun[]>("/api/evaluations");
+  },
+
+  runEvaluations(scenarioId?: string): Promise<EvaluationRun[]> {
+    return request<EvaluationRun[]>("/api/evaluations", {
+      method: "POST",
+      body: JSON.stringify(scenarioId ? { scenario_id: scenarioId } : {}),
     });
   },
 
@@ -386,6 +440,17 @@ export const api = {
     return request<Hypothesis>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/hypotheses/${hypothesisId}/review`,
       { method: "POST", body: JSON.stringify({ decision }) },
+    );
+  },
+
+  addReviewerNote(
+    incidentId: string,
+    runId: string,
+    payload: { body: string; hypothesis_id?: string | null },
+  ): Promise<ReviewerNote> {
+    return request<ReviewerNote>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/review-notes`,
+      { method: "POST", body: JSON.stringify(payload) },
     );
   },
 

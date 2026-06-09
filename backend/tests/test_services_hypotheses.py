@@ -12,7 +12,7 @@ from postmortem.llm import (
     build_llm_client,
 )
 from postmortem.rca import PROMPT_VERSION
-from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
+from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate, ReviewerNoteCreate
 from postmortem.services import (
     AnalysisService,
     ArtifactService,
@@ -94,6 +94,7 @@ def test_list_hypotheses_returns_ranked_with_split_evidence(fresh_session):
     assert shaped["impact_claims"][0]["description"] == "Customers saw errors"
     assert shaped["action_items"][0]["description"] == "Roll back"
     assert shaped["review_status"] == "proposed"
+    assert shaped["reviewer_notes"] == []
 
 
 def test_review_records_decision_without_rewriting_claims(fresh_session):
@@ -122,6 +123,43 @@ def test_review_records_decision_without_rewriting_claims(fresh_session):
     assert [c["description"] for c in after["impact_claims"]] == [
         c["description"] for c in before["impact_claims"]
     ]
+
+
+def test_reviewer_note_records_context_without_rewriting_claims(fresh_session):
+    service, incident, run = _run_with_hypotheses(fresh_session)
+    target = service.list_hypotheses(incident.id, run.id)[0]
+    before = hypothesis_read(target)
+
+    note = service.add_reviewer_note(
+        incident.id,
+        run.id,
+        ReviewerNoteCreate(hypothesis_id=target.id, body="  Check deploy owner notes.  "),
+    )
+    fresh_session.commit()
+
+    assert note.body == "Check deploy owner notes."
+    after = hypothesis_read(service.list_hypotheses(incident.id, run.id)[0])
+    assert after["title"] == before["title"]
+    assert after["summary"] == before["summary"]
+    assert after["review_status"] == before["review_status"]
+    assert [r.id for r in after["supporting_evidence"]] == [
+        r.id for r in before["supporting_evidence"]
+    ]
+    assert len(after["reviewer_notes"]) == 1
+    assert after["reviewer_notes"][0]["body"] == "Check deploy owner notes."
+
+
+def test_reviewer_note_rejects_hypothesis_from_another_run(fresh_session):
+    service, incident, run = _run_with_hypotheses(fresh_session)
+    _other_service, _other_incident, other_run = _run_with_hypotheses(fresh_session)
+    other_hypothesis = service.list_hypotheses(_other_incident.id, other_run.id)[0]
+
+    with pytest.raises(HypothesisNotFoundError):
+        service.add_reviewer_note(
+            incident.id,
+            run.id,
+            ReviewerNoteCreate(hypothesis_id=other_hypothesis.id, body="wrong run"),
+        )
 
 
 def test_review_rejects_invalid_decision(fresh_session):

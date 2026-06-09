@@ -1,0 +1,50 @@
+# Dependency-failure scenario family (ADR 0006): a degraded upstream payments
+# provider causes checkout failures. Used for evaluation variety so the pipeline
+# is not tuned only against the deploy scenario (ADR 0007 / 0010).
+id: dependency-failure
+title: Checkout failures from a degraded payments provider
+severity: sev2
+status: resolved
+summary: >-
+  Checkout returned 502s after the payments provider began timing out. An
+  upstream incident is the likely trigger, but missing client-side resilience
+  also amplified the impact.
+started_at: 2026-03-12T09:05:00Z
+detected_at: 2026-03-12T09:06:00Z
+resolved_at: 2026-03-12T09:16:00Z
+
+ambiguity_notes: >-
+  The provider incident, our missing retry/backoff, and a hypothetical local
+  regression are all candidate framings. Recovery tracked the provider, not any
+  change on our side.
+evaluation_tags: [dependency, upstream, payments, ambiguous]
+expected_hypothesis_families:
+  - provider-degradation
+  - missing-resilience
+  - local-regression
+
+ground_truth_postmortem: ground_truth_postmortem.md
+
+evidence:
+  - source_type: logs
+    source_name: api-gateway.log
+    path: evidence/api-gateway.log
+  - source_type: logs
+    source_name: payments-provider.log
+    path: evidence/payments-provider.log
+  - source_type: other
+    source_name: status-page.md
+    path: evidence/status-page.md
+  - source_type: incident_notes
+    source_name: oncall-notes.md
+    path: evidence/oncall-notes.md
+
+replay:
+  rca: replay/rca.json
+  claim_support_overrides:
+    - match: retry
+      status: partial
+      rationale: >-
+        Missing retry/backoff plausibly amplified the impact, but the evidence
+        shows the provider outage as the driver rather than establishing our
+        resilience gap as the root cause.
