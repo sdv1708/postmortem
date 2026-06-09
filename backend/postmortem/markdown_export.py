@@ -36,9 +36,17 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
     authoritative = [h for h in postmortem.hypotheses if _is_authoritative(h.support_status)]
     review_findings = [h for h in postmortem.hypotheses if not _is_authoritative(h.support_status)]
 
+    insufficient = postmortem.evidence_sufficiency == "insufficient"
+
     lines: list[str] = [f"# Postmortem — {postmortem.incident_title}", ""]
     lines.append(f"- **Severity:** {postmortem.incident_severity or '—'}")
     lines.append(f"- **Export mode:** {mode.value}")
+    lines.append(f"- **Evidence sufficiency:** {postmortem.evidence_sufficiency}")
+    if insufficient:
+        lines.append(
+            "- **Refusal:** The evidence is insufficient for a confident postmortem. "
+            "No root cause is asserted; see what is missing below."
+        )
     if mode is ExportMode.AUDIT:
         lines.append(
             "- **Note:** Audit export — includes unsupported claims and assumptions "
@@ -47,6 +55,19 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
     lines.append("")
 
     _section(lines, "Summary", [postmortem.summary] if postmortem.summary else [])
+
+    if insufficient:
+        _section(
+            lines,
+            "What's missing",
+            [f"- {gap}" for gap in postmortem.evidence_gaps] or ["_No specific gaps recorded._"],
+        )
+        _section(
+            lines,
+            "Suggested next evidence",
+            [f"- {step}" for step in postmortem.next_validation_steps]
+            or ["_No next steps recorded._"],
+        )
 
     lines.append("## Timeline")
     lines.append("")

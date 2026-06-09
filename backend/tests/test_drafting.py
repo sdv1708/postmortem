@@ -88,6 +88,53 @@ def test_composer_flags_all_assumptions():
     assert "Every hypothesis is currently an assumption" in draft.summary
 
 
+# --- Refusal on insufficient evidence (ADR 0032 / 0015) --------------------
+
+
+def test_composer_marks_sufficient_when_a_hypothesis_is_evidence_backed():
+    # The default context has one non-assumption (cited) hypothesis.
+    draft = DeterministicPostmortemComposer().compose(_context())
+    assert draft.evidence_sufficiency == "sufficient"
+    assert draft.evidence_gaps == ()
+    assert draft.next_validation_steps == ()
+    assert "not enough evidence" not in draft.summary
+
+
+def test_composer_refuses_when_no_hypothesis_is_evidence_backed():
+    draft = DeterministicPostmortemComposer().compose(
+        _context(
+            timeline_event_count=0,
+            earliest_ts_text=None,
+            latest_ts_text=None,
+            hypotheses=(),
+            present_source_types=("incident_notes",),
+        )
+    )
+    assert draft.evidence_sufficiency == "insufficient"
+    # The summary is an explicit refusal, not a confident narrative.
+    assert "not enough evidence to write a confident postmortem" in draft.summary
+    # Gaps and next steps are populated and name concrete missing categories.
+    assert any("no timestamps" in gap for gap in draft.evidence_gaps)
+    assert any("logs" in gap for gap in draft.evidence_gaps)
+    assert any("timestamped logs" in step for step in draft.next_validation_steps)
+    # Refusal guidance is procedural — it invents no incident facts (ADR 0026):
+    # nothing references the (absent) hypotheses or a fabricated cause.
+    assert "root cause is" not in " ".join(draft.evidence_gaps).lower()
+
+
+def test_composer_refuses_when_every_hypothesis_is_an_uncited_assumption():
+    draft = DeterministicPostmortemComposer().compose(
+        _context(
+            hypotheses=(
+                HypothesisDigest(rank=1, title="Guess one", assumption=True, unknowns=()),
+                HypothesisDigest(rank=2, title="Guess two", assumption=True, unknowns=()),
+            )
+        )
+    )
+    assert draft.evidence_sufficiency == "insufficient"
+    assert any("unsupported assumption" in gap for gap in draft.evidence_gaps)
+
+
 # --- Markdown renderer -----------------------------------------------------
 
 
@@ -161,6 +208,9 @@ def _postmortem() -> PostmortemRead:
         incident_severity="sev1",
         summary="Incident summary text.",
         lessons_learned=["Add pre-deploy pool-size checks."],
+        evidence_sufficiency="sufficient",
+        evidence_gaps=[],
+        next_validation_steps=[],
         composer_version="postmortem-template-1",
         created_at=datetime.now(timezone.utc),
         timeline=[

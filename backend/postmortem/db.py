@@ -156,6 +156,20 @@ def ensure_schema_compatibility(engine: Engine) -> None:
     _add_columns_if_missing(engine, inspector, "hypotheses", support_columns)
     _add_columns_if_missing(engine, inspector, "impact_claims", support_columns)
 
+    # Refusal/sufficiency assessment added in slice #12 (ADR 0032). Existing
+    # postmortems default to 'sufficient'; the JSON lists read as NULL → [] until a
+    # run re-drafts them. JSON ddl is valid on both SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "postmortems",
+        {
+            "evidence_sufficiency": "VARCHAR(16) NOT NULL DEFAULT 'sufficient'",
+            "evidence_gaps": "JSON",
+            "next_validation_steps": "JSON",
+        },
+    )
+
     indexes = {
         "hypothesis_id": "ix_evidence_refs_hypothesis_id",
         "impact_claim_id": "ix_evidence_refs_impact_claim_id",

@@ -441,10 +441,17 @@ class PipelineStageRunner:
                 run_id=run.id,
                 summary=draft.summary,
                 lessons_learned=list(draft.lessons_learned),
+                evidence_sufficiency=draft.evidence_sufficiency,
+                evidence_gaps=list(draft.evidence_gaps),
+                next_validation_steps=list(draft.next_validation_steps),
                 composer_version=self._composer.version,
             )
         )
         self._session.flush()
+        # Refusal is a non-fatal Warning Code (ADR 0015 / 0029) so it is visible
+        # in the run's stage events and aggregated by evaluation (ADR 0021 / 0025).
+        if draft.evidence_sufficiency == "insufficient":
+            return {"warning_codes": ["insufficient_evidence"]}
         return None
 
     def _build_compose_context(
@@ -460,13 +467,15 @@ class PipelineStageRunner:
         dated = [event for event in timeline if event.normalized_ts is not None]
         earliest = dated[0].original_ts_text if dated else None
         latest = dated[-1].original_ts_text if dated else None
+        artifacts = self._run_artifacts(run)
         return PostmortemComposerContext(
             incident_title=incident.title if incident is not None else "Incident",
             incident_severity=incident.severity if incident is not None else None,
-            artifact_count=len(self._run_artifacts(run)),
+            artifact_count=len(artifacts),
             timeline_event_count=len(timeline),
             earliest_ts_text=earliest,
             latest_ts_text=latest,
+            present_source_types=tuple(sorted({a.source_type for a in artifacts})),
             hypotheses=tuple(
                 HypothesisDigest(
                     rank=hypothesis.rank,

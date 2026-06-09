@@ -50,20 +50,17 @@ tasks/      Per-slice planning and lessons captured during work
 cd backend
 pip install -e '.[dev]'
 
-# Single-user gate token (any string). Required unless dev bypass is set.
-export POSTMORTEM_API_TOKEN=dev-token
-
-# Or, for purely local development, opt into the explicit bypass:
-# export POSTMORTEM_DEV_BYPASS=1
-
-# SQLite by default; override with POSTMORTEM_DATABASE_URL for Postgres.
-# CORS defaults to http://localhost:3000 and http://127.0.0.1:3000.
-# Override with POSTMORTEM_CORS_ORIGINS for another frontend host/port.
+# Edit ../.env once with POSTMORTEM_API_TOKEN, database URL, and LLM settings.
+# The backend automatically loads .env before reading process environment.
 uvicorn postmortem.app:app --reload
 ```
 
 The API is then available at `http://localhost:8000`. Health check at
 `GET /healthz`. OpenAPI docs at `/docs`.
+
+Local `.env` files are intentionally ignored by git. Real process environment
+variables still take precedence over `.env`, so one-off shell overrides and
+hosted deployment settings remain authoritative.
 
 ### Frontend
 

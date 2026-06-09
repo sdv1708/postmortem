@@ -212,6 +212,11 @@ export interface Postmortem {
   incident_severity: string | null;
   summary: string;
   lessons_learned: string[];
+  // Refusal assessment (ADR 0032 / 0015): on "insufficient" the Review Surface
+  // withholds a confident root cause and shows what is missing / what to collect.
+  evidence_sufficiency: "sufficient" | "insufficient";
+  evidence_gaps: string[];
+  next_validation_steps: string[];
   composer_version: string;
   timeline: TimelineEvent[];
   hypotheses: Hypothesis[];

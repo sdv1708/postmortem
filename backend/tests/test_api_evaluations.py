@@ -42,7 +42,7 @@ def test_run_all_scenarios_and_list_them(client: TestClient, app, auth_headers):
     assert any(
         c["name"] == "hypothesis_multiplicity"
         and c["passed"]
-        and "expected refusal with 0" in c["detail"]
+        and "expected refusal" in c["detail"]
         for c in refusal["checks"]
     )
 

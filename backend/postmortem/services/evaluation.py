@@ -216,6 +216,9 @@ class EvaluationRunner:
             warning_codes=tuple(warning_codes),
             expected_hypothesis_count=len(scenario.expected_hypothesis_families),
             insufficient_evidence_expected="insufficient-evidence" in scenario.evaluation_tags,
+            evidence_sufficiency=(
+                postmortem.evidence_sufficiency if postmortem is not None else "sufficient"
+            ),
         )
         judge_input = JudgeInput(
             scenario_id=scenario.id,

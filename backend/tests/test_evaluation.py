@@ -16,6 +16,7 @@ from postmortem.evaluation import (
     build_judge_prompt,
     check_citation_integrity,
     check_hypothesis_multiplicity,
+    check_insufficient_evidence_refusal,
     check_required_outputs,
     check_timeline_ordering,
     citation_tally,
@@ -52,6 +53,17 @@ def test_citation_integrity_passes_only_when_all_verified():
     assert "2/3" in result.detail
     # No citations at all is not a pass — there is nothing proven.
     assert check_citation_integrity(_snapshot(citation_statuses=())).passed is False
+    # Refusal scenarios may have zero citations or verified partial/timeline
+    # citations; any present citation still has to verify.
+    assert check_citation_integrity(
+        _snapshot(citation_statuses=(), insufficient_evidence_expected=True)
+    ).passed is True
+    assert check_citation_integrity(
+        _snapshot(citation_statuses=("verified",), insufficient_evidence_expected=True)
+    ).passed is True
+    assert check_citation_integrity(
+        _snapshot(citation_statuses=("snippet_mismatch",), insufficient_evidence_expected=True)
+    ).passed is False
 
 
 def test_required_outputs_reports_missing_sections():
@@ -80,6 +92,54 @@ def test_hypothesis_multiplicity_requires_multiple_competing_hypotheses():
         expected_hypothesis_count=0,
     )
     assert check_hypothesis_multiplicity(two).passed is True
+    # A refusal scenario may emit no hypotheses or uncited assumptions, but it
+    # must not emit evidence-backed confident hypotheses.
+    refusal_with_assumptions = _snapshot(
+        hypotheses=(HypothesisView(1, "unsupported", 0),),
+        insufficient_evidence_expected=True,
+    )
+    assert check_hypothesis_multiplicity(refusal_with_assumptions).passed is True
+    refusal_with_cited_hypothesis = _snapshot(
+        hypotheses=(HypothesisView(1, "supported", 1),),
+        insufficient_evidence_expected=True,
+    )
+    assert check_hypothesis_multiplicity(refusal_with_cited_hypothesis).passed is False
+
+
+def test_insufficient_evidence_refusal_check_both_directions():
+    # A normal run must not refuse.
+    assert check_insufficient_evidence_refusal(_snapshot()).passed is True
+    spurious = _snapshot(evidence_sufficiency="insufficient")
+    assert check_insufficient_evidence_refusal(spurious).passed is False
+
+    # A refusal scenario must actually refuse with no evidence-backed hypotheses.
+    refused = _snapshot(
+        hypotheses=(),
+        citation_statuses=(),
+        timeline=(),
+        insufficient_evidence_expected=True,
+        evidence_sufficiency="insufficient",
+    )
+    result = check_insufficient_evidence_refusal(refused)
+    assert result.passed is True
+    assert "refused as insufficient" in result.detail
+    refused_with_assumption = _snapshot(
+        hypotheses=(HypothesisView(1, "unsupported", 0),),
+        insufficient_evidence_expected=True,
+        evidence_sufficiency="insufficient",
+    )
+    assert check_insufficient_evidence_refusal(refused_with_assumption).passed is True
+    refused_with_evidence_backed_hypothesis = _snapshot(
+        hypotheses=(HypothesisView(1, "supported", 1),),
+        insufficient_evidence_expected=True,
+        evidence_sufficiency="insufficient",
+    )
+    assert check_insufficient_evidence_refusal(refused_with_evidence_backed_hypothesis).passed is False
+    # A refusal scenario that did NOT refuse fails the check.
+    did_not_refuse = _snapshot(
+        insufficient_evidence_expected=True, evidence_sufficiency="sufficient"
+    )
+    assert check_insufficient_evidence_refusal(did_not_refuse).passed is False
 
 
 def test_warning_code_aggregation_and_citation_tally():

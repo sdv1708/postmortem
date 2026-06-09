@@ -420,6 +420,15 @@ class Postmortem(Base):
     # Reflective follow-ups, stored as a JSON string list like a hypothesis's
     # unknowns; not Major Claims, so they carry no citations.
     lessons_learned: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Deterministic refusal assessment (ADR 0032 / 0015): 'sufficient' when at
+    # least one hypothesis is backed by cited evidence, else 'insufficient' so the
+    # Review Surface withholds a confident root cause instead of asserting an
+    # unsupported one. ``evidence_gaps`` / ``next_validation_steps`` are procedural
+    # guidance about evidence completeness (not new factual incident claims,
+    # ADR 0026); meaningfully populated only on refusal.
+    evidence_sufficiency: Mapped[str] = mapped_column(String(16), nullable=False, default="sufficient")
+    evidence_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    next_validation_steps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     composer_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 

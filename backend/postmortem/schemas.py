@@ -283,6 +283,13 @@ class PostmortemRead(BaseModel):
     incident_severity: str | None
     summary: str
     lessons_learned: list[str]
+    # Refusal assessment (ADR 0032 / 0015): 'sufficient' or 'insufficient'. On
+    # refusal, ``evidence_gaps`` and ``next_validation_steps`` tell the reviewer
+    # what is missing and what to collect next, while no confident root cause is
+    # asserted.
+    evidence_sufficiency: Literal["sufficient", "insufficient"]
+    evidence_gaps: list[str]
+    next_validation_steps: list[str]
     composer_version: str
     timeline: list[TimelineEventRead]
     hypotheses: list[HypothesisRead]

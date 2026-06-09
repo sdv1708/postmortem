@@ -111,3 +111,22 @@
   rows so EvidenceRefs remain the citation source of truth, and clean-vs-audit
   export filtering is a render-time concern off the final `support_status`, not
   baked into the persisted row.
+- A "merged" slice may not be on `main`. Slice 11 (#12) was reviewed/extended and
+  committed on `feature/issue-12-evaluation-runs` (it even added a retrieval module
+  and the insufficient-evidence stub) but `main` was never fast-forwarded. Before
+  building a blocked-by slice, `git log --all` and check the actual files on disk;
+  branch the next slice off the branch that truly contains the dependency, not
+  off `main`. The reviewer's extensions (e.g. an `insufficient-evidence` scenario
+  stub, eval checks that tolerate emptiness) are part of your starting point.
+- Slice #12 (#13) refusal: model "insufficient evidence" as a *deterministic
+  product detection*, not a scenario flag. The drafting composer sets
+  `evidence_sufficiency = insufficient` when no hypothesis is evidence-backed
+  (`assumption == False` count is 0), which generalizes past the fixture to any
+  sparse/all-uncited run. The gaps + next-validation-steps it emits are procedural
+  statements about evidence *completeness*, not incident facts, so a deterministic
+  composer may emit them without violating ADR 0026. Surface it across every layer
+  (persist on the Postmortem, read model, schema, Markdown export, Review Surface
+  banner) and give evaluation a *positive* refusal check that fails both ways
+  (refusal scenario must refuse; normal scenario must not spuriously refuse) plus
+  an `insufficient_evidence` Warning Code — tolerating emptiness in the existing
+  checks is not the same as proving the system refused.

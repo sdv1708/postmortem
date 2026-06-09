@@ -931,11 +931,19 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
   }
 
   const postmortem = postmortemQuery.data;
+  const insufficient = postmortem.evidence_sufficiency === "insufficient";
 
   return (
     <div className="border-t border-slate-200 bg-slate-50/40">
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-3">
-        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Postmortem</p>
+        <div className="flex items-center gap-2">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Postmortem</p>
+          {insufficient && (
+            <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
+              insufficient evidence
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -968,6 +976,37 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
       )}
 
       <div className="space-y-3 p-5">
+        {insufficient && (
+          <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-50/70 p-4">
+            <div className="flex items-start gap-2">
+              <svg
+                className="mt-0.5 shrink-0 text-amber-600"
+                width="16" height="16" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              >
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                <path d="M12 9v4" />
+                <path d="M12 17h.01" />
+              </svg>
+              <div>
+                <h4 className="text-sm font-semibold text-amber-900">
+                  Insufficient evidence — no confident root cause asserted
+                </h4>
+                <p className="mt-0.5 text-xs leading-relaxed text-amber-800">
+                  The evidence is too sparse to support a postmortem. Rather than
+                  guess, the system is asking for more evidence. The source evidence,
+                  timeline, and any assumptions remain below for review.
+                </p>
+              </div>
+            </div>
+            {postmortem.evidence_gaps.length > 0 && (
+              <BulletGroup label="What's missing" items={postmortem.evidence_gaps} />
+            )}
+            {postmortem.next_validation_steps.length > 0 && (
+              <BulletGroup label="Suggested next evidence" items={postmortem.next_validation_steps} />
+            )}
+          </div>
+        )}
         <p className="text-sm leading-relaxed text-slate-700">{postmortem.summary}</p>
         {postmortem.lessons_learned.length > 0 && (
           <BulletGroup label="Lessons learned" items={postmortem.lessons_learned} />

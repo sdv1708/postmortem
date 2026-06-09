@@ -28,6 +28,7 @@ def test_run_and_record_passes_the_deterministic_floor(fresh_session, scenario_i
         "required_outputs",
         "timeline_ordering",
         "hypothesis_multiplicity",
+        "insufficient_evidence_refusal",
     }
     assert all(c["passed"] for c in row.checks)
     assert row.citation_total > 0
@@ -62,10 +63,14 @@ def test_insufficient_evidence_scenario_passes_by_refusing_hypotheses(fresh_sess
     assert checks["citation_integrity"]["detail"] == "0/0 citations verified"
     assert checks["required_outputs"]["passed"] is True
     assert checks["hypothesis_multiplicity"]["passed"] is True
-    assert "expected refusal with 0" in checks["hypothesis_multiplicity"]["detail"]
+    assert "expected refusal" in checks["hypothesis_multiplicity"]["detail"]
+    # The product refused, and the positive refusal check confirms it (AC #4).
+    assert checks["insufficient_evidence_refusal"]["passed"] is True
+    assert "refused as insufficient" in checks["insufficient_evidence_refusal"]["detail"]
     assert row.citation_total == 0
     assert row.citation_verified == 0
-    assert row.warning_code_counts == {}
+    # Drafting emitted the refusal Warning Code, aggregated for the scenario (AC #4).
+    assert row.warning_code_counts == {"insufficient_evidence": 1}
 
 
 def test_evaluation_is_independent_of_product_incident_data(fresh_session):

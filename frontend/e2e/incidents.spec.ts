@@ -160,6 +160,37 @@ test("run the evaluation suite and review the deterministic dashboard", async ({
   await expect(page.getByText("not scored (no model)").first()).toBeVisible();
 });
 
+test("seed the insufficient-evidence scenario and see a refusal, not a confident postmortem", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/incidents`);
+  await expect(
+    page.getByRole("heading", { name: "Seed a synthetic incident" }),
+  ).toBeVisible();
+
+  const refusalCard = page
+    .getByRole("listitem")
+    .filter({ hasText: "Insufficient evidence for confident postmortem" });
+  await refusalCard.getByRole("button", { name: "Seed demo scenario" }).click();
+
+  await page.waitForURL(/\/incidents\/[0-9a-f-]{36}$/);
+  await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
+
+  // The system refuses rather than asserting a confident root cause (ADR 0032).
+  await expect(
+    page.getByText("Insufficient evidence — no confident root cause asserted"),
+  ).toBeVisible();
+  // It stays useful: it says what to collect next (AC #5).
+  await expect(page.getByText("Suggested next evidence")).toBeVisible();
+  await expect(
+    page.getByText(/Collect timestamped logs spanning the incident window/),
+  ).toBeVisible();
+  // No confident hypotheses are presented.
+  await expect(page.getByText(/RCA hypotheses ·/)).toBeHidden();
+  // The source evidence remains available for review.
+  await expect(page.getByRole("button", { name: /sparse-notes\.md/ })).toBeVisible();
+});
+
 test("home page links into the incident list", async ({ page }) => {
   await page.goto(BASE);
   await page.getByRole("link", { name: "View incidents" }).click();

@@ -51,6 +51,9 @@ class RunOutputSnapshot:
     # Refusal scenarios intentionally have sparse evidence and should not force
     # timeline/citation/hypothesis output just to satisfy the normal floor.
     insufficient_evidence_expected: bool = False
+    # The product's own deterministic refusal verdict for the run (ADR 0032),
+    # read back from the drafted Postmortem: 'sufficient' or 'insufficient'.
+    evidence_sufficiency: str = "sufficient"
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,7 @@ def check_citation_integrity(snapshot: RunOutputSnapshot) -> CheckResult:
     """
     total = len(snapshot.citation_statuses)
     verified = sum(1 for status in snapshot.citation_statuses if status == _VERIFIED)
-    passed = (total == 0 if snapshot.insufficient_evidence_expected else total > 0) and verified == total
+    passed = verified == total and (snapshot.insufficient_evidence_expected or total > 0)
     return CheckResult(
         name="citation_integrity",
         passed=passed,
@@ -120,11 +123,15 @@ def check_hypothesis_multiplicity(snapshot: RunOutputSnapshot) -> CheckResult:
     """Ambiguous evidence must yield multiple competing hypotheses (ADR 0006)."""
     observed = len(snapshot.hypotheses)
     if snapshot.insufficient_evidence_expected:
-        passed = observed == 0
+        evidence_backed = sum(1 for hypothesis in snapshot.hypotheses if hypothesis.citation_count > 0)
+        passed = evidence_backed == 0
         return CheckResult(
             name="hypothesis_multiplicity",
             passed=passed,
-            detail=f"{observed} hypotheses (expected refusal with 0)",
+            detail=(
+                f"{observed} hypotheses, {evidence_backed} evidence-backed "
+                "hypotheses (expected refusal)"
+            ),
         )
     expected = max(2, snapshot.expected_hypothesis_count)
     passed = observed >= expected
@@ -135,11 +142,41 @@ def check_hypothesis_multiplicity(snapshot: RunOutputSnapshot) -> CheckResult:
     )
 
 
+def check_insufficient_evidence_refusal(snapshot: RunOutputSnapshot) -> CheckResult:
+    """The product must refuse exactly when evidence is insufficient (ADR 0032).
+
+    For a refusal scenario, the run must mark itself ``insufficient`` and produce
+    no evidence-backed hypotheses; for any other scenario, the run must *not*
+    spuriously refuse. This is the positive check that an insufficient-evidence
+    run does not become a confident postmortem — and that good evidence is not
+    wrongly rejected.
+    """
+    refused = snapshot.evidence_sufficiency == "insufficient"
+    if snapshot.insufficient_evidence_expected:
+        evidence_backed = sum(1 for hypothesis in snapshot.hypotheses if hypothesis.citation_count > 0)
+        passed = refused and evidence_backed == 0
+        detail = (
+            "refused as insufficient (no evidence-backed hypotheses)"
+            if passed
+            else f"expected refusal but sufficiency={snapshot.evidence_sufficiency!r} "
+            f"with {evidence_backed} evidence-backed hypotheses"
+        )
+    else:
+        passed = not refused
+        detail = (
+            "sufficient evidence, no spurious refusal"
+            if passed
+            else "spuriously refused despite sufficient evidence"
+        )
+    return CheckResult(name="insufficient_evidence_refusal", passed=passed, detail=detail)
+
+
 DETERMINISTIC_CHECKS = (
     check_citation_integrity,
     check_required_outputs,
     check_timeline_ordering,
     check_hypothesis_multiplicity,
+    check_insufficient_evidence_refusal,
 )
 
 
