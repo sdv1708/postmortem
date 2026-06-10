@@ -931,11 +931,19 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
   }
 
   const postmortem = postmortemQuery.data;
+  const insufficient = postmortem.evidence_sufficiency === "insufficient";
 
   return (
     <div className="border-t border-slate-200 bg-slate-50/40">
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-3">
-        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Postmortem</p>
+        <div className="flex items-center gap-2">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Postmortem</p>
+          {insufficient && (
+            <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
+              insufficient evidence
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -968,6 +976,37 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
       )}
 
       <div className="space-y-3 p-5">
+        {insufficient && (
+          <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-50/70 p-4">
+            <div className="flex items-start gap-2">
+              <svg
+                className="mt-0.5 shrink-0 text-amber-600"
+                width="16" height="16" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              >
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                <path d="M12 9v4" />
+                <path d="M12 17h.01" />
+              </svg>
+              <div>
+                <h4 className="text-sm font-semibold text-amber-900">
+                  Insufficient evidence — no confident root cause asserted
+                </h4>
+                <p className="mt-0.5 text-xs leading-relaxed text-amber-800">
+                  The evidence is too sparse to support a postmortem. Rather than
+                  guess, the system is asking for more evidence. The source evidence,
+                  timeline, and any assumptions remain below for review.
+                </p>
+              </div>
+            </div>
+            {postmortem.evidence_gaps.length > 0 && (
+              <BulletGroup label="What's missing" items={postmortem.evidence_gaps} />
+            )}
+            {postmortem.next_validation_steps.length > 0 && (
+              <BulletGroup label="Suggested next evidence" items={postmortem.next_validation_steps} />
+            )}
+          </div>
+        )}
         <p className="text-sm leading-relaxed text-slate-700">{postmortem.summary}</p>
         {postmortem.lessons_learned.length > 0 && (
           <BulletGroup label="Lessons learned" items={postmortem.lessons_learned} />
@@ -1030,6 +1069,32 @@ function RunHypotheses({
       );
     },
   });
+  const noteMutation = useMutation({
+    mutationFn: ({
+      hypothesisId,
+      body,
+    }: {
+      hypothesisId: string;
+      body: string;
+    }) => api.addReviewerNote(incidentId, runId, { hypothesis_id: hypothesisId, body }),
+    onMutate: () => {
+      setReviewError(null);
+    },
+    onSuccess: (note) => {
+      queryClient.setQueryData<Hypothesis[]>(hypothesesKey, (current) =>
+        current?.map((h) =>
+          h.id === note.hypothesis_id
+            ? { ...h, reviewer_notes: [...h.reviewer_notes, note] }
+            : h,
+        ),
+      );
+    },
+    onError: (error) => {
+      setReviewError(
+        error instanceof Error ? error.message : "Reviewer note could not be saved.",
+      );
+    },
+  });
 
   if (hypothesesQuery.isPending) {
     return (
@@ -1073,6 +1138,13 @@ function RunHypotheses({
           reviewMutation.isPending &&
           reviewMutation.variables?.hypothesisId === hypothesis.id
         }
+        onAddNote={(body) =>
+          noteMutation.mutateAsync({ hypothesisId: hypothesis.id, body }).then(() => undefined)
+        }
+        isSavingNote={
+          noteMutation.isPending &&
+          noteMutation.variables?.hypothesisId === hypothesis.id
+        }
         onFocusEvidence={onFocusEvidence}
       />
     </li>
@@ -1113,13 +1185,28 @@ function HypothesisCard({
   hypothesis,
   onReview,
   isReviewing,
+  onAddNote,
+  isSavingNote,
   onFocusEvidence,
 }: {
   hypothesis: Hypothesis;
   onReview: (decision: HypothesisReviewStatus) => void;
   isReviewing: boolean;
+  onAddNote: (body: string) => Promise<void>;
+  isSavingNote: boolean;
   onFocusEvidence: (ref: EvidenceRef) => void;
 }) {
+  const [noteBody, setNoteBody] = useState("");
+
+  async function submitNote() {
+    const body = noteBody.trim();
+    if (!body) {
+      return;
+    }
+    await onAddNote(body);
+    setNoteBody("");
+  }
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
@@ -1235,6 +1322,49 @@ function HypothesisCard({
         {hypothesis.validation_steps.length > 0 && (
           <BulletGroup label="Validation steps" items={hypothesis.validation_steps} />
         )}
+
+        <div className="space-y-2 border-t border-slate-100 pt-3">
+          <p className="label">Reviewer notes</p>
+          {hypothesis.reviewer_notes.length > 0 && (
+            <ul className="space-y-2">
+              {hypothesis.reviewer_notes.map((note) => (
+                <li
+                  key={note.id}
+                  className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+                >
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
+                    {note.body}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {new Date(note.created_at).toLocaleString()}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form
+            className="space-y-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitNote();
+            }}
+          >
+            <textarea
+              value={noteBody}
+              onChange={(event) => setNoteBody(event.target.value)}
+              rows={3}
+              placeholder="Add reviewer context."
+              className="text-sm leading-relaxed"
+            />
+            <button
+              type="submit"
+              disabled={isSavingNote || !noteBody.trim()}
+              className="button-secondary"
+            >
+              {isSavingNote ? "Saving..." : "Add note"}
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );

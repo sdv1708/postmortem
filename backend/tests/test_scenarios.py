@@ -37,9 +37,42 @@ def test_canonical_scenario_loads_and_validates():
     assert len(scenario.rca_replay["hypotheses"]) >= 2
 
 
+@pytest.mark.parametrize(
+    "scenario_id,expected_families",
+    [
+        ("dependency-failure", {"provider-degradation", "missing-resilience", "local-regression"}),
+        ("config-drift", {"config-drift", "traffic-surge", "code-regression"}),
+    ],
+)
+def test_additional_scenario_families_load_and_validate(scenario_id, expected_families):
+    # ADR 0006: deploy, dependency failure, and configuration drift families with
+    # evidence files and Ground-Truth Postmortems.
+    scenario = load_scenario(scenario_id)
+    assert scenario.id == scenario_id
+    assert len(scenario.evidence) == 4
+    assert all(e.body.strip() for e in scenario.evidence)
+    assert "ground truth" in scenario.ground_truth_postmortem.lower()
+    assert set(scenario.expected_hypothesis_families) == expected_families
+    # Each ships a multi-hypothesis replay that passes strict RCA + ref validation.
+    assert len(scenario.rca_replay["hypotheses"]) == 3
+
+
+def test_insufficient_evidence_scenario_loads_as_refusal_stub():
+    scenario = load_scenario("insufficient-evidence")
+
+    assert scenario.id == "insufficient-evidence"
+    assert "insufficient-evidence" in scenario.evaluation_tags
+    assert "refusal" in scenario.evaluation_tags
+    assert len(scenario.evidence) == 1
+    assert scenario.expected_hypothesis_families == ()
+    assert scenario.rca_replay == {"hypotheses": []}
+    assert "not enough" in scenario.ground_truth_postmortem.lower()
+
+
 def test_list_scenarios_includes_the_canonical_demo():
     ids = [s.id for s in list_scenarios()]
     assert CANONICAL in ids
+    assert "insufficient-evidence" in ids
 
 
 def test_unknown_scenario_raises_not_found():

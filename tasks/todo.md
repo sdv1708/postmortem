@@ -1,138 +1,153 @@
-# Slice 10: Seed and run the canonical deploy ambiguity demo scenario (#11)
+# Slice 12: Refuse confident postmortems when evidence is insufficient (#13)
 
 ## Status check
-Issue #11 is **not** implemented on `main`. There are no scenario fixtures,
-no scenario loader, no seed path, and no scenario API. Slices 1–9 (#1–#10) are
-merged. This plan covers #11 / Slice 10. Blocked-by #10 is merged (commit
-cc14974), so #11 is unblocked.
+Branched from `feature/issue-12-evaluation-runs` (commit 90577f9 — slice 11
+evaluation work, merged-equivalent; `main` wasn't fast-forwarded). That base
+already ships the evaluation framework AND an `insufficient-evidence` scenario
+stub (empty-hypotheses replay), plus eval checks that *tolerate* emptiness for
+refusal scenarios. This slice adds the **product refusal behavior** and makes it
+visible across service / API / UI / eval, with a positive refusal check.
 
 ## Objective
-Add file-based Incident Scenario fixtures (ADR 0007) for the canonical
-ambiguous deploy-related API error spike (ADR 0006) and wire them into the
-product so a demo operator can seed synthetic evidence, run analysis, and review
-a multi-hypothesis Postmortem — without real production logs and without a live
-model (ADR 0011 fakes/replay). The founder-demo trust path (ADR 0032) must be
-visible end to end: multiple hypotheses, exact citations, contradicting
-evidence, an honestly-separated unsupported finding, and a structured Postmortem.
+When evidence is insufficient, the system must say so — a structured refusal —
+instead of presenting an unsupported narrative as a confident postmortem
+(ADR 0032 trust bar; ADR 0015 honesty). The Review Surface must stay useful:
+source evidence, the separation of knowns / unknowns / assumptions, and concrete
+next validation steps.
 
 ## Key design decisions
-- **Scenario ships its own replay.** The fixture bundles `replay/rca.json` (the
-  RCA model output, citing evidence by `source_name`) and `claim_support`
-  overrides. A `ScenarioReplayLLMClient` + `ScenarioReplayClaimSupportVerifier`
-  (product code, ADR 0009 swappable boundaries) make the demo deterministic and
-  offline-capable. Experiment Metadata records the replay labels honestly
-  (ADR 0025): `model_provider = scenario-replay:<id>`, the replay verifier
-  version. This is the same fakes/replay sanctioned by ADR 0011 and used in tests.
-- **Replay cites by `source_name`, resolved to artifact ids at seed time.** Human
-  authors reference filenames, not UUIDs; the loader resolves `source_name` →
-  `artifact_id` after artifacts are seeded, then the existing RCA stage validates
-  line ranges and resolves snippets from the stored lines (ADR 0024). Nothing
-  trusts model-supplied snippet text.
-- **Fixture is self-validating (ADR 0007 reproducibility).** `load_scenario`
-  fails fast if an evidence `path` is missing/empty, the ground-truth file is
-  missing/empty, a replay ref names an unknown `source_name`, or a replay line
-  range falls outside the cited evidence file.
-- **Seed is a command endpoint (ADR 0022), reusing the service layer (ADR 0004).**
-  `POST /api/scenarios/{id}/seed` creates the Incident + Artifacts as product
-  data (ADR — scenario fixture vs product data) and starts an Analysis Run with
-  the bundled replay; the web button and any future CLI share `ScenarioSeedService`.
-- **Three hypotheses span the support spectrum**: deploy-regression (supported),
-  pool-capacity (partial), upstream-dependency (assumption → unsupported Review
-  Finding). Exercises supporting + contradicting + unknowns + honest uncertainty.
+- **Deterministic sufficiency on the Postmortem (ADR 0026-safe).** The drafting
+  composer computes `evidence_sufficiency` = `insufficient` when **no hypothesis
+  has supporting evidence** (`assumption == False` count is 0). This catches both
+  the zero-hypothesis stub and any all-uncited run. `evidence_gaps` and
+  `next_validation_steps` are generic procedural guidance about *evidence
+  completeness* — not new factual incident claims — so a deterministic composer
+  may emit them. Persisted on the `postmortems` row (one VARCHAR + two JSON cols).
+- **Refusal is a product detection, not a scenario tag.** Eval keys
+  `insufficient_evidence_expected` off the scenario tag, but the *product* path
+  derives sufficiency from the run's own structured output, so seeding the stub
+  (or any sparse incident) shows refusal with no eval involvement.
+- **A positive refusal check (AC #4).** `check_insufficient_evidence_refusal`
+  asserts refusal scenarios actually refused (`evidence_sufficiency==insufficient`)
+  and that normal scenarios did *not* spuriously refuse. Drafting emits an
+  `insufficient_evidence` Warning Code so eval warning counts reflect it.
+- **Honest exports + UI.** Markdown export leads with an "insufficient evidence"
+  notice and a gaps / next-evidence section; clean export still presents no
+  confident sections. The Review Surface shows a refusal banner separating
+  knowns / unknowns / assumptions / next steps while keeping the evidence panel.
 
 ## Plan
 
-### Fixtures (`backend/scenarios/deploy-ambiguity/`)
-- [x] `scenario.yaml` manifest (metadata, ambiguity notes, evaluation tags,
-  expected hypothesis families, evidence list, ground-truth + replay pointers,
-  claim-support overrides).
-- [x] `evidence/{deploy-notes.md,api-gateway.log,db-pool.log,oncall-notes.md}` —
-  line-addressable synthetic evidence with consistent timestamps.
-- [x] `replay/rca.json` — RCA output citing evidence by `source_name` + lines.
-- [x] `ground_truth_postmortem.md` — human-authored reference (eval material).
+### Backend — product refusal
+- [x] `models.py`: `Postmortem.evidence_sufficiency` + `evidence_gaps` +
+  `next_validation_steps`.
+- [x] `db.py`: `ensure_schema_compatibility` adds the three `postmortems` columns.
+- [x] `drafting.py`: composer computes sufficiency / gaps / validation steps +
+  refusal summary; context gains `present_source_types`.
+- [x] `services/stages.py`: persist the fields; return `insufficient_evidence`
+  warning when insufficient.
+- [x] `services/analysis.py` + `schemas.py`: thread the three fields through.
+- [x] `markdown_export.py`: insufficient-evidence notice + gaps / next-evidence.
 
-### Backend
-- [x] `scenarios.py` (new): validation error/not-found; dataclasses;
-  `load_scenario`, `list_scenarios`; `ScenarioReplayLLMClient`,
-  `ScenarioReplayClaimSupportVerifier`; `resolve_replay_rca`. Base dir from `__file__`.
-- [x] `services/scenarios.py` (new): `ScenarioSeedService.seed_and_run`.
-- [x] `schemas.py`: `ScenarioSummaryRead`, `ScenarioSeedRead`.
-- [x] `api/scenarios.py` (new): `GET /api/scenarios`, `POST /{id}/seed`; router in `app.py`.
-- [x] `services/__init__.py` exports; `pyproject.toml` adds `pyyaml`.
+### Backend — evaluation
+- [x] `evaluation.py`: `RunOutputSnapshot.evidence_sufficiency` +
+  `check_insufficient_evidence_refusal` in `DETERMINISTIC_CHECKS`.
+- [x] `services/evaluation.py`: set `evidence_sufficiency` in `_distill`.
 
 ### Frontend
-- [x] `lib/api.ts`: scenario types + `listScenarios`/`seedScenario`.
-- [x] Incidents page: "Seed demo scenario" panel that seeds and navigates.
+- [x] `lib/api.ts`: `Postmortem` gains the three fields.
+- [x] Incident page `RunPostmortem`: refusal banner (what's missing / next
+  evidence) when insufficient; evidence panel + Review Findings stay usable.
 
-### Tests
-- [x] `test_scenarios.py` (10): load/validate; missing evidence/ground-truth,
-  unknown replay source, out-of-range cite all raise; `resolve_replay_rca` maps ids.
-- [x] `test_services_scenarios.py`: seed creates incident + 4 artifacts; run
-  succeeds; 3 ranked hypotheses; supporting + contradicting + unknowns; partial +
-  unsupported/assumption finding; Postmortem drafted; offline & deterministic.
-- [x] `test_api_scenarios.py`: list (auth-gated) + seed populate the Review Surface.
-- [x] Backend pytest **175 passed**; frontend typecheck + build clean; Playwright
-  **3 passed** (incl. new seed-and-review founder-demo path).
+### Tests (service / API / UI / eval — AC #6)
+- [x] `test_drafting.py`: composer refusal vs sufficient; gaps/steps; summary.
+- [x] `test_stages_drafting.py`: cited run sufficient/no warning; empty-hypotheses
+  run refuses + emits `insufficient_evidence`.
+- [x] `test_services_scenarios.py`: seeding `insufficient-evidence` refuses.
+- [x] `test_api_postmortem.py`: GET exposes sufficiency/gaps/steps; export shows
+  the refusal notice + no confident root cause.
+- [x] `test_evaluation*.py`: refusal check both directions; updated check-name set
+  and the stub's `insufficient_evidence` warning count.
+- [x] e2e: seed the insufficient scenario → refusal banner + next steps + evidence
+  panel; no RCA hypotheses section.
+- [x] Backend pytest **214 passed**; frontend typecheck + build clean; Playwright
+  **5 passed**.
 
 ## Review
 
-Slice 10 (#11) is implemented: the canonical ambiguous deploy scenario is a
-file-based fixture that seeds into product data and runs the full pipeline on a
-bundled replay, so a demo operator reaches a populated, multi-hypothesis Review
-Surface with zero live-model dependency.
+Slice 12 (#13) is implemented: the system now refuses a confident postmortem when
+evidence is insufficient, and that refusal is visible and tested across the
+service, API, Review Surface, and evaluation dashboard.
 
 ### What landed
-- **File-based fixture (ADR 0006 / 0007)** under `backend/scenarios/deploy-ambiguity/`:
-  `scenario.yaml`, four `evidence/` files, `replay/rca.json`, and a human-authored
-  `ground_truth_postmortem.md` (evaluation material, not product output).
-- **Self-validating loader** (`scenarios.py`): fails fast on a missing/empty
-  evidence file, missing/empty ground-truth, an unknown replay `source_name`, or
-  an out-of-range replay line cite. Replay cites evidence by `source_name`,
-  resolved to seeded artifact ids at seed time; the RCA stage still resolves
-  snippets from stored lines (ADR 0024).
-- **Deterministic, offline replay (ADR 0011)**: `ScenarioReplayLLMClient` +
-  `ScenarioReplayClaimSupportVerifier` (swappable boundaries, ADR 0009). Run
-  metadata records the replay honestly (`model_provider=scenario-replay:<id>`,
-  `verifier_version` includes `scenario-replay-claim-support-1`, ADR 0025).
-- **Seed command (ADR 0022 / 0004)**: `ScenarioSeedService.seed_and_run` +
-  `GET /api/scenarios`, `POST /api/scenarios/{id}/seed`. Frontend "Seed demo
-  scenario" panel seeds and routes to the Review Surface.
-- **Founder-demo trust path (ADR 0032)**: three hypotheses — deploy-regression
-  (supported), pool-capacity (partial via override), upstream-dependency
-  (assumption → unsupported Review Finding) — with supporting + contradicting
-  evidence, unknowns, verified citations, and a drafted structured Postmortem.
+- **Deterministic refusal on the Postmortem.** `DeterministicPostmortemComposer`
+  sets `evidence_sufficiency = insufficient` when no hypothesis is evidence-backed
+  (`assumption == False` count is 0 — covers the zero-hypothesis stub and any
+  all-uncited run), and emits `evidence_gaps` + `next_validation_steps` (procedural
+  guidance about evidence completeness, not new incident facts — ADR 0026-safe).
+  Persisted on `postmortems` (one VARCHAR + two JSON cols; legacy ALTER added).
+- **Non-fatal Warning Code.** Drafting returns `insufficient_evidence` so the
+  refusal is visible on the stage event and aggregated by evaluation (ADR 0021).
+- **Honest read/export.** `PostmortemRead` carries the three fields; Markdown
+  export leads with an "insufficient evidence" notice and what's-missing /
+  next-evidence sections; clean export still presents no confident root cause.
+- **Review Surface stays useful (AC #5).** `RunPostmortem` shows a refusal banner
+  separating what's missing and suggested next evidence; the evidence panel,
+  timeline, and any assumption Review Findings remain below.
+- **A positive eval refusal check (AC #4).** `check_insufficient_evidence_refusal`
+  fails both ways — a refusal scenario must refuse, a normal scenario must not
+  spuriously refuse — added to the deterministic floor; the stub's warning counts
+  now include `insufficient_evidence`.
 
 ### Verification
-- Backend: `pytest` **175 passed** (+14). Frontend: `npm run typecheck` + `npm run
-  build` clean. e2e: `npx playwright test` **3 passed** (new test seeds the
-  scenario and asserts the rendered hypotheses, verified citations, and the
-  separated Review Findings); `_e2e.db` removed and servers torn down.
-- `git diff --check` clean (line-ending warnings only).
+- Backend `pytest`: **214 passed** (+9). Frontend `typecheck` + `build` clean.
+- e2e `npx playwright test`: **5 passed** — new test seeds the insufficient
+  scenario and asserts the refusal banner, next-evidence steps, an available
+  evidence panel, and the *absence* of an RCA-hypotheses section. `_e2e.db`
+  removed, servers torn down.
 
-### Notable fix
-- The repo's Python `.gitignore` `*.log` rule silently ignored the `.log`
-  evidence fixtures (the lessons.md polyglot-gitignore pitfall, new form). Added a
-  scoped negation `!backend/scenarios/**/*.log` and verified with `git check-ignore`
-  so the demo seeds from a clean checkout. Captured in `lessons.md`.
+### Notes
+- Branched from `feature/issue-12-evaluation-runs` (90577f9), not `main`: the
+  merged-equivalent slice-11 work (incl. the `insufficient-evidence` stub) lives
+  there; `main` was never fast-forwarded. Captured in `lessons.md`.
+- Refusal is derived from the run's own output (not a scenario tag), so it works
+  for any sparse product incident — the eval tag only drives the eval expectation.
 
-### Deviations from the plan
-- None of substance. Claim-support uses a scenario replay verifier (default
-  SUPPORTED + declared overrides) rather than routing claim-support prompts
-  through the replay LLM client, keeping the two swappable boundaries cleanly
-  separated and matching how prior slices inject a fake verifier.
+---
 
-## Review Follow-up
+# Branch review follow-up
 
-- [x] Remove the untracked local `key` credential file and add a root ignore rule
-  so it cannot be accidentally staged.
-- [x] Validate scenario replay RCA JSON against the strict `RcaGenerationOutput`
-  schema during fixture loading, before product rows are created.
-- [x] Add regressions for schema-invalid replay fixtures and no half-seeded
-  Incident/Artifact/AnalysisRun rows.
+## Objective
+Review the generated final feature implementation with high precision, verify it against the project rules/ADRs/tests, and apply only necessary fixes.
+
+## Plan
+- [x] Inspect the full working-tree diff and identify behavior, schema, API, UI, evaluation, and test risks introduced on this branch.
+- [x] Run targeted backend/frontend verification to reproduce any failures or confirm the claimed green state.
+- [x] Implement minimal, elegant fixes for confirmed issues only.
+- [x] Re-run the relevant tests/typechecks/e2e checks proving the fixes work.
+- [x] Update this review section with findings, changes made, and verification results.
+
+## Review Follow-up Results
+
+Finding fixed:
+- The deterministic evaluation checks treated an insufficient-evidence scenario
+  as valid only when it produced exactly zero citations and zero hypotheses. That
+  was too narrow: a valid refusal can still have verified timeline/partial
+  evidence citations, or uncited assumption hypotheses, as long as it has no
+  evidence-backed confident hypothesis. `check_citation_integrity`,
+  `check_hypothesis_multiplicity`, and `check_insufficient_evidence_refusal` now
+  encode that boundary.
+
+Additional coverage:
+- Added unit coverage for refusal scenarios with zero citations, verified
+  citations, broken citations, uncited assumptions, and evidence-backed
+  hypotheses.
+- Added schema-compatibility coverage for upgrading pre-refusal `postmortems`
+  tables with `evidence_sufficiency`, `evidence_gaps`, and
+  `next_validation_steps`.
 
 Verification:
-- `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider tests/test_scenarios.py tests/test_services_scenarios.py tests/test_api_scenarios.py` -> 16 passed.
-- `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider` -> 177 passed, 1 warning.
-- `npm run typecheck` -> passed.
-- `npm run build` -> passed after allowing Next.js to fetch Google Fonts.
-- `git diff --check` -> no whitespace errors; Git reported line-ending warnings only.
+- Targeted backend: `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider tests/test_evaluation.py tests/test_evaluation_runner.py tests/test_api_evaluations.py tests/test_drafting.py tests/test_stages_drafting.py tests/test_api_postmortem.py tests/test_services_scenarios.py` -> 51 passed.
+- Full backend: `backend\.venv\Scripts\python.exe -m pytest -p no:cacheprovider` -> 215 passed, 1 existing `HTTP_422_UNPROCESSABLE_ENTITY` deprecation warning.
+- Frontend: `npm run typecheck` -> passed.
+- `git diff --check` -> no whitespace errors; Git reported CRLF conversion warnings only.

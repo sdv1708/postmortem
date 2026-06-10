@@ -1,0 +1,49 @@
+# Config-drift scenario family (ADR 0006): an automated config sync disabled
+# response caching and overloaded the database. Adds evaluation variety so the
+# pipeline is not tuned only against the deploy scenario (ADR 0007 / 0010).
+id: config-drift
+title: Latency spike from a drifted cache configuration
+severity: sev3
+status: resolved
+summary: >-
+  Product-listing latency spiked after an automated config sync disabled
+  response caching, tripling database read load until an operator re-enabled it.
+started_at: 2026-04-02T22:10:00Z
+detected_at: 2026-04-02T22:13:00Z
+resolved_at: 2026-04-02T22:30:00Z
+
+ambiguity_notes: >-
+  A config-driven cache disable, an unrelated traffic surge, and a code
+  regression are all candidate framings. The recovery on cache re-enable points
+  at the config change, but traffic volume was not directly measured.
+evaluation_tags: [configuration, drift, cache, ambiguous]
+expected_hypothesis_families:
+  - config-drift
+  - traffic-surge
+  - code-regression
+
+ground_truth_postmortem: ground_truth_postmortem.md
+
+evidence:
+  - source_type: logs
+    source_name: app.log
+    path: evidence/app.log
+  - source_type: deployment_notes
+    source_name: config-audit.md
+    path: evidence/config-audit.md
+  - source_type: logs
+    source_name: db-metrics.log
+    path: evidence/db-metrics.log
+  - source_type: incident_notes
+    source_name: oncall-notes.md
+    path: evidence/oncall-notes.md
+
+replay:
+  rca: replay/rca.json
+  claim_support_overrides:
+    - match: surge
+      status: partial
+      rationale: >-
+        High read QPS is consistent with a traffic surge, but the simultaneous
+        cache-disable config change is the more direct explanation, so a pure
+        traffic surge is only partially supported.

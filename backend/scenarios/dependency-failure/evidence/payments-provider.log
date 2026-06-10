@@ -1,0 +1,5 @@
+2026-03-12T09:05:40Z provider=payments endpoint=charge.create status=504 latency_ms=4200
+2026-03-12T09:06:15Z provider=payments endpoint=charge.create status=504 latency_ms=5100
+2026-03-12T09:07:00Z provider=payments circuit=open reason=upstream_timeouts
+2026-03-12T09:14:20Z provider=payments circuit=half_open probes=ok latency_ms=600
+2026-03-12T09:15:50Z provider=payments circuit=closed latency_ms=420

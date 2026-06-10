@@ -77,6 +77,22 @@ def test_seed_and_run_is_offline_and_deterministic(fresh_session):
     assert run_a.status == run_b.status == "succeeded"
 
 
+def test_seeding_insufficient_evidence_refuses_a_confident_postmortem(fresh_session):
+    # Seeding the sparse scenario into product data must yield a refusal, not a
+    # confident-but-unsupported postmortem (ADR 0032 / 0015 — AC #2/#3).
+    incident, run = ScenarioSeedService(fresh_session).seed_and_run("insufficient-evidence")
+    fresh_session.commit()
+
+    assert run.status == "succeeded"
+    assert _hypotheses(fresh_session, run.id) == []
+    postmortem = fresh_session.query(Postmortem).filter(Postmortem.run_id == run.id).one()
+    assert postmortem.evidence_sufficiency == "insufficient"
+    assert "not enough evidence to write a confident postmortem" in postmortem.summary
+    # The refusal stays useful: it names what is missing and what to collect next.
+    assert postmortem.evidence_gaps
+    assert postmortem.next_validation_steps
+
+
 def test_invalid_replay_schema_does_not_seed_product_rows(fresh_session, tmp_path):
     base = tmp_path / "scenarios"
     shutil.copytree(SCENARIOS_DIR / "deploy-ambiguity", base / "deploy-ambiguity")

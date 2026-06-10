@@ -1,0 +1,6 @@
+2026-04-02T22:10:05Z INFO config sync applied revision r512
+2026-04-02T22:10:06Z WARN feature flag response_cache_enabled=false (was true)
+2026-04-02T22:12:40Z WARN db read QPS climbing to 3x baseline
+2026-04-02T22:13:20Z ERROR p99 latency 5s on product listing endpoints
+2026-04-02T22:28:10Z INFO operator re-enabled response_cache_enabled=true
+2026-04-02T22:30:00Z INFO p99 latency recovered to baseline

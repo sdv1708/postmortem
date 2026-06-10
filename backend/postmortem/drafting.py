@@ -41,6 +41,10 @@ class PostmortemComposerContext:
     earliest_ts_text: str | None
     latest_ts_text: str | None
     hypotheses: tuple[HypothesisDigest, ...]
+    # Distinct Artifact source types included in the run (e.g. "logs",
+    # "deployment_notes"), used to name which evidence categories are missing when
+    # the analysis must refuse. Empty tuple is treated as "unknown".
+    present_source_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,12 @@ class PostmortemDraft:
 
     summary: str
     lessons_learned: tuple[str, ...]
+    # Deterministic refusal assessment (ADR 0032 / 0015). ``evidence_sufficiency``
+    # is "sufficient" or "insufficient"; the gaps and validation steps are
+    # procedural guidance about evidence completeness, populated only on refusal.
+    evidence_sufficiency: str = "sufficient"
+    evidence_gaps: tuple[str, ...] = ()
+    next_validation_steps: tuple[str, ...] = ()
 
 
 class PostmortemComposer(Protocol):
@@ -89,14 +99,39 @@ class DeterministicPostmortemComposer:
     version: Final[str] = POSTMORTEM_COMPOSER_VERSION
 
     def compose(self, context: PostmortemComposerContext) -> PostmortemDraft:
+        sufficiency = self._sufficiency(context)
+        insufficient = sufficiency == "insufficient"
         return PostmortemDraft(
-            summary=self._summary(context),
+            summary=self._summary(context, insufficient),
             lessons_learned=self._lessons(context),
+            evidence_sufficiency=sufficiency,
+            evidence_gaps=self._evidence_gaps(context) if insufficient else (),
+            next_validation_steps=self._validation_steps(context) if insufficient else (),
         )
 
-    def _summary(self, context: PostmortemComposerContext) -> str:
+    def _sufficiency(self, context: PostmortemComposerContext) -> str:
+        """Refuse unless at least one hypothesis is backed by cited evidence.
+
+        ``assumption`` is False only when a hypothesis carried supporting
+        EvidenceRefs (set in the RCA stage). If nothing the analysis proposes is
+        evidence-backed — zero hypotheses, or every hypothesis an uncited
+        assumption — there is no honest authoritative narrative, so the system
+        refuses a confident postmortem (ADR 0032 / 0015) rather than presenting an
+        unsupported one.
+        """
+        supported_basis = any(not h.assumption for h in context.hypotheses)
+        return "sufficient" if supported_basis else "insufficient"
+
+    def _summary(self, context: PostmortemComposerContext, insufficient: bool) -> str:
         artifacts = _count(context.artifact_count, "evidence artifact")
         parts = [f'Incident "{context.incident_title}" was analyzed from {artifacts}.']
+
+        if insufficient:
+            parts.append(
+                "There is not enough evidence to write a confident postmortem; the "
+                "system is withholding a root-cause conclusion rather than asserting "
+                "an unsupported one."
+            )
 
         if context.timeline_event_count == 0:
             parts.append("No timeline events were extracted from the available evidence.")
@@ -116,6 +151,41 @@ class DeterministicPostmortemComposer:
                 )
 
         return " ".join(parts)
+
+    def _evidence_gaps(self, context: PostmortemComposerContext) -> tuple[str, ...]:
+        """Name what is missing, from structural signals only (ADR 0026-safe).
+
+        These are statements about evidence *completeness*, not new factual
+        claims about the incident, so a deterministic composer may emit them.
+        """
+        gaps: list[str] = []
+        if context.timeline_event_count == 0:
+            gaps.append("No time-anchored events could be extracted; the evidence has no timestamps.")
+        if not context.hypotheses:
+            gaps.append("No root-cause hypothesis could be formed from the available evidence.")
+        elif all(h.assumption for h in context.hypotheses):
+            gaps.append("Every proposed hypothesis is an unsupported assumption with no cited evidence.")
+        present = set(context.present_source_types)
+        if present and "logs" not in present:
+            gaps.append("No application, gateway, or database logs were provided.")
+        if present and "deployment_notes" not in present:
+            gaps.append("No deployment or configuration-change history was provided.")
+        return tuple(gaps)
+
+    def _validation_steps(self, context: PostmortemComposerContext) -> tuple[str, ...]:
+        """Concrete next evidence to collect so the analysis could proceed."""
+        present = set(context.present_source_types)
+        steps: list[str] = []
+        if context.timeline_event_count == 0:
+            steps.append("Collect timestamped logs spanning the incident window to anchor a timeline.")
+        if present and "logs" not in present:
+            steps.append("Attach application, gateway, or database logs from the affected service.")
+        if present and "deployment_notes" not in present:
+            steps.append("Attach the deploy and configuration-change history around the incident time.")
+        steps.append(
+            "Confirm the incident's start, detection, and resolution times with corroborating evidence."
+        )
+        return tuple(steps)
 
     def _lessons(self, context: PostmortemComposerContext) -> tuple[str, ...]:
         # The honest "lessons" for an unresolved, ambiguous incident are the open

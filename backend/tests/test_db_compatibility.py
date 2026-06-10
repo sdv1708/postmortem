@@ -185,6 +185,40 @@ def test_create_app_upgrades_issue_7_claim_tables(tmp_path):
         assert {"support_status", "support_rationale"} <= columns
 
 
+def _create_issue_11_postmortems_table(engine):
+    """Postmortems before slice #12 had no refusal/sufficiency columns."""
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE postmortems (
+                    id VARCHAR(36) NOT NULL PRIMARY KEY,
+                    run_id VARCHAR(36) NOT NULL UNIQUE,
+                    summary TEXT NOT NULL,
+                    lessons_learned JSON NOT NULL,
+                    composer_version VARCHAR(64) NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+
+
+def test_create_app_upgrades_issue_11_postmortems_table(tmp_path):
+    database_url = f"sqlite:///{tmp_path}/issue-11.db"
+    engine = make_engine(database_url)
+    # Compatibility currently starts from the evidence_refs-era schema.
+    _create_issue_6_evidence_refs_table(engine)
+    _create_issue_11_postmortems_table(engine)
+
+    create_app(
+        Settings(database_url=database_url, api_token=None, dev_bypass=True, cors_origins=())
+    )
+
+    columns = {column["name"] for column in inspect(engine).get_columns("postmortems")}
+    assert {"evidence_sufficiency", "evidence_gaps", "next_validation_steps"} <= columns
+
+
 def test_schema_compatibility_rejects_existing_orphaned_evidence_ref(tmp_path):
     database_url = f"sqlite:///{tmp_path}/orphaned-ref.db"
     engine = make_engine(database_url)

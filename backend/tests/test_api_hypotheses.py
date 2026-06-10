@@ -185,6 +185,45 @@ def test_review_hypothesis_sets_status_without_altering_claims(
     assert after["review_status"] == "accepted"
 
 
+def test_add_reviewer_note_preserves_generated_claims(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_run_with_hypotheses(app, client, auth_headers)
+    base = f"/api/incidents/{incident_id}/analysis-runs/{run_id}/hypotheses"
+    before = client.get(base, headers=auth_headers).json()[0]
+
+    resp = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/review-notes",
+        json={"hypothesis_id": before["id"], "body": "Needs owner confirmation."},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    note = resp.json()
+    assert note["run_id"] == run_id
+    assert note["hypothesis_id"] == before["id"]
+    assert note["body"] == "Needs owner confirmation."
+
+    after = client.get(base, headers=auth_headers).json()[0]
+    assert after["title"] == before["title"]
+    assert after["summary"] == before["summary"]
+    assert after["review_status"] == before["review_status"]
+    assert [r["id"] for r in after["supporting_evidence"]] == [
+        r["id"] for r in before["supporting_evidence"]
+    ]
+    assert after["reviewer_notes"] == [note]
+
+
+def test_add_reviewer_note_for_unknown_hypothesis_returns_404(
+    app, client: TestClient, auth_headers
+):
+    incident_id, run_id = _seed_run_with_hypotheses(app, client, auth_headers)
+    resp = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/review-notes",
+        json={"hypothesis_id": "nope", "body": "Needs owner confirmation."},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "hypothesis not found"
+
+
 def test_review_unknown_hypothesis_returns_404(app, client: TestClient, auth_headers):
     incident_id, run_id = _seed_run_with_hypotheses(app, client, auth_headers)
     resp = client.post(

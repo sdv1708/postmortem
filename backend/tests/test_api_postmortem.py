@@ -113,6 +113,57 @@ def test_get_postmortem_returns_structured_document(app, client: TestClient, aut
     assert body["hypotheses"][0]["impact_claims"][0]["description"] == "Customers errored"
 
 
+def _seed_refused_run(app, client, auth_headers):
+    """Draft a run whose model returned no evidence-backed hypotheses."""
+    incident_id, _artifact_id, run_id = _queue_run(app, client, auth_headers)
+    session = app.state.session_factory()
+    try:
+        run = AnalysisService(
+            session,
+            llm_client=FakeLLMClient(['{"hypotheses": []}'], label="fake-model"),
+            claim_support_verifier=FakeClaimSupportVerifier(),
+        ).execute_run(run_id, commit_progress=True)
+        assert run.status == "succeeded"
+        session.commit()
+    finally:
+        session.close()
+    return incident_id, run_id
+
+
+def test_get_postmortem_exposes_refusal_when_evidence_is_insufficient(
+    app, client: TestClient, auth_headers
+):
+    incident_id, run_id = _seed_refused_run(app, client, auth_headers)
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # The API surfaces a structured refusal, not a confident narrative (AC #2/#3).
+    assert body["evidence_sufficiency"] == "insufficient"
+    assert body["hypotheses"] == []
+    assert "not enough evidence to write a confident postmortem" in body["summary"]
+    # It stays useful: what is missing and what to collect next (AC #5).
+    assert body["evidence_gaps"]
+    assert body["next_validation_steps"]
+
+
+def test_export_marks_refusal_for_insufficient_evidence(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_refused_run(app, client, auth_headers)
+    resp = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem/export",
+        json={"mode": "clean"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    markdown = resp.json()["markdown"]
+    assert "**Evidence sufficiency:** insufficient" in markdown
+    assert "What's missing" in markdown
+    assert "Suggested next evidence" in markdown
+    # A clean export of an insufficient run presents no confident root cause.
+    assert "_No evidence-backed root-cause hypotheses were recorded._" in markdown
+
+
 def test_get_postmortem_404_before_drafting(app, client: TestClient, auth_headers):
     incident_id, _artifact_id, run_id = _queue_run(app, client, auth_headers)
     resp = client.get(

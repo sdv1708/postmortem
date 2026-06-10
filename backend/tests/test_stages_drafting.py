@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from postmortem.llm import FakeLLMClient
-from postmortem.models import Artifact, EvidenceRef, Hypothesis, Postmortem
+from postmortem.models import Artifact, EvidenceRef, Hypothesis, Postmortem, RunStageEvent
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService, StagedRunExecutor
 from postmortem.services.stages import PipelineStageRunner
@@ -91,6 +91,55 @@ def test_drafting_persists_one_structured_postmortem(fresh_session):
         "What else changed at 14:28?",
     ]
     assert postmortem.composer_version == "postmortem-template-1"
+
+
+def test_drafting_marks_a_cited_run_sufficient_without_a_warning(fresh_session):
+    incident = _incident(fresh_session)
+    _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    run = _start(fresh_session, incident.id)
+    fresh_session.commit()
+
+    postmortem = _postmortem(fresh_session, run.id)
+    assert postmortem.evidence_sufficiency == "sufficient"
+    assert postmortem.evidence_gaps == []
+    assert postmortem.next_validation_steps == []
+    drafting = (
+        fresh_session.query(RunStageEvent)
+        .filter_by(run_id=run.id, stage="drafting_postmortem")
+        .one()
+    )
+    assert "insufficient_evidence" not in (drafting.warning_codes or [])
+
+
+def test_drafting_refuses_when_the_model_returns_no_hypotheses(fresh_session):
+    incident = _incident(fresh_session)
+    _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    # An empty RCA result (no evidence-backed hypotheses) must produce a refusal,
+    # not a confident postmortem (ADR 0032 / 0015).
+    run = AnalysisService(
+        fresh_session,
+        llm_client=FakeLLMClient(['{"hypotheses": []}']),
+        claim_support_verifier=FakeClaimSupportVerifier(),
+    ).start_run(incident.id, AnalysisRunCreate())
+    fresh_session.commit()
+
+    assert run.status == "succeeded"
+    postmortem = _postmortem(fresh_session, run.id)
+    assert postmortem.evidence_sufficiency == "insufficient"
+    assert "not enough evidence to write a confident postmortem" in postmortem.summary
+    assert postmortem.evidence_gaps
+    assert postmortem.next_validation_steps
+    # The refusal is surfaced as a non-fatal Warning Code on the drafting stage.
+    drafting = (
+        fresh_session.query(RunStageEvent)
+        .filter_by(run_id=run.id, stage="drafting_postmortem")
+        .one()
+    )
+    assert "insufficient_evidence" in drafting.warning_codes
 
 
 def test_drafting_introduces_no_new_factual_claims(fresh_session):

@@ -1,3 +1,22 @@
+- Adding scenario fixtures broke a slice-10 Playwright test that clicked
+  `getByRole("button", { name: "Seed demo scenario" }).first()`: with three
+  scenarios listed, `.first()` selected a different (alphabetically-first) card.
+  When a list can grow, never select list controls by `.first()` in e2e — scope
+  the click to the specific row (`getByRole("listitem").filter({ hasText: ... })`).
+  Growing fixtures is a normal future event; order-dependent selectors are a trap.
+- Slice #11 (#12) evaluation independence: to run scenario fixtures "independently
+  of product Incident data", the EvaluationRunner materializes each run in an
+  ephemeral in-memory SQLite engine (StaticPool + check_same_thread=False so the
+  in-memory DB is shared across the session), computes ORM-free check results from
+  it, disposes the engine, and persists only the EvaluationRun row to the real
+  session. This leaves zero product Incident/Artifact rows behind and avoids
+  cascade/lock headaches from deleting a seeded incident. Keep the deterministic
+  check floor (citation integrity, required outputs, timeline ordering,
+  multiplicity) and the LLM judge as separate recorded fields — citation validity
+  is the deterministic `verifier_status` count, never the judge (ADR 0010). Do not
+  bake judge scores into fixtures (unlike the RCA replay): a pre-baked grade makes
+  the judge dimension a tautology, so the judge is null offline and injected as a
+  fake only in tests.
 - For light-themed UI, do not set `color-scheme: light dark` unless every native
   form control has been checked in dark browser mode. Force explicit light
   input/select/textarea colors when the app background and text are light.
@@ -92,3 +111,22 @@
   rows so EvidenceRefs remain the citation source of truth, and clean-vs-audit
   export filtering is a render-time concern off the final `support_status`, not
   baked into the persisted row.
+- A "merged" slice may not be on `main`. Slice 11 (#12) was reviewed/extended and
+  committed on `feature/issue-12-evaluation-runs` (it even added a retrieval module
+  and the insufficient-evidence stub) but `main` was never fast-forwarded. Before
+  building a blocked-by slice, `git log --all` and check the actual files on disk;
+  branch the next slice off the branch that truly contains the dependency, not
+  off `main`. The reviewer's extensions (e.g. an `insufficient-evidence` scenario
+  stub, eval checks that tolerate emptiness) are part of your starting point.
+- Slice #12 (#13) refusal: model "insufficient evidence" as a *deterministic
+  product detection*, not a scenario flag. The drafting composer sets
+  `evidence_sufficiency = insufficient` when no hypothesis is evidence-backed
+  (`assumption == False` count is 0), which generalizes past the fixture to any
+  sparse/all-uncited run. The gaps + next-validation-steps it emits are procedural
+  statements about evidence *completeness*, not incident facts, so a deterministic
+  composer may emit them without violating ADR 0026. Surface it across every layer
+  (persist on the Postmortem, read model, schema, Markdown export, Review Surface
+  banner) and give evaluation a *positive* refusal check that fails both ways
+  (refusal scenario must refuse; normal scenario must not spuriously refuse) plus
+  an `insufficient_evidence` Warning Code — tolerating emptiness in the existing
+  checks is not the same as proving the system refused.

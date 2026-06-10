@@ -103,7 +103,11 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   await expect(
     page.getByRole("heading", { name: "Seed a synthetic incident" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Seed demo scenario" }).first().click();
+  // Several scenario families are listed; seed the canonical deploy one.
+  const deployCard = page
+    .getByRole("listitem")
+    .filter({ hasText: "Ambiguous deploy-related API error spike" });
+  await deployCard.getByRole("button", { name: "Seed demo scenario" }).click();
 
   // Seeding creates the incident, runs the pipeline on the bundled replay, and
   // lands on the populated Review Surface.
@@ -128,6 +132,63 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   // The structured postmortem and its clean/audit exports rendered.
   await expect(page.getByRole("button", { name: "Export clean" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Export audit" })).toBeVisible();
+});
+
+test("run the evaluation suite and review the deterministic dashboard", async ({ page }) => {
+  await page.goto(`${BASE}/evaluations`);
+  await expect(page.getByRole("heading", { name: "Evaluations" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Run all evaluations" }).click();
+
+  // Each scenario family is scored (ADR 0006): deploy, dependency, config drift.
+  await expect(
+    page.getByRole("heading", { name: "Ambiguous deploy-related API error spike" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Checkout failures from a degraded payments provider" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Latency spike from a drifted cache configuration" }),
+  ).toBeVisible();
+
+  // The deterministic floor passes and citation validity is reported mechanically.
+  await expect(page.getByText("passing").first()).toBeVisible();
+  await expect(page.getByText(/\d+\/\d+ verified/).first()).toBeVisible();
+  await expect(page.getByText("✓ citation_integrity").first()).toBeVisible();
+  // No model configured in e2e, so the judge is honestly not scored — but the
+  // deterministic floor still stands (ADR 0010).
+  await expect(page.getByText("not scored (no model)").first()).toBeVisible();
+});
+
+test("seed the insufficient-evidence scenario and see a refusal, not a confident postmortem", async ({
+  page,
+}) => {
+  await page.goto(`${BASE}/incidents`);
+  await expect(
+    page.getByRole("heading", { name: "Seed a synthetic incident" }),
+  ).toBeVisible();
+
+  const refusalCard = page
+    .getByRole("listitem")
+    .filter({ hasText: "Insufficient evidence for confident postmortem" });
+  await refusalCard.getByRole("button", { name: "Seed demo scenario" }).click();
+
+  await page.waitForURL(/\/incidents\/[0-9a-f-]{36}$/);
+  await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
+
+  // The system refuses rather than asserting a confident root cause (ADR 0032).
+  await expect(
+    page.getByText("Insufficient evidence — no confident root cause asserted"),
+  ).toBeVisible();
+  // It stays useful: it says what to collect next (AC #5).
+  await expect(page.getByText("Suggested next evidence")).toBeVisible();
+  await expect(
+    page.getByText(/Collect timestamped logs spanning the incident window/),
+  ).toBeVisible();
+  // No confident hypotheses are presented.
+  await expect(page.getByText(/RCA hypotheses ·/)).toBeHidden();
+  // The source evidence remains available for review.
+  await expect(page.getByRole("button", { name: /sparse-notes\.md/ })).toBeVisible();
 });
 
 test("home page links into the incident list", async ({ page }) => {

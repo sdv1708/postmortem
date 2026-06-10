@@ -303,6 +303,36 @@ class Hypothesis(Base):
         cascade="all, delete-orphan",
         order_by="ActionItem.sequence",
     )
+    reviewer_notes: Mapped[list["ReviewerNote"]] = relationship(
+        back_populates="hypothesis",
+        cascade="all, delete-orphan",
+        order_by="ReviewerNote.created_at",
+    )
+
+
+class ReviewerNote(Base):
+    """A human-authored review annotation separate from generated claims.
+
+    Reviewer Notes capture review context without editing hypotheses, citations,
+    verifier statuses, or generated postmortem text (ADR 0016). A note is scoped
+    to the Analysis Run and may optionally attach to a specific hypothesis so the
+    Review Surface can show it near the claim being discussed.
+    """
+
+    __tablename__ = "reviewer_notes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    hypothesis_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("hypotheses.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship()
+    hypothesis: Mapped[Hypothesis | None] = relationship(back_populates="reviewer_notes")
 
 
 class ImpactClaim(Base):
@@ -390,10 +420,69 @@ class Postmortem(Base):
     # Reflective follow-ups, stored as a JSON string list like a hypothesis's
     # unknowns; not Major Claims, so they carry no citations.
     lessons_learned: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Deterministic refusal assessment (ADR 0032 / 0015): 'sufficient' when at
+    # least one hypothesis is backed by cited evidence, else 'insufficient' so the
+    # Review Surface withholds a confident root cause instead of asserting an
+    # unsupported one. ``evidence_gaps`` / ``next_validation_steps`` are procedural
+    # guidance about evidence completeness (not new factual incident claims,
+    # ADR 0026); meaningfully populated only on refusal.
+    evidence_sufficiency: Mapped[str] = mapped_column(String(16), nullable=False, default="sufficient")
+    evidence_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    next_validation_steps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     composer_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     run: Mapped[AnalysisRun] = relationship()
+
+
+class EvaluationRun(Base):
+    """A recorded evaluation of one scenario fixture (ADR 0010 / 0025).
+
+    The EvaluationRunner materializes a scenario in an ephemeral database (so eval
+    never depends on product Incident data), runs the replay pipeline, and records
+    the outcome here: the deterministic check floor, Warning Code counts, the
+    semantic judge scores, and the same Experiment Metadata as the underlying
+    Analysis Run so prompt/pipeline tradeoffs are comparable (ADR 0025).
+
+    ``judge_scores`` is null when no model is configured: citation validity comes
+    from the deterministic ``checks`` / ``citation_verified`` columns, never the
+    judge (ADR 0010).
+    """
+
+    __tablename__ = "evaluation_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    scenario_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    scenario_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Evaluation execution status, distinct from the underlying run's status.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="succeeded")
+    analysis_run_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    # True when every deterministic check passed (the trust floor, ADR 0010).
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Experiment Metadata mirrored from the Analysis Run (ADR 0025).
+    pipeline_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    retrieval_strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunking_strategy: Mapped[str] = mapped_column(String(64), nullable=False)
+    verifier_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Null when no judge ran (no model configured). The deterministic floor stands
+    # on its own without it.
+    judge_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    citation_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    citation_verified: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Deterministic check results: [{"name", "passed", "detail"}].
+    checks: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    # Warning Code counts aggregated across the run's stage events: {code: count}.
+    warning_code_counts: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # Judge rubric scores: {"scores": {...}, "overall": float, "rationale": str}
+    # or null when no judge ran.
+    judge_scores: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
 class EvidenceRef(Base):
