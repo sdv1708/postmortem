@@ -7,7 +7,7 @@ export default function Home() {
         <div className="space-y-6">
           <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600 shadow-sm">
             <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
-            Slice 2 · Evidence management
+            Evidence-backed incident reviews
           </span>
           <h1 className="text-4xl font-semibold tracking-tight text-slate-900 sm:text-5xl">
             Postmortems with evidence,{" "}
@@ -65,7 +65,7 @@ export default function Home() {
               ))}
             </div>
             <div className="border-t border-slate-200 bg-slate-50/60 px-4 py-2.5 text-xs text-slate-500">
-              Cited in postmortem: <span className="text-slate-700">L3 · 500s spike</span>
+              Cited in postmortem: <span className="text-slate-700">L3 - 500s spike</span>
             </div>
           </div>
         </div>

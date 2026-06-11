@@ -25,8 +25,8 @@ class IncidentService:
         workspace = ensure_default_workspace(self._session)
         incident = Incident(
             workspace_id=workspace.id,
-            title=payload.title,
-            summary=payload.summary,
+            title=payload.title.strip(),
+            summary=payload.summary.strip() if payload.summary else None,
             severity=payload.severity,
             status=payload.status,
             started_at=payload.started_at,

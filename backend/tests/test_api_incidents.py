@@ -4,11 +4,16 @@ from fastapi.testclient import TestClient
 
 
 def test_create_and_fetch_incident(client: TestClient, auth_headers):
-    payload = {"title": "Deploy ambiguity API spike", "severity": "sev2"}
+    payload = {
+        "title": "  Deploy ambiguity API spike  ",
+        "summary": "  Checkout latency increased after deploy.  ",
+        "severity": "sev2",
+    }
     create_resp = client.post("/api/incidents", json=payload, headers=auth_headers)
     assert create_resp.status_code == 201, create_resp.text
     body = create_resp.json()
-    assert body["title"] == payload["title"]
+    assert body["title"] == "Deploy ambiguity API spike"
+    assert body["summary"] == "Checkout latency increased after deploy."
     assert body["severity"] == "sev2"
     assert body["status"] == "open"
     assert body["workspace_id"]

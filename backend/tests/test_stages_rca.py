@@ -295,7 +295,7 @@ def test_uncited_hypothesis_normalized_to_assumption_with_warning(fresh_session)
     assert artifact.body == AMBIGUOUS_BODY
 
 
-def test_out_of_range_citation_fails_stage(fresh_session):
+def test_invalid_citations_are_dropped_and_flagged(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
     fresh_session.commit()
@@ -315,21 +315,24 @@ def test_out_of_range_citation_fails_stage(fresh_session):
             ]
         }
     )
-    fake = FakeLLMClient(lambda system, user: bad_ref)
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    fake = FakeLLMClient([bad_ref])
+    run = AnalysisService(
+        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
-    assert run.status == "failed"
-    assert _hypotheses(fresh_session, run.id) == []
+    assert run.status == "succeeded"
+    hyp = _hypotheses(fresh_session, run.id)[0]
+    assert hyp.assumption is False
+    assert len(hyp.evidence_refs) == 1
+    assert hyp.evidence_refs[0].artifact_id == artifact.id
+    assert hyp.evidence_refs[0].line_start == 1
     event = _rca_event(fresh_session, run.id)
-    assert event.status == "failed"
-    assert event.attempt == 2
-    assert event.error == "RCA output cited an invalid artifact line range"
+    assert event.status == "succeeded"
+    assert "invalid_citation" in event.warning_codes
 
 
-def test_foreign_artifact_citation_fails_stage(fresh_session):
+def test_foreign_artifact_citation_becomes_uncited_assumption(fresh_session):
     incident = _incident(fresh_session)
     _add(fresh_session, incident.id)
     fresh_session.commit()
@@ -347,15 +350,20 @@ def test_foreign_artifact_citation_fails_stage(fresh_session):
             ]
         }
     )
-    fake = FakeLLMClient(lambda system, user: foreign_ref)
+    fake = FakeLLMClient([foreign_ref])
     run = AnalysisService(fresh_session, llm_client=fake).start_run(
         incident.id, AnalysisRunCreate()
     )
     fresh_session.commit()
 
-    assert run.status == "failed"
-    assert _hypotheses(fresh_session, run.id) == []
-    assert _rca_event(fresh_session, run.id).error == "RCA output cited an artifact outside this run"
+    assert run.status == "succeeded"
+    hyp = _hypotheses(fresh_session, run.id)[0]
+    assert hyp.assumption is True
+    assert hyp.evidence_refs == []
+    event = _rca_event(fresh_session, run.id)
+    assert event.status == "succeeded"
+    assert "invalid_citation" in event.warning_codes
+    assert "uncited_claim" in event.warning_codes
 
 
 def test_offline_default_produces_no_hypotheses_but_run_succeeds(fresh_session):

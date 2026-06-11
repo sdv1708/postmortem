@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
@@ -14,6 +15,7 @@ from ..drafting import (
     PostmortemComposerContext,
 )
 from ..llm import LLMClient, OfflineLLMClient
+from ..logging import log_event
 from ..models import (
     ActionItem,
     AnalysisRun,
@@ -40,6 +42,9 @@ from ..verification import (
     DeterministicCitationIntegrityVerifier,
     LLMClaimSupportVerifier,
 )
+
+
+logger = logging.getLogger("postmortem.stages")
 
 
 def _as_naive_utc(value: datetime | None) -> datetime | None:
@@ -154,7 +159,17 @@ class PipelineStageRunner:
         if total_chunks == 0:
             warning_codes.append("chunk_count_anomaly")
         self._session.flush()
-        return {"warning_codes": _dedupe(warning_codes)}
+        warning_codes = _dedupe(warning_codes)
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_normalizing_evidence_completed",
+            run_id=run.id,
+            artifact_count=len(artifacts),
+            chunk_count=total_chunks,
+            warning_codes=",".join(warning_codes) if warning_codes else None,
+        )
+        return {"warning_codes": warning_codes}
 
     def _extract_timeline(self, run: AnalysisRun) -> dict | None:
         """Build Timeline Events with EvidenceRefs from timestamped lines.
@@ -213,6 +228,15 @@ class PipelineStageRunner:
             )
             self._session.add(event)
         self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_extracting_timeline_completed",
+            run_id=run.id,
+            artifact_count=len(artifacts),
+            timeline_event_count=len(ordered),
+            uncertain_count=sum(1 for candidate in ordered if candidate.uncertain),
+        )
         return None
 
     def _generate_rca(self, run: AnalysisRun) -> dict | None:
@@ -249,6 +273,15 @@ class PipelineStageRunner:
             artifacts=artifacts,
             timeline_events=timeline,
         )
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_generating_rca_prompt_ready",
+            run_id=run.id,
+            artifact_count=len(retrieval.artifacts),
+            timeline_event_count=len(timeline),
+            retrieval_strategy=self._retrieval.version,
+        )
         system, user = build_rca_prompt(retrieval.artifacts, timeline)
         response = self._llm.complete(system=system, user=user)
         try:
@@ -261,8 +294,12 @@ class PipelineStageRunner:
         by_id = {artifact.id: artifact for artifact in retrieval.artifacts}
         warning_codes: list[str] = []
         for rank, hyp in enumerate(output.hypotheses, start=1):
-            supporting = self._resolve_refs(by_id, hyp.supporting_evidence, "supporting")
-            contradicting = self._resolve_refs(by_id, hyp.contradicting_evidence, "contradicting")
+            supporting = self._resolve_refs(
+                by_id, hyp.supporting_evidence, "supporting", warning_codes
+            )
+            contradicting = self._resolve_refs(
+                by_id, hyp.contradicting_evidence, "contradicting", warning_codes
+            )
             assumption = not supporting
             if assumption:
                 warning_codes.append("uncited_claim")
@@ -279,7 +316,7 @@ class PipelineStageRunner:
             hypothesis.evidence_refs.extend(supporting)
             hypothesis.evidence_refs.extend(contradicting)
             for sequence, impact in enumerate(hyp.impact_claims, start=1):
-                evidence = self._resolve_refs(by_id, impact.evidence, "supporting")
+                evidence = self._resolve_refs(by_id, impact.evidence, "supporting", warning_codes)
                 impact_assumption = not evidence
                 if impact_assumption:
                     warning_codes.append("uncited_claim")
@@ -293,7 +330,9 @@ class PipelineStageRunner:
             for sequence, remediation in enumerate(hyp.remediation_items, start=1):
                 item = ActionItem(sequence=sequence, description=remediation.description)
                 item.evidence_refs.extend(
-                    self._resolve_refs(by_id, remediation.evidence, "supporting")
+                    self._resolve_refs(
+                        by_id, remediation.evidence, "supporting", warning_codes
+                    )
                 )
                 hypothesis.action_items.append(item)
             self._session.add(hypothesis)
@@ -304,29 +343,50 @@ class PipelineStageRunner:
             outcome["warning_codes"] = _dedupe(warning_codes)
         if response.usage:
             outcome["usage"] = response.usage
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_generating_rca_completed",
+            run_id=run.id,
+            hypothesis_count=len(output.hypotheses),
+            warning_codes=",".join(_dedupe(warning_codes)) if warning_codes else None,
+            usage_keys=",".join(sorted(response.usage.keys())) if response.usage else None,
+        )
         return outcome or None
 
     def _resolve_refs(
-        self, by_id: dict[str, Artifact], refs: list[RcaEvidenceRef], role: str
+        self,
+        by_id: dict[str, Artifact],
+        refs: list[RcaEvidenceRef],
+        role: str,
+        warning_codes: list[str],
     ) -> list[EvidenceRef]:
-        return [self._resolve_ref(by_id, ref, role) for ref in refs]
+        resolved: list[EvidenceRef] = []
+        for ref in refs:
+            evidence_ref = self._resolve_ref(by_id, ref, role)
+            if evidence_ref is None:
+                warning_codes.append("invalid_citation")
+                continue
+            resolved.append(evidence_ref)
+        return resolved
 
     def _resolve_ref(
         self, by_id: dict[str, Artifact], ref: RcaEvidenceRef, role: str
-    ) -> EvidenceRef:
+    ) -> EvidenceRef | None:
         """Turn a model-cited line range into a citation with an exact snippet.
 
         The snippet is read from the stored Artifact lines, never from the model,
         so the citation remains the source of truth (ADR 0024). A ref to an
-        artifact outside the run or to out-of-range lines is rejected here so
-        invalid model output cannot disappear from the auditable run result.
+        artifact outside the run or to out-of-range lines is dropped and flagged
+        by the caller so one bad model citation does not prevent human review of
+        the rest of the run.
         """
         artifact = by_id.get(ref.artifact_id)
         if artifact is None:
-            raise ValueError("RCA output cited an artifact outside this run")
+            return None
         lines = artifact.body.split("\n")
         if ref.line_start < 1 or ref.line_end < ref.line_start or ref.line_end > len(lines):
-            raise ValueError("RCA output cited an invalid artifact line range")
+            return None
         snippet = "\n".join(lines[ref.line_start - 1 : ref.line_end])
         return EvidenceRef(
             artifact_id=artifact.id,
@@ -355,7 +415,9 @@ class PipelineStageRunner:
         """
         bodies = {artifact.id: artifact.body for artifact in self._run_artifacts(run)}
         warning_codes: list[str] = []
-        for ref in self._run_evidence_refs(run):
+        refs = self._run_evidence_refs(run)
+        verified = 0
+        for ref in refs:
             status = self._verifier.verify(
                 CitationTarget(
                     artifact_id=ref.artifact_id,
@@ -368,8 +430,20 @@ class PipelineStageRunner:
             ref.verifier_status = status.value
             if not status.ok:
                 warning_codes.append("citation_integrity_failure")
+            else:
+                verified += 1
         self._session.flush()
-        return {"warning_codes": _dedupe(warning_codes)} if warning_codes else None
+        warning_codes = _dedupe(warning_codes)
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_verifying_citations_completed",
+            run_id=run.id,
+            citation_total=len(refs),
+            citation_verified=verified,
+            warning_codes=",".join(warning_codes) if warning_codes else None,
+        )
+        return {"warning_codes": warning_codes} if warning_codes else None
 
     def _run_evidence_refs(self, run: AnalysisRun) -> list[EvidenceRef]:
         """Every EvidenceRef owned by the run, across all four owner types.
@@ -448,6 +522,17 @@ class PipelineStageRunner:
             )
         )
         self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_drafting_postmortem_completed",
+            run_id=run.id,
+            timeline_event_count=len(timeline),
+            hypothesis_count=len(hypotheses),
+            evidence_sufficiency=draft.evidence_sufficiency,
+            evidence_gap_count=len(draft.evidence_gaps),
+            validation_step_count=len(draft.next_validation_steps),
+        )
         # Refusal is a non-fatal Warning Code (ADR 0015 / 0029) so it is visible
         # in the run's stage events and aggregated by evaluation (ADR 0021 / 0025).
         if draft.evidence_sufficiency == "insufficient":
@@ -516,14 +601,27 @@ class PipelineStageRunner:
             )
         )
         warning_codes: list[str] = []
+        classified = 0
         for hypothesis in hypotheses:
             self._classify_claim(
                 hypothesis, f"{hypothesis.title}: {hypothesis.summary}", warning_codes
             )
+            classified += 1
             for claim in hypothesis.impact_claims:
                 self._classify_claim(claim, claim.description, warning_codes)
+                classified += 1
         self._session.flush()
-        return {"warning_codes": _dedupe(warning_codes)} if warning_codes else None
+        warning_codes = _dedupe(warning_codes)
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_flagging_unsupported_claims_completed",
+            run_id=run.id,
+            hypothesis_count=len(hypotheses),
+            major_claim_count=classified,
+            warning_codes=",".join(warning_codes) if warning_codes else None,
+        )
+        return {"warning_codes": warning_codes} if warning_codes else None
 
     def _classify_claim(self, claim, claim_text: str, warning_codes: list[str]) -> None:
         """Stamp one Major Claim's support status + rationale (ADR 0014).

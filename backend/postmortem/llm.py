@@ -78,6 +78,7 @@ class FakeLLMClient:
 
     def complete(self, *, system: str, user: str) -> LLMResponse:
         self.calls.append((system, user))
+        logger.debug("fake_llm_completion label=%s call=%s", self._label, len(self.calls))
         if callable(self._responses):
             return LLMResponse(text=self._responses(system, user), usage=self._usage)
         if self._cursor >= len(self._responses):
@@ -101,6 +102,7 @@ class OfflineLLMClient:
         return "offline"
 
     def complete(self, *, system: str, user: str) -> LLMResponse:
+        logger.info("offline_llm_completion")
         return LLMResponse(text=json.dumps({"hypotheses": []}))
 
 
@@ -138,6 +140,11 @@ class OpenAICompatibleLLMClient:
         return f"openai-compatible:{self._provider}:{self._model}"
 
     def complete(self, *, system: str, user: str) -> LLMResponse:
+        logger.info(
+            "llm_request_started provider=%s model=%s",
+            self._provider,
+            self._model,
+        )
         payload = {
             "model": self._model,
             "messages": [
@@ -173,6 +180,12 @@ class OpenAICompatibleLLMClient:
             text = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError("provider envelope missing completion text") from exc
+        logger.info(
+            "llm_request_completed provider=%s model=%s usage_keys=%s",
+            self._provider,
+            self._model,
+            ",".join(sorted(body.get("usage", {}).keys())) if body.get("usage") else "none",
+        )
         return LLMResponse(text=text, usage=body.get("usage"))
 
 

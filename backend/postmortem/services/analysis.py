@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -9,6 +10,7 @@ from ..chunking import CHUNKING_STRATEGY_VERSION
 from ..config import DEFAULT_EXPERIMENT_METADATA
 from ..drafting import PostmortemComposer
 from ..llm import LLMClient
+from ..logging import log_event
 from ..models import AnalysisRun, Artifact, Hypothesis, Postmortem, ReviewerNote, RunArtifact, TimelineEvent
 from ..rca import PROMPT_VERSION
 from ..retrieval import RETRIEVAL_STRATEGY_VERSION, RetrievalStrategy
@@ -43,6 +45,7 @@ class NoArtifactsError(ValueError):
 # Hypothesis review decisions a reviewer may record (ADR 0016). Accepting or
 # rejecting never edits the generated claims; it only sets this status.
 HYPOTHESIS_REVIEW_STATUSES: frozenset[str] = frozenset({"accepted", "rejected", "proposed"})
+logger = logging.getLogger("postmortem.analysis")
 
 
 def _utcnow() -> datetime:
@@ -107,6 +110,14 @@ class AnalysisService:
         *,
         execute_inline: bool = True,
     ) -> AnalysisRun:
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_run_create_requested",
+            incident_id=incident_id,
+            selected_artifacts=("all" if payload.artifact_ids is None else len(payload.artifact_ids)),
+            execute_inline=execute_inline,
+        )
         IncidentService(self._session).get(incident_id)
         artifacts = self._resolve_artifacts(incident_id, payload.artifact_ids)
 
@@ -140,16 +151,37 @@ class AnalysisService:
             self._session.add(RunArtifact(run_id=run.id, artifact_id=artifact.id))
             artifact.included_in_analysis_run = True
         self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_run_created",
+            run_id=run.id,
+            incident_id=incident_id,
+            artifact_count=len(artifacts),
+            model_provider=metadata["model_provider"],
+            retrieval_strategy=metadata["retrieval_strategy"],
+            chunking_strategy=metadata["chunking_strategy"],
+            verifier_version=metadata["verifier_version"],
+        )
 
         if execute_inline:
             self.execute_run(run.id)
         return run
 
     def execute_run(self, run_id: str, *, commit_progress: bool = False) -> AnalysisRun:
+        log_event(logger, logging.INFO, "analysis_run_execute_requested", run_id=run_id)
         run = self._session.get(AnalysisRun, run_id)
         if run is None:
+            log_event(logger, logging.WARNING, "analysis_run_execute_missing", run_id=run_id)
             raise AnalysisRunNotFoundError(run_id)
         if run.status in {"running", "succeeded", "failed"}:
+            log_event(
+                logger,
+                logging.INFO,
+                "analysis_run_execute_skipped",
+                run_id=run.id,
+                status=run.status,
+            )
             return run
         self._execute(run, commit_progress=commit_progress)
         return run
@@ -248,6 +280,15 @@ class AnalysisService:
             raise ValueError(f"invalid review decision: {decision}")
         hypothesis.review_status = decision
         self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "hypothesis_review_recorded",
+            run_id=run_id,
+            incident_id=incident_id,
+            hypothesis_id=hypothesis_id,
+            decision=decision,
+        )
         return hypothesis
 
     def add_reviewer_note(
@@ -269,6 +310,15 @@ class AnalysisService:
         else:
             hypothesis.reviewer_notes.append(note)
         self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "reviewer_note_added",
+            run_id=run_id,
+            incident_id=incident_id,
+            hypothesis_id=payload.hypothesis_id,
+            body_chars=len(body),
+        )
         return note
 
     def _resolve_artifacts(
@@ -294,11 +344,20 @@ class AnalysisService:
         return artifacts
 
     def _execute(self, run: AnalysisRun, *, commit_progress: bool = False) -> None:
+        started = _utcnow()
         run.status = "running"
-        run.started_at = _utcnow()
+        run.started_at = started
         self._session.flush()
         if commit_progress:
             self._session.commit()
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_run_started",
+            run_id=run.id,
+            incident_id=run.incident_id,
+            commit_progress=commit_progress,
+        )
         recorder = StageRecorder(self._session, run, commit_on_change=commit_progress)
         try:
             self._executor.execute(run, recorder)
@@ -311,12 +370,35 @@ class AnalysisService:
             self._session.flush()
             if commit_progress:
                 self._session.commit()
+            log_event(
+                logger,
+                logging.ERROR,
+                "analysis_run_failed",
+                run_id=run.id,
+                incident_id=run.incident_id,
+                error=run.error,
+                duration_ms=_elapsed_ms(started, run.completed_at),
+            )
             return
         run.status = "succeeded"
         run.completed_at = _utcnow()
         self._session.flush()
         if commit_progress:
             self._session.commit()
+        log_event(
+            logger,
+            logging.INFO,
+            "analysis_run_succeeded",
+            run_id=run.id,
+            incident_id=run.incident_id,
+            duration_ms=_elapsed_ms(started, run.completed_at),
+        )
+
+
+def _elapsed_ms(start: datetime | None, end: datetime | None) -> int | None:
+    if start is None or end is None:
+        return None
+    return max(0, int((end - start).total_seconds() * 1000))
 
 
 def run_artifact_ids(run: AnalysisRun) -> list[str]:

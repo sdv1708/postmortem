@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from ..evaluation import (
     citation_tally,
     run_deterministic_checks,
 )
+from ..logging import log_event
 from ..models import (
     ActionItem,
     AnalysisRun,
@@ -35,6 +37,9 @@ from ..models import (
 )
 from ..scenarios import LoadedScenario, list_scenarios, load_scenario
 from .scenarios import ScenarioSeedService
+
+
+logger = logging.getLogger("postmortem.evaluation")
 
 
 @dataclass(frozen=True)
@@ -84,12 +89,17 @@ class EvaluationRunner:
         )
 
     def run_all(self) -> list[EvaluationRun]:
-        return [
+        scenarios = list_scenarios(self._base_dir)
+        log_event(logger, logging.INFO, "evaluation_run_all_started", scenario_count=len(scenarios))
+        rows = [
             self.run_and_record(scenario.id)
-            for scenario in list_scenarios(self._base_dir)
+            for scenario in scenarios
         ]
+        log_event(logger, logging.INFO, "evaluation_run_all_completed", recorded_count=len(rows))
+        return rows
 
     def run_and_record(self, scenario_id: str) -> EvaluationRun:
+        log_event(logger, logging.INFO, "evaluation_record_started", scenario_id=scenario_id)
         result = self.evaluate(scenario_id)
         row = EvaluationRun(
             scenario_id=result.scenario_id,
@@ -118,6 +128,19 @@ class EvaluationRunner:
         )
         self._session.add(row)
         self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "evaluation_record_completed",
+            scenario_id=scenario_id,
+            evaluation_run_id=row.id,
+            passed=row.passed,
+            citation_verified=row.citation_verified,
+            citation_total=row.citation_total,
+            warning_codes=",".join(sorted(row.warning_code_counts.keys()))
+            if row.warning_code_counts
+            else None,
+        )
         return row
 
     def evaluate(self, scenario_id: str) -> EvaluationResult:
@@ -126,6 +149,7 @@ class EvaluationRunner:
         Raises ``ScenarioNotFoundError`` / ``ScenarioValidationError`` for a bad
         scenario id before anything is recorded.
         """
+        log_event(logger, logging.INFO, "evaluation_started", scenario_id=scenario_id)
         scenario = load_scenario(scenario_id, self._base_dir)
         engine = create_engine(
             "sqlite://",
@@ -149,6 +173,17 @@ class EvaluationRunner:
         checks = tuple(run_deterministic_checks(snapshot))
         total, verified = citation_tally(snapshot)
         judge = self._judge.judge(judge_input) if self._judge is not None else None
+        log_event(
+            logger,
+            logging.INFO,
+            "evaluation_completed",
+            scenario_id=scenario.id,
+            analysis_run_status=run.status,
+            passed=all(check.passed for check in checks),
+            citation_verified=verified,
+            citation_total=total,
+            judge_ran=judge is not None,
+        )
         return EvaluationResult(
             scenario_id=scenario.id,
             scenario_title=scenario.title,

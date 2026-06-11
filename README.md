@@ -62,6 +62,12 @@ Local `.env` files are intentionally ignored by git. Real process environment
 variables still take precedence over `.env`, so one-off shell overrides and
 hosted deployment settings remain authoritative.
 
+For local backend diagnostics, set `POSTMORTEM_LOG_LEVEL=DEBUG` in `.env`.
+Default `INFO` logs request IDs, request completion, analysis run lifecycle,
+pipeline stage attempts, warning codes, scenario seeding, evaluations, and LLM
+provider calls without logging evidence bodies, prompts, API keys, or reviewer
+note text.
+
 ### Frontend
 
 ```sh

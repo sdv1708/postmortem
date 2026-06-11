@@ -227,6 +227,8 @@ def _postmortem() -> PostmortemRead:
 def test_clean_export_omits_unsupported_claims():
     markdown = render_markdown(_postmortem(), ExportMode.CLEAN)
     assert "**Export mode:** clean" in markdown
+    assert "## Open questions" in markdown
+    assert "## Lessons learned" not in markdown
     assert "Deploy v184 regressed the pool" in markdown
     # The unsupported claim must not appear as fact in a clean export (ADR 0015).
     assert "Sunspot interference theory" not in markdown
@@ -256,5 +258,5 @@ def test_markdown_is_derived_only_from_structured_data():
     assert postmortem.summary in markdown
     assert postmortem.hypotheses[0].summary in markdown
     assert "api.log:2" in markdown  # impact citation, from the EvidenceRef
-    for lesson in postmortem.lessons_learned:
-        assert lesson in markdown
+    for question in postmortem.lessons_learned:
+        assert question in markdown

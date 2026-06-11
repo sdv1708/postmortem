@@ -255,7 +255,7 @@ export default function IncidentOverviewPage() {
       <Section title="Postmortem" description="Drafted from evidence with line-level citations.">
         <div className="card-padded text-sm text-slate-600">
           Each succeeded analysis run above drafts a structured postmortem — summary, timeline,
-          impact, ranked hypotheses, remediation, and lessons learned — with clean and audit
+          impact, ranked hypotheses, remediation, and open questions — with clean and audit
           Markdown exports. Open a run to review and export it.
         </div>
       </Section>
@@ -906,6 +906,17 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
     setPendingMode(mode);
     try {
       const result = await api.exportRunPostmortem(incidentId, runId, mode);
+      const expectedFilename = `postmortem-${runId}-${mode}.md`;
+      const expectedModeLine = `**Export mode:** ${mode}`;
+      if (
+        result.mode !== mode ||
+        result.filename !== expectedFilename ||
+        !result.markdown.includes(expectedModeLine)
+      ) {
+        throw new Error(
+          `Export response did not match the requested ${mode} mode. Please retry.`,
+        );
+      }
       downloadMarkdown(result.filename, result.markdown);
     } catch (err) {
       setExportError(err instanceof Error ? err.message : "Export failed.");
@@ -1009,7 +1020,7 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
         )}
         <p className="text-sm leading-relaxed text-slate-700">{postmortem.summary}</p>
         {postmortem.lessons_learned.length > 0 && (
-          <BulletGroup label="Lessons learned" items={postmortem.lessons_learned} />
+          <BulletGroup label="Open questions" items={postmortem.lessons_learned} />
         )}
       </div>
     </div>

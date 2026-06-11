@@ -15,6 +15,7 @@ def test_settings_loads_dotenv_without_overriding_process_env(tmp_path, monkeypa
                 "POSTMORTEM_LLM_BASE_URL='https://provider.test/v1'",
                 "POSTMORTEM_LLM_API_KEY=from-file # inline comment",
                 "POSTMORTEM_LLM_MODEL=dotenv-model",
+                "POSTMORTEM_LOG_LEVEL=DEBUG",
             ]
         ),
         encoding="utf-8",
@@ -27,6 +28,7 @@ def test_settings_loads_dotenv_without_overriding_process_env(tmp_path, monkeypa
         "POSTMORTEM_LLM_BASE_URL",
         "POSTMORTEM_LLM_API_KEY",
         "POSTMORTEM_LLM_MODEL",
+        "POSTMORTEM_LOG_LEVEL",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("POSTMORTEM_LLM_MODEL", "shell-model")
@@ -41,3 +43,4 @@ def test_settings_loads_dotenv_without_overriding_process_env(tmp_path, monkeypa
     assert settings.llm_base_url == "https://provider.test/v1"
     assert settings.llm_api_key == "from-file"
     assert settings.llm_model == "shell-model"
+    assert settings.log_level == "DEBUG"

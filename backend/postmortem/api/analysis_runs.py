@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..auth import require_user
 from ..config import Settings
 from ..llm import build_llm_client
+from ..logging import log_event
 from ..markdown_export import ExportMode, render_markdown
 from ..schemas import (
     AnalysisRunCreate,
@@ -35,6 +38,9 @@ from ..services import (
 from .deps import get_db
 
 
+logger = logging.getLogger("postmortem.api.analysis_runs")
+
+
 router = APIRouter(
     prefix="/api/incidents/{incident_id}/analysis-runs",
     tags=["analysis-runs"],
@@ -51,11 +57,20 @@ def execute_analysis_run_background(
     settings = settings or Settings.from_env()
     client = build_llm_client(settings)
     session = session_factory()
+    log_event(
+        logger,
+        logging.INFO,
+        "analysis_run_background_started",
+        run_id=run_id,
+        model_provider=client.label,
+    )
     try:
         AnalysisService(session, llm_client=client).execute_run(run_id, commit_progress=True)
         session.commit()
+        log_event(logger, logging.INFO, "analysis_run_background_completed", run_id=run_id)
     except Exception:
         session.rollback()
+        log_event(logger, logging.ERROR, "analysis_run_background_failed", run_id=run_id)
         raise
     finally:
         session.close()
@@ -67,6 +82,7 @@ def schedule_analysis_run(
     run_id: str,
     settings: Settings,
 ) -> None:
+    log_event(logger, logging.INFO, "analysis_run_background_scheduled", run_id=run_id)
     background_tasks.add_task(execute_analysis_run_background, session_factory, run_id, settings)
 
 

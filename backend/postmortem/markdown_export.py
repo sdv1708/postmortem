@@ -83,12 +83,12 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
         _review_findings_section(lines, review_findings)
     _remediation_section(lines, authoritative)
 
-    lines.append("## Lessons learned")
+    lines.append("## Open questions")
     lines.append("")
     if postmortem.lessons_learned:
         lines.extend(f"- {lesson}" for lesson in postmortem.lessons_learned)
     else:
-        lines.append("_No lessons were recorded._")
+        lines.append("_No open questions were recorded._")
     lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

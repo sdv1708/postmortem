@@ -1,3 +1,7 @@
+- Do not expose internal slice/milestone labels in product UI. Labels such as
+  "Slice 2" or "Slice 5" belong in tasks, README, and ADR planning notes, not in
+  landing-page badges, headers, footers, or reviewer-facing screens. UI copy
+  should describe product value and user workflow.
 - Adding scenario fixtures broke a slice-10 Playwright test that clicked
   `getByRole("button", { name: "Seed demo scenario" }).first()`: with three
   scenarios listed, `.first()` selected a different (alphabetically-first) card.

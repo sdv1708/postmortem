@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from ..logging import log_event
 from ..models import AnalysisRun, Incident
 from ..scenarios import (
     LoadedScenario,
@@ -19,6 +21,9 @@ from ..schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from .analysis import AnalysisService
 from .artifacts import ArtifactService
 from .incidents import IncidentService
+
+
+logger = logging.getLogger("postmortem.scenarios")
 
 
 class ScenarioSeedService:
@@ -51,6 +56,14 @@ class ScenarioSeedService:
         product rows are written).
         """
         scenario = self.get(scenario_id)
+        log_event(
+            logger,
+            logging.INFO,
+            "scenario_seed_started",
+            scenario_id=scenario.id,
+            evidence_count=len(scenario.evidence),
+            execute_inline=execute_inline,
+        )
 
         incident = IncidentService(self._session).create(
             IncidentCreate(
@@ -89,6 +102,16 @@ class ScenarioSeedService:
                 scenario.claim_support_overrides
             ),
         ).start_run(incident.id, AnalysisRunCreate(), execute_inline=execute_inline)
+        log_event(
+            logger,
+            logging.INFO,
+            "scenario_seed_completed",
+            scenario_id=scenario.id,
+            incident_id=incident.id,
+            run_id=run.id,
+            run_status=run.status,
+            artifact_count=len(source_name_to_id),
+        )
         return incident, run
 
 

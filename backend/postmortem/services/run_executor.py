@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Callable, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..logging import log_event
 from ..models import AnalysisRun, RunStageEvent
 from ..pipeline import RUN_STAGES
+
+
+logger = logging.getLogger("postmortem.pipeline")
 
 
 def _utcnow() -> datetime:
@@ -49,6 +54,16 @@ class StageRecorder:
 
     def begin(self, stage: str, attempt: int) -> RunStageEvent:
         self._sequence += 1
+        log_event(
+            logger,
+            logging.INFO,
+            "pipeline_stage_started",
+            run_id=self._run.id,
+            incident_id=self._run.incident_id,
+            stage=stage,
+            attempt=attempt,
+            sequence=self._sequence,
+        )
         event = RunStageEvent(
             run_id=self._run.id,
             sequence=self._sequence,
@@ -74,6 +89,18 @@ class StageRecorder:
         event.warning_codes = warning_codes or []
         event.usage = usage
         self._persist()
+        log_event(
+            logger,
+            logging.INFO,
+            "pipeline_stage_succeeded",
+            run_id=self._run.id,
+            incident_id=self._run.incident_id,
+            stage=event.stage,
+            attempt=event.attempt,
+            duration_ms=event.duration_ms,
+            warning_codes=",".join(event.warning_codes) if event.warning_codes else None,
+            usage_keys=",".join(sorted(usage.keys())) if usage else None,
+        )
 
     def fail(self, event: RunStageEvent, error: str) -> None:
         event.status = "failed"
@@ -81,6 +108,17 @@ class StageRecorder:
         event.duration_ms = _elapsed_ms(event.started_at, event.completed_at)
         event.error = error
         self._persist()
+        log_event(
+            logger,
+            logging.WARNING,
+            "pipeline_stage_failed",
+            run_id=self._run.id,
+            incident_id=self._run.incident_id,
+            stage=event.stage,
+            attempt=event.attempt,
+            duration_ms=event.duration_ms,
+            error=error,
+        )
 
     def _persist(self) -> None:
         self._session.flush()
@@ -170,6 +208,15 @@ class StagedRunExecutor:
                 usage=outcome.get("usage"),
             )
             return
+        log_event(
+            logger,
+            logging.ERROR,
+            "pipeline_stage_exhausted",
+            run_id=run.id,
+            incident_id=run.incident_id,
+            stage=stage,
+            error=last_error,
+        )
         raise StageFailedError(stage, last_error)
 
 

@@ -68,7 +68,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <footer className="border-t border-slate-200/70 bg-white/40">
             <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4 text-xs text-slate-500">
               <span>Postmortem Agent</span>
-              <span>Slice 5 · Evidence normalization &amp; timeline</span>
+              <span>Line-addressable evidence and cited postmortems</span>
             </div>
           </footer>
         </div>

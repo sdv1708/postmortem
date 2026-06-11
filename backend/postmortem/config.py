@@ -34,6 +34,7 @@ class Settings:
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str | None = None
     llm_model: str = "gpt-4o-mini"
+    log_level: str = "INFO"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -53,6 +54,7 @@ class Settings:
             llm_base_url=os.environ.get("POSTMORTEM_LLM_BASE_URL", "https://api.openai.com/v1"),
             llm_api_key=os.environ.get("POSTMORTEM_LLM_API_KEY") or None,
             llm_model=os.environ.get("POSTMORTEM_LLM_MODEL", "gpt-4o-mini"),
+            log_level=os.environ.get("POSTMORTEM_LOG_LEVEL", "INFO"),
         )
 
 
