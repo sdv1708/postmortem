@@ -1,127 +1,91 @@
-# Client Brief: Postmortem Agent
+# Client Brief: Multi-Agent RCA Recommendation
 
-## Engineering Philosophy
+## Recommendation
 
-This should be built like a real product, not a toy demo.
+We should consider incorporating a bounded multi-agent review flow into the postmortem agent. The goal is not to make the product feel more complex or to add an agent framework for its own sake. The goal is to improve the credibility of the generated root-cause analysis by separating evidence interpretation, hypothesis generation, challenge, and final synthesis into distinct review passes.
 
-- Vertical slices over horizontal layers — ship one end-to-end flow before broadening surface area
-- Testable interfaces — major components sit behind abstractions, not direct SDK calls
-- Evidence-backed AI outputs — generated claims must be traceable to source material
-- Simple architecture first — only add complexity when something simpler is shown to fail
-- Explicit tradeoff experiments — major decisions should be A/B-able
-- Observability from the start, not retrofitted
+From a product perspective, this is the right next step if we want the MVP to move from "AI-generated postmortem draft" toward "defensible incident reasoning assistant."
 
-These are directions, not laws. If a tradeoff cuts against one of them, surface it explicitly.
+## Why This Matters
 
----
+The current product already has a strong evidence-backed foundation: uploaded artifacts, structured analysis runs, citations, deterministic verification, scenario replay, and Markdown postmortem output. That is enough to make the product useful.
 
-## Product Summary
+The remaining gap is reasoning quality. A single model pass can produce a valid answer that is still too shallow. It may cite the right logs, but fail to clearly distinguish:
 
-An AI-powered incident postmortem agent that turns production incident evidence into structured, evidence-backed postmortems.
+- the triggering event
+- the amplifying conditions
+- the actual failure mechanism
+- what evidence rules out weaker explanations
+- what is still uncertain
+- what follow-up evidence would make the conclusion stronger
 
-The system ingests logs, stack traces, deployment notes, and human incident notes. The MVP focuses on uploaded or pasted evidence. External integrations (GitHub, Slack, Sentry, Datadog, Grafana, PagerDuty, Linear, Jira) are explicitly out of scope for the MVP and on the roadmap for later.
+A multi-agent design gives us a product-friendly way to improve this without losing the auditability that makes the system trustworthy.
 
-## Target Users
+## Suggested Multi-Agent Flow
 
-**Primary:** Startup backend engineers, technical founders/CTOs, small engineering teams without mature SRE processes.
+The recommended approach is a small, controlled set of agents or reasoning passes:
 
-**Secondary:** Platform engineers, DevOps/SRE engineers at smaller teams, open-source maintainers.
+1. **Evidence Mapper**
+   Reviews the uploaded evidence and extracts important facts, timestamps, symptoms, metrics, deployment references, and notable gaps.
 
-## Core Problem
+2. **Hypothesis Builder**
+   Produces candidate root-cause hypotheses using only the evidence available in the run. Each hypothesis must cite supporting and contradicting evidence.
 
-Postmortems are hard because incident evidence is scattered, noisy, incomplete, and time-sensitive. Teams write postmortems too late, rely on memory, miss accurate timelines, and produce vague remediation items.
+3. **Skeptic / Falsifier**
+   Challenges each hypothesis by asking: what else could explain this, what evidence is weak, what is missing, and what conclusion is being overstated?
 
-## MVP Goal
+4. **Citation Auditor**
+   Verifies that cited artifact references are valid, line ranges exist, snippets match the source material, and unsupported claims are marked as assumptions.
 
-Given incident metadata and evidence, generate:
+5. **Synthesis Writer**
+   Produces the final postmortem narrative from the verified hypotheses, warnings, uncertainties, and action items.
 
-1. Chronological incident timeline
-2. Impact analysis
-3. Ranked root-cause hypotheses (multiple when evidence is ambiguous)
-4. Supporting and contradicting evidence per hypothesis
-5. Concrete remediation/action items
-6. Structured Markdown postmortem
+This should be implemented as a deterministic orchestration pattern, not as a free-form agent chat. Each pass should have a narrow job, structured inputs, structured outputs, and recorded metadata.
 
-## Core Differentiator
+## Product Value
 
-Every important AI-generated claim cites original evidence with: artifact ID, source name, line range, snippet, and confidence score. Unsupported claims are explicitly marked as assumptions, not silently dropped.
+This addition would make the MVP easier to defend in front of technical users because it creates a visible reasoning process instead of a single opaque model answer.
 
-This is the thing that makes the product not-a-demo. If the citations don't actually work — meaning a reader can click a claim and trace it back to a real log line — the differentiator collapses.
+Expected benefits:
 
----
+- Better root-cause quality through explicit challenge and synthesis
+- Clearer uncertainty handling when evidence is incomplete
+- Stronger differentiation from generic AI writing tools
+- More credible demos because the system can explain why it believes one cause over another
+- Better evaluation hooks because each reasoning pass can be tested independently
+- Safer postmortems because unsupported claims can be flagged before the final draft
 
-## Stack Preferences
+## Important Constraint
 
-These are starting points, not commitments. Open to challenge.
+The multi-agent approach must preserve the product's central promise: every important claim must remain traceable to source evidence.
 
-- **Frontend:** Next.js + TypeScript + Tailwind + shadcn/ui
-- **Backend:** FastAPI + Pydantic + SQLAlchemy
-- **Database:** PostgreSQL + pgvector
-- **Queue:** Redis + Celery or Dramatiq
-- **Storage:** local filesystem first, MinIO/S3 later
-- **AI orchestration:** linear pipeline first, LangGraph if/when justified
-- **Evaluation:** benchmark incident dataset + rule checks + LLM-as-judge
+The system should not allow agents to introduce uncited facts during synthesis. The final writer should compose from verified intermediate outputs, not invent new incident claims. If a claim cannot be supported, the product should label it as an assumption or an open question.
 
-## Architectural Constraint: Swappability
+## Recommended MVP Version
 
-Major components should be swappable through interfaces — the project should not hard-code itself around one model, one orchestration framework, or one retrieval method. The components I expect to need this for:
+For the first version, I recommend a minimal three-pass flow:
 
-- LLM provider
-- Embedding model
-- Chunking strategy
-- Retrieval strategy
-- Agent orchestration
-- Evidence verifier
-- Vector store
-- Postmortem template
-- Evaluation suite
+1. Hypothesis Builder
+2. Skeptic / Falsifier
+3. Synthesis Writer
 
-The exact interface shapes are not yet decided.
+The existing deterministic citation verifier should remain outside the model and continue to act as the hard quality floor. This gives us the main product benefit without overbuilding orchestration too early.
 
----
+## Success Criteria
 
-## MVP Scope
+This feature should be considered successful if a generated postmortem can answer:
 
-**In scope:**
-- Incident CRUD
-- Evidence upload/paste
-- Evidence normalization and chunking
-- Analysis run creation
-- Timeline extraction
-- RCA hypothesis generation
-- Evidence verification
-- Action item generation
-- Markdown postmortem generation
-- Basic experiment tracking
+- What most likely happened?
+- What evidence supports that conclusion?
+- What evidence weakens or complicates it?
+- What alternatives were considered?
+- What remains uncertain?
+- What follow-up evidence would make the conclusion stronger?
 
-**Out of scope for MVP:**
-- Production remediation / autonomous infra changes
-- Datadog / PagerDuty replacement
-- Full observability platform
-- Enterprise RBAC
-- External integrations (those are roadmap items)
+If the system can answer those questions clearly, the postmortem becomes much easier for an engineer, founder, or reviewer to trust.
 
----
+## Product Manager Position
 
-## Open Questions
+My recommendation is to pursue this as the next reasoning-quality improvement, but keep it bounded. We should not market this as "multi-agent AI" for novelty. We should use it as an internal architecture pattern that makes the product more reliable, more reviewable, and more defensible.
 
-Things I have not yet decided and want to think through:
-
-- How citation confidence is actually computed (LLM self-rating vs retrieval similarity vs hybrid verifier)
-- Whether the MVP should ship with a UI or stay CLI-first
-- How to generate the synthetic incident dataset and what failure modes it should cover
-- Where the line is between "still MVP" and "Milestone 2"
-- What the minimum eval signal needs to look like before any of this is trustworthy
-- Async vs sync analysis runs in the first version
-- How to enforce architectural invariants (linting, tests, code review)
-
----
-
-## What Success Looks Like
-
-When this is shown to a technical founder, the things that should land:
-
-1. The citations actually work end-to-end on a real-feeling incident
-2. The system admits uncertainty rather than fabricating confident answers
-3. The architecture is genuinely swappable — not just claimed to be
-4. The synthetic incidents look like real production failures, not toy examples
+The customer-facing promise should stay simple: the product generates evidence-backed postmortems and shows its work.
