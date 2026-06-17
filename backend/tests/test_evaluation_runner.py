@@ -29,6 +29,7 @@ def test_run_and_record_passes_the_deterministic_floor(fresh_session, scenario_i
         "timeline_ordering",
         "hypothesis_multiplicity",
         "insufficient_evidence_refusal",
+        "advisory_ranking_coverage",
     }
     assert all(c["passed"] for c in row.checks)
     assert row.citation_total > 0

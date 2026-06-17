@@ -182,7 +182,7 @@ def _hypotheses_section(
         lines.append("")
         return
     for hypothesis in authoritative:
-        _hypothesis_body(lines, hypothesis, mode, heading_prefix=f"{hypothesis.rank}. ")
+        _hypothesis_body(lines, hypothesis, mode, heading_prefix=f"{_rank_label(hypothesis)}. ")
 
 
 def _review_findings_section(lines: list[str], findings: list[HypothesisRead]) -> None:
@@ -194,7 +194,9 @@ def _review_findings_section(lines: list[str], findings: list[HypothesisRead]) -
     )
     lines.append("")
     for hypothesis in findings:
-        _hypothesis_body(lines, hypothesis, ExportMode.AUDIT, heading_prefix=f"{hypothesis.rank}. ")
+        _hypothesis_body(
+            lines, hypothesis, ExportMode.AUDIT, heading_prefix=f"{_rank_label(hypothesis)}. "
+        )
 
 
 def _hypothesis_body(
@@ -202,7 +204,14 @@ def _hypothesis_body(
 ) -> None:
     annotation = _support_annotation(hypothesis.support_status) if mode is ExportMode.AUDIT else ""
     label = " _(assumption)_" if hypothesis.assumption and mode is ExportMode.AUDIT else ""
-    lines.append(f"### {heading_prefix}{hypothesis.title}{annotation}{label}")
+    # A critically challenged advisory leader is labeled wherever it is rendered so
+    # its rank is never read as confidence (ADR 0037, PRD user stories 21-22).
+    leading = (
+        " _(Leading but critically challenged)_"
+        if hypothesis.leading_but_critically_challenged
+        else ""
+    )
+    lines.append(f"### {heading_prefix}{hypothesis.title}{annotation}{label}{leading}")
     lines.append("")
     lines.append(hypothesis.summary)
     lines.append("")
@@ -232,6 +241,16 @@ def _remediation_section(lines: list[str], authoritative: list[HypothesisRead]) 
     else:
         lines.append("_No remediation items were recorded._")
     lines.append("")
+
+
+def _rank_label(hypothesis: HypothesisRead) -> str:
+    """Display number for a hypothesis heading (ADR 0037).
+
+    Uses the post-challenge advisory rank when present so the export presents
+    hypotheses in plausibility order; falls back to the builder ``rank`` for an
+    older run that predates the advisory ranking substep.
+    """
+    return str(hypothesis.advisory_rank if hypothesis.advisory_rank is not None else hypothesis.rank)
 
 
 def _support_annotation(support_status: str) -> str:

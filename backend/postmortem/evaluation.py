@@ -10,7 +10,7 @@ from .llm import LLMClient
 
 # Versioned identity for the deterministic check floor and the judge, recorded in
 # Evaluation Run metadata (ADR 0025) so eval results stay comparable across runs.
-EVAL_CHECK_SUITE_VERSION: Final[str] = "eval-checks-1"
+EVAL_CHECK_SUITE_VERSION: Final[str] = "eval-checks-2"
 LLM_JUDGE_VERSION: Final[str] = "llm-judge-1"
 
 
@@ -32,6 +32,9 @@ class HypothesisView:
     rank: int
     support_status: str
     citation_count: int
+    # Post-challenge Advisory Hypothesis Ranking position (ADR 0037); None only
+    # before the ranking substep ran or on an older run.
+    advisory_rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -171,12 +174,39 @@ def check_insufficient_evidence_refusal(snapshot: RunOutputSnapshot) -> CheckRes
     return CheckResult(name="insufficient_evidence_refusal", passed=passed, detail=detail)
 
 
+def check_advisory_ranking_coverage(snapshot: RunOutputSnapshot) -> CheckResult:
+    """Every hypothesis must hold a distinct advisory rank forming 1..N (ADR 0037).
+
+    The post-challenge Advisory Hypothesis Ranking must place each initial and
+    proposed hypothesis exactly once (PRD user stories 17 / 60). A refusal scenario
+    has no hypotheses and so nothing to rank, which passes trivially.
+    """
+    observed = len(snapshot.hypotheses)
+    if observed == 0:
+        return CheckResult(
+            name="advisory_ranking_coverage",
+            passed=True,
+            detail="no hypotheses to rank",
+        )
+    ranks = sorted(
+        h.advisory_rank for h in snapshot.hypotheses if h.advisory_rank is not None
+    )
+    passed = ranks == list(range(1, observed + 1))
+    detail = (
+        f"{observed} hypotheses ranked 1..{observed}"
+        if passed
+        else f"advisory ranks {ranks} do not cover 1..{observed} exactly once"
+    )
+    return CheckResult(name="advisory_ranking_coverage", passed=passed, detail=detail)
+
+
 DETERMINISTIC_CHECKS = (
     check_citation_integrity,
     check_required_outputs,
     check_timeline_ordering,
     check_hypothesis_multiplicity,
     check_insufficient_evidence_refusal,
+    check_advisory_ranking_coverage,
 )
 
 

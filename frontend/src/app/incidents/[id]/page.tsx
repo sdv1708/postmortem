@@ -21,6 +21,7 @@ import {
   type ImpactClaim,
   type Incident,
   type Postmortem,
+  type RankingRationale,
   type RunStage,
   type RunStageEvent,
   type RunStatus,
@@ -1257,12 +1258,27 @@ function HypothesisCard({
     <div className="rounded-xl border border-slate-200 bg-white">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
         <div className="flex min-w-0 items-start gap-2.5">
-          <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold tabular-nums text-slate-600">
-            {hypothesis.rank}
+          <span
+            className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold tabular-nums text-slate-600"
+            title={
+              hypothesis.advisory_rank !== null
+                ? `Advisory rank ${hypothesis.advisory_rank} · generated #${hypothesis.rank}`
+                : `Generated #${hypothesis.rank}`
+            }
+          >
+            {hypothesis.advisory_rank ?? hypothesis.rank}
           </span>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h4 className="text-sm font-semibold text-slate-900">{hypothesis.title}</h4>
+              {hypothesis.leading_but_critically_challenged && (
+                <span
+                  className="badge bg-rose-50 text-rose-700 ring-rose-200"
+                  title="Ranked first by plausibility, but an unresolved critical challenge means it cannot be presented as the failure mechanism without an explicit human override."
+                >
+                  Leading but critically challenged
+                </span>
+              )}
               {hypothesis.origin === "proposed" && (
                 <span
                   className="badge bg-violet-50 text-violet-700 ring-violet-200"
@@ -1325,6 +1341,14 @@ function HypothesisCard({
 
         {hypothesis.challenge && (
           <ChallengePanel challenge={hypothesis.challenge} onFocusEvidence={onFocusEvidence} />
+        )}
+
+        {hypothesis.ranking_rationale && (
+          <RankingRationalePanel
+            rationale={hypothesis.ranking_rationale}
+            advisoryRank={hypothesis.advisory_rank}
+            builderRank={hypothesis.rank}
+          />
         )}
 
         {hypothesis.action_items.length > 0 && (
@@ -1521,6 +1545,60 @@ function BulletGroup({ label, items }: { label: string; items: string[] }) {
           <li key={index}>{item}</li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+// The post-challenge Advisory Hypothesis Ranking rationale (ADR 0037). Shows WHY
+// this hypothesis ranks where it does, across the five assessment dimensions, so
+// the product visibly shows its work and ranking is never mistaken for a Root
+// Cause Conclusion (PRD user stories 19, 88). Plausibility is ordinal and
+// explained, never a probability (PRD user story 18).
+const RANKING_DIMENSION_LABELS: Array<{ key: keyof RankingRationale; label: string }> = [
+  { key: "support_strength", label: "Support strength" },
+  { key: "counterevidence_severity", label: "Counterevidence severity" },
+  { key: "explanatory_coverage", label: "Explanatory coverage" },
+  { key: "evidence_gaps", label: "Evidence gaps" },
+  { key: "assumption_dependence", label: "Assumption dependence" },
+];
+
+function RankingRationalePanel({
+  rationale,
+  advisoryRank,
+  builderRank,
+}: {
+  rationale: RankingRationale;
+  advisoryRank: number | null;
+  builderRank: number;
+}) {
+  const reordered = advisoryRank !== null && advisoryRank !== builderRank;
+  return (
+    <div className="space-y-2 rounded-lg border border-indigo-100 bg-indigo-50/40 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="label">Why this rank</p>
+        {advisoryRank !== null && (
+          <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
+            advisory rank {advisoryRank}
+          </span>
+        )}
+        {reordered && (
+          <span
+            className="text-xs text-slate-500"
+            title="Falsification moved this candidate from its original generation order."
+          >
+            generated #{builderRank}
+          </span>
+        )}
+      </div>
+      <p className="text-sm leading-relaxed text-slate-700">{rationale.summary}</p>
+      <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-2">
+        {RANKING_DIMENSION_LABELS.map(({ key, label }) => (
+          <div key={key} className="text-xs">
+            <dt className="font-medium text-slate-500">{label}</dt>
+            <dd className="text-slate-700">{rationale[key]}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

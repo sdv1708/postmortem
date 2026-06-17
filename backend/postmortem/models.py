@@ -277,8 +277,20 @@ class Hypothesis(Base):
     run_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # 1-based rank; lower is the more strongly supported hypothesis.
+    # 1-based generation order assigned by the builder/expansion substeps: initial
+    # hypotheses in builder order, then proposed alternatives. Preserved as the
+    # audit record of how the analysis first ordered candidates, distinct from the
+    # post-challenge Advisory Hypothesis Ranking below (ADR 0037, PRD #26 story 20).
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 1-based ordinal position in the post-challenge Advisory Hypothesis Ranking
+    # (ADR 0037): lower is more plausible. Null until the ranking substep runs (it
+    # is the last substep of stage 3). The ranking is advisory only — a review aid,
+    # never a Root Cause Conclusion (PRD #26 stories 17-22). ``ranking_rationale``
+    # holds the per-dimension explanation (support strength, counterevidence
+    # severity, explanatory coverage, evidence gaps, assumption dependence) so the
+    # ordering is explainable; plausibility is ordinal, never a probability.
+    advisory_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ranking_rationale: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Provenance within the Causal Analysis Stage (ADR 0036, PRD #26 / #30):
     # 'initial' for a builder-generated hypothesis, 'proposed' for a missed
     # alternative the falsifier introduced in the one bounded expansion round. A

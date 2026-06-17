@@ -39,6 +39,11 @@ from ..models import (
     TimelineEvent,
     RunArtifact,
 )
+from ..ranking import (
+    AdvisoryRanker,
+    DeterministicAdvisoryRanker,
+    RankingCandidate,
+)
 from ..rca import MAX_INITIAL_HYPOTHESES, RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
 from ..retrieval import DeterministicChunkArtifactRetrievalStrategy, RetrievalStrategy
 from ..timestamps import parse_timestamp
@@ -95,6 +100,7 @@ class PipelineStageRunner:
         retrieval_strategy: RetrievalStrategy | None = None,
         incident_fact_extractor: IncidentFactExtractor | None = None,
         falsifier: Falsifier | None = None,
+        advisory_ranker: AdvisoryRanker | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
@@ -112,6 +118,12 @@ class PipelineStageRunner:
         # succeed. The default uses the configured LLM; with the offline client
         # the builder produces no hypotheses, so the falsifier is never invoked.
         self._falsifier = falsifier or LLMFalsifier(self._llm)
+        # The advisory ranker is the fourth Reasoning-Role boundary (ADR 0037): the
+        # last substep of stage 3 orders every challenged hypothesis into one
+        # ordinal Advisory Hypothesis Ranking. The MVP default is deterministic and
+        # makes no model call, so a replayed/offline run ranks without a provider;
+        # an LLM-backed ranker can be injected behind the same interface.
+        self._ranker = advisory_ranker or DeterministicAdvisoryRanker()
         # The citation verifier is a swappable boundary (ADR 0014 / 0009); the
         # MVP default is the deterministic integrity pass.
         self._verifier = verifier or DeterministicCitationIntegrityVerifier()
@@ -430,6 +442,11 @@ class PipelineStageRunner:
         # builder's retrieval subset.
         self._run_falsification_round(run, hypotheses, timeline, warning_codes)
 
+        # Final substep of stage 3 (ADR 0037): incrementally verify the candidates'
+        # citations, judge provisional semantic support, then produce one ordinal
+        # Advisory Hypothesis Ranking across all initial and proposed hypotheses.
+        self._rank_hypotheses(run, warning_codes)
+
         outcome: dict = {}
         if warning_codes:
             outcome["warning_codes"] = _dedupe(warning_codes)
@@ -646,6 +663,149 @@ class PipelineStageRunner:
             hypothesis.action_items.append(item)
         self._session.add(hypothesis)
         return hypothesis
+
+    def _rank_hypotheses(self, run: AnalysisRun, warning_codes: list[str]) -> None:
+        """Produce one ordinal Advisory Hypothesis Ranking for the run (ADR 0037).
+
+        The final substep of stage 3 (PRD #26 user stories 17-25). It runs after
+        every initial and proposed hypothesis has been persisted and challenged,
+        in three deterministic steps so ranking never rests on broken or
+        unsupported evidence:
+
+        1. Incremental Citation Check — verify the stage-3 citations (hypotheses,
+           their remediation, and counterclaims) in place so a broken reference
+           cannot be counted as positive support before the visible Final Citation
+           Audit in stage 4 (CONTEXT "Incremental Citation Check vs Final Citation
+           Audit").
+        2. Support Judgment — judge each hypothesis's semantic support from its
+           *verified* supporting citations only, so ranking accounts for whether a
+           valid citation actually backs the claim (PRD user story 23). This single
+           judgment is canonical for the hypothesis: stage 6's complete audit
+           reuses it (surfacing the Warning Code) rather than re-invoking the
+           verifier, so the final audit can never contradict the ranking it
+           informed (CONTEXT "Provisional Support Judgment vs Final Unsupported-
+           Claim Audit"). Warnings are emitted at that audit, not here.
+        3. Advisory ranking — hand the ranker post-challenge facts (a Role Handoff,
+           not hidden reasoning) and order every candidate exactly once. A Runtime
+           Reasoning Gate fails the stage if the ranking does not cover every
+           candidate, so an incomplete ranking can never be presented (PRD user
+           story 60). The original builder order stays on ``rank`` for audit
+           (PRD user story 20).
+
+        Idempotent across the single stage retry (ADR 0029): a retry clears and
+        regenerates the hypotheses, and this overwrites ``advisory_rank`` /
+        ``ranking_rationale`` in place.
+        """
+        hypotheses = list(
+            self._session.scalars(
+                select(Hypothesis).where(Hypothesis.run_id == run.id).order_by(Hypothesis.rank.asc())
+            )
+        )
+        if not hypotheses:
+            return
+
+        self._incremental_citation_check(run, hypotheses)
+
+        # Provisional semantic support, judged off verified citations only. Warnings
+        # belong to the stage-6 final audit, so discard them here.
+        provisional_warnings: list[str] = []
+        for hypothesis in hypotheses:
+            self._classify_claim(
+                hypothesis, f"{hypothesis.title}: {hypothesis.summary}", provisional_warnings
+            )
+
+        candidates = [self._ranking_candidate(hypothesis) for hypothesis in hypotheses]
+        output = self._ranker.rank(candidates)
+
+        # Runtime Reasoning Gate (PRD user story 60, issue #31 AC): the advisory
+        # ranking must place every candidate exactly once. A missing, duplicated, or
+        # unknown candidate fails the stage after its single retry rather than
+        # shipping a partial ranking.
+        expected = {hypothesis.id for hypothesis in hypotheses}
+        ranked_ids = [entry.hypothesis_id for entry in output.rankings]
+        seen = set(ranked_ids)
+        if len(ranked_ids) != len(seen) or seen != expected:
+            raise ValueError(
+                "advisory ranking must cover every hypothesis exactly once: "
+                f"missing {sorted(expected - seen)}, unexpected {sorted(seen - expected)}, "
+                f"duplicates {sorted({i for i in ranked_ids if ranked_ids.count(i) > 1})}"
+            )
+
+        by_id = {hypothesis.id: hypothesis for hypothesis in hypotheses}
+        for position, entry in enumerate(output.rankings, start=1):
+            hypothesis = by_id[entry.hypothesis_id]
+            hypothesis.advisory_rank = position
+            hypothesis.ranking_rationale = entry.rationale.model_dump()
+        self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_advisory_ranking_completed",
+            run_id=run.id,
+            hypothesis_count=len(hypotheses),
+            ranker_version=self._ranker.version,
+        )
+
+    def _incremental_citation_check(
+        self, run: AnalysisRun, hypotheses: list[Hypothesis]
+    ) -> None:
+        """Verify the stage-3 citations in place before ranking (ADR 0037).
+
+        Stamps ``verifier_status`` on each hypothesis's supporting/contradicting
+        EvidenceRefs, its remediation citations, and its challenge's Counterclaim
+        citations, using the same deterministic integrity verifier the Final
+        Citation Audit uses (ADR 0014). Idempotent and additive: stage 4 rechecks
+        the full run, so an incremental status here is never the last word.
+        """
+        bodies = {artifact.id: artifact.body for artifact in self._run_artifacts(run)}
+        for hypothesis in hypotheses:
+            refs = list(hypothesis.evidence_refs)
+            for item in hypothesis.action_items:
+                refs.extend(item.evidence_refs)
+            if hypothesis.challenge is not None:
+                for counterclaim in hypothesis.challenge.counterclaims:
+                    refs.extend(counterclaim.evidence_refs)
+            for ref in refs:
+                ref.verifier_status = self._verifier.verify(
+                    CitationTarget(
+                        artifact_id=ref.artifact_id,
+                        line_start=ref.line_start,
+                        line_end=ref.line_end,
+                        snippet=ref.snippet,
+                    ),
+                    bodies,
+                ).value
+        self._session.flush()
+
+    def _ranking_candidate(self, hypothesis: Hypothesis) -> RankingCandidate:
+        """Distill a persisted Hypothesis into the ranker's Role Handoff (ADR 0037).
+
+        Only *verified* supporting citations count toward ``supported_citation_count``,
+        and an UNSUPPORTED hypothesis contributes zero, so broken or semantically
+        unsupported evidence can never be counted as positive ranking support
+        (PRD user story 23, issue #31 AC).
+        """
+        verified_supporting = sum(
+            1
+            for ref in hypothesis.evidence_refs
+            if ref.role != "contradicting"
+            and ref.verifier_status == CitationIntegrityStatus.VERIFIED.value
+        )
+        if hypothesis.support_status == ClaimSupportStatus.UNSUPPORTED.value:
+            verified_supporting = 0
+        challenge = hypothesis.challenge
+        return RankingCandidate(
+            hypothesis_id=hypothesis.id,
+            title=hypothesis.title,
+            origin=hypothesis.origin or "initial",
+            builder_rank=hypothesis.rank,
+            support_status=hypothesis.support_status,
+            supported_citation_count=verified_supporting,
+            challenge_severity=challenge.severity if challenge is not None else None,
+            counterclaim_count=len(challenge.counterclaims) if challenge is not None else 0,
+            evidence_gap_count=len(challenge.evidence_gaps) if challenge is not None else 0,
+            assumption=hypothesis.assumption,
+        )
 
     def _resolve_refs(
         self,
@@ -884,15 +1044,21 @@ class PipelineStageRunner:
         self._session.flush()
 
     def _flag_unsupported_claims(self, run: AnalysisRun) -> dict | None:
-        """Classify each Major Claim's evidence support and flag the weak ones.
+        """Surface every Major Claim's support status and flag the weak ones.
 
-        The semantic ClaimSupportVerifier (ADR 0014) judges whether the cited
-        evidence supports each hypothesis statement and impact claim, recording
-        SUPPORTED / PARTIAL / UNSUPPORTED plus a rationale. A claim with no
-        supporting citation is an assumption and recorded UNSUPPORTED without
-        calling the model. This stage only annotates existing claims (ADR 0026)
-        and is idempotent across the single retry: it overwrites the support
-        fields in place and adds no rows.
+        The complete unsupported-claim audit at the visible trust checkpoint
+        (ADR 0014 / 0037). For Hypotheses it reuses the single semantic support
+        judgment already made during the stage-3 ranking substep rather than
+        re-invoking the verifier: that judgment is canonical, so the final audit
+        can never contradict the Advisory Hypothesis Ranking it informed (issue
+        #31 — semantically unsupported evidence must not be counted as positive
+        ranking support, and a hypothesis must never read ``unsupported`` while
+        carrying a rank computed as ``supported``). Re-judging with the LLM-backed
+        verifier could diverge run-to-run and reintroduce exactly that
+        inconsistency. Run-level Impact Claims are not ranked and are judged here
+        for the first time, so they are classified now. This stage only annotates
+        existing claims (ADR 0026) and is idempotent across the single retry: it
+        re-reads the persisted statuses and adds no rows.
 
         Unsupported and partially-supported claims are flagged with Warning Codes
         so they surface as Review Findings, but they never fail the run or trigger
@@ -913,12 +1079,19 @@ class PipelineStageRunner:
         warning_codes: list[str] = []
         classified = 0
         for hypothesis in hypotheses:
-            self._classify_claim(
-                hypothesis, f"{hypothesis.title}: {hypothesis.summary}", warning_codes
-            )
+            if hypothesis.support_status == "unevaluated":
+                # Defensive: ranking always judges support, so a hypothesis should
+                # already carry a status here. Classify only if one slipped through
+                # unjudged so the audit is still complete.
+                self._classify_claim(
+                    hypothesis, f"{hypothesis.title}: {hypothesis.summary}", warning_codes
+                )
+            else:
+                self._warn_for_support(hypothesis.support_status, warning_codes)
             classified += 1
         # Run-level Impact Claims are Major Claims too, classified once per run
-        # rather than per hypothesis (ADR 0033).
+        # rather than per hypothesis (ADR 0033). They are not ranked, so the audit
+        # is where they are judged.
         for claim in impact_claims:
             self._classify_claim(claim, claim.description, warning_codes)
             classified += 1
@@ -934,6 +1107,18 @@ class PipelineStageRunner:
             warning_codes=",".join(warning_codes) if warning_codes else None,
         )
         return {"warning_codes": warning_codes} if warning_codes else None
+
+    def _warn_for_support(self, support_status: str, warning_codes: list[str]) -> None:
+        """Emit the Warning Code for an already-judged support status (ADR 0037).
+
+        The final audit surfaces a claim's weakness from its persisted, canonical
+        support judgment without re-running the verifier, so the warning the audit
+        reports always matches the status the ranking used.
+        """
+        if support_status == ClaimSupportStatus.UNSUPPORTED.value:
+            warning_codes.append("unsupported_claim")
+        elif support_status == ClaimSupportStatus.PARTIAL.value:
+            warning_codes.append("partial_claim_support")
 
     def _classify_claim(self, claim, claim_text: str, warning_codes: list[str]) -> None:
         """Stamp one Major Claim's support status + rationale (ADR 0014).

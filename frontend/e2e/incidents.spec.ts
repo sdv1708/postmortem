@@ -165,6 +165,13 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
     page.getByRole("button", { name: /deploy-notes\.md:4/ }).first(),
   ).toBeVisible();
 
+  // The post-challenge Advisory Hypothesis Ranking shows its work: each
+  // hypothesis carries a "Why this rank" rationale and an advisory-rank badge, so
+  // a reviewer can see why one candidate ranks above another (ADR 0037, PRD #26
+  // user stories 17-19, 88). Ranking is a review aid, never a Root Cause Conclusion.
+  await expect(page.getByText("Why this rank").first()).toBeVisible();
+  await expect(page.getByText("advisory rank 1").first()).toBeVisible();
+
   // The structured postmortem and its clean/audit exports rendered.
   await expect(page.getByRole("button", { name: "Export clean" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Export audit" })).toBeVisible();

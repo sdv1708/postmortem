@@ -198,10 +198,30 @@ export interface HypothesisChallenge {
   falsification_tests: string[];
 }
 
+// Per-dimension explanation of a hypothesis's advisory rank (ADR 0037). The five
+// assessment dimensions plus a one-line summary; ordering is explained through
+// these, never as a probability.
+export interface RankingRationale {
+  support_strength: string;
+  counterevidence_severity: string;
+  explanatory_coverage: string;
+  evidence_gaps: string;
+  assumption_dependence: string;
+  summary: string;
+}
+
 export interface Hypothesis {
   id: string;
   run_id: string;
+  // Original builder/generation order, retained for audit (ADR 0037).
   rank: number;
+  // Post-challenge Advisory Hypothesis Ranking position; drives display order.
+  // Null only before the ranking substep runs (or on an older run).
+  advisory_rank: number | null;
+  ranking_rationale: RankingRationale | null;
+  // The advisory leader carries this when its challenge is critical, so the rank
+  // is never mistaken for confidence (PRD #26 user stories 21-22).
+  leading_but_critically_challenged: boolean;
   // Provenance within the Causal Analysis Stage (ADR 0036): "initial" for a
   // builder hypothesis, "proposed" for a falsifier-introduced missed alternative
   // from the bounded expansion round. The Review Surface distinguishes the two
