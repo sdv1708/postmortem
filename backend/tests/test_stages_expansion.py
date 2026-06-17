@@ -61,6 +61,23 @@ def _one_hypothesis(artifact_id: str) -> str:
     )
 
 
+def _n_hypotheses(artifact_id: str, count: int) -> str:
+    return json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "title": f"Hypothesis {i}",
+                    "summary": f"Candidate cause {i}.",
+                    "supporting_evidence": [
+                        {"artifact_id": artifact_id, "line_start": 1, "line_end": 1}
+                    ],
+                }
+                for i in range(1, count + 1)
+            ]
+        }
+    )
+
+
 def _hypotheses(session, run_id):
     return list(
         session.query(Hypothesis).filter(Hypothesis.run_id == run_id).order_by(Hypothesis.rank)
@@ -186,6 +203,61 @@ def test_second_expansion_round_is_rejected(fresh_session):
 
     assert run.status == "failed"
     assert "second expansion round" in (run.error or "")
+
+
+def test_more_than_five_initial_hypotheses_fails_the_stage(fresh_session):
+    incident = _incident(fresh_session)
+    artifact = _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    # Six builder hypotheses exceed the bounded maximum of five (Runtime Reasoning
+    # Gate, ADR 0036 / PRD user story 65). Seed twice so the retry reproduces the
+    # same deterministic gate failure on run.error.
+    run = AnalysisService(
+        fresh_session,
+        llm_client=FakeLLMClient([_n_hypotheses(artifact.id, 6)] * 2),
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
+    ).start_run(incident.id, AnalysisRunCreate())
+    fresh_session.commit()
+
+    assert run.status == "failed"
+    assert "exceeding the bounded maximum" in (run.error or "")
+    # The gate fires before persistence: no hypotheses leak from a failed run.
+    assert _hypotheses(fresh_session, run.id) == []
+
+
+def test_five_initial_plus_two_proposed_is_within_budget(fresh_session):
+    incident = _incident(fresh_session)
+    artifact = _add(fresh_session, incident.id)
+    fresh_session.commit()
+
+    # The falsifier proposes two alternatives total (one while challenging the
+    # first initial hypothesis, one while challenging the second). Five initial +
+    # two proposed = the seven-candidate budget ceiling, which must succeed.
+    proposed_for = {"Hypothesis 1": "Alt A", "Hypothesis 2": "Alt B"}
+
+    def challenge(hypothesis):
+        alt = proposed_for.get(hypothesis.title)
+        return HypothesisChallengeOutput(
+            challenged_claim=f"Challenge of {hypothesis.title}",
+            severity="material",
+            proposed_hypotheses=[_proposal(artifact.id, alt)] if alt else [],
+        )
+
+    run = AnalysisService(
+        fresh_session,
+        llm_client=FakeLLMClient([_n_hypotheses(artifact.id, 5)]),
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(challenge),
+    ).start_run(incident.id, AnalysisRunCreate())
+    fresh_session.commit()
+
+    assert run.status == "succeeded"
+    hyps = _hypotheses(fresh_session, run.id)
+    assert [h.origin for h in hyps] == ["initial"] * 5 + ["proposed"] * 2
 
 
 def test_zero_proposals_leaves_only_initial_hypotheses(fresh_session):

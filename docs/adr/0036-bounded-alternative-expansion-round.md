@@ -16,9 +16,14 @@ The round never recurses (PRD user story 16): a proposed hypothesis's own challe
 
 Hypotheses gain an `origin` column (`initial` | `proposed`, default `initial`; existing databases upgrade through the established idempotent compatibility path). `origin` only records *how* a hypothesis entered the analysis. A proposed alternative receives the same citation integrity audit (stage 4), semantic support judgment (stage 6), and human review controls as an initial hypothesis, and the Review Surface labels it "proposed alternative" so a reviewer can see the falsifier's contribution without treating it — or any hypothesis — as a Root Cause Conclusion (PRD user stories 14-15). Ranking still uses `rank`; the expansion does not reorder the builder's hypotheses.
 
-## The expansion is bounded by a Runtime Reasoning Gate
+## The Hypothesis Budget is bounded by Runtime Reasoning Gates
 
-The cap is two proposed alternatives total across the round (`MAX_PROPOSED_HYPOTHESES`). Exceeding it, or a second-round challenge that tries to propose again, is a deterministic gate failure: the stage raises rather than silently truncating, so the bound stays auditable. With the targeted-repair machinery not yet built, the bounded repair/failure contract available at this point is the existing single stage retry (ADR 0029): a gate failure fails stage 3 after one retry, preserves the builder's already-persisted output for inspection, and produces no Provisional Postmortem (ADR 0034/0035). The same bound is enforced ahead of time in scenario fixtures: the loader rejects a replay that declares more than two proposed alternatives or a proposed alternative that recursively proposes again, so a fixture cannot ship an out-of-contract demo.
+Two deterministic gates keep the candidate set bounded (PRD user story 65, the Hypothesis Budget):
+
+- **Initial hypotheses** are capped at five (`MAX_INITIAL_HYPOTHESES`). The gate runs immediately after the builder's output validates and *before* any hypothesis is persisted or challenged, so an over-budget candidate set never reaches the falsifier or the database.
+- **Proposed alternatives** are capped at two total across the round (`MAX_PROPOSED_HYPOTHESES`). Exceeding it, or a second-round challenge that tries to propose again, fails the gate.
+
+Five initial plus two proposed is the seven-candidate ceiling for the final advisory list. Both gates raise rather than silently truncating, so the bound stays auditable. With the targeted-repair machinery not yet built, the bounded repair/failure contract available at this point is the existing single stage retry (ADR 0029): a gate failure fails stage 3 after one retry, preserves the builder's already-persisted output for inspection, and produces no Provisional Postmortem (ADR 0034/0035). The proposed-alternative bound is also enforced ahead of time in scenario fixtures: the loader rejects a replay that declares more than two proposed alternatives or a proposed alternative that recursively proposes again, so a fixture cannot ship an out-of-contract demo.
 
 ## The canonical demo exercises the round deterministically
 

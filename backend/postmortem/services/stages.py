@@ -39,7 +39,7 @@ from ..models import (
     TimelineEvent,
     RunArtifact,
 )
-from ..rca import RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
+from ..rca import MAX_INITIAL_HYPOTHESES, RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
 from ..retrieval import DeterministicChunkArtifactRetrievalStrategy, RetrievalStrategy
 from ..timestamps import parse_timestamp
 from ..verification import (
@@ -370,6 +370,18 @@ class PipelineStageRunner:
             # Schema-invalid (or non-JSON) model output fails the stage rather
             # than becoming pipeline state (ADR 0028).
             raise ValueError(f"RCA output failed schema validation: {exc}") from exc
+
+        # Runtime Reasoning Gate: the builder is bounded to MAX_INITIAL_HYPOTHESES
+        # (ADR 0036, PRD #26 / #30 user story 65). An over-budget candidate set fails
+        # the stage rather than persisting and challenging an unbounded number of
+        # hypotheses, which would blow the bounded review/token surface. Failing
+        # before persistence keeps the gate deterministic and uses the same bounded
+        # repair/failure contract as the proposed-alternative cap (one retry, ADR 0029).
+        if len(output.hypotheses) > MAX_INITIAL_HYPOTHESES:
+            raise ValueError(
+                f"builder generated {len(output.hypotheses)} initial hypotheses, exceeding the "
+                f"bounded maximum of {MAX_INITIAL_HYPOTHESES}"
+            )
 
         by_id = {artifact.id: artifact for artifact in retrieval.artifacts}
         warning_codes: list[str] = []
