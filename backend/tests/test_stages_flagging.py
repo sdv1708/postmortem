@@ -16,7 +16,11 @@ from postmortem.verification import (
     ClaimSupportStatus,
 )
 
-from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeFalsifier,
+    FakeIncidentFactExtractor,
+)
 
 
 BODY = "deploy v184 rolled out\napi 500 rate climbing\ncache evicted under pressure"
@@ -123,6 +127,7 @@ def test_flagging_classifies_each_major_claim(fresh_session):
         llm_client=fake,
         claim_support_verifier=verifier,
         incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -168,6 +173,7 @@ def test_flagging_does_not_treat_broken_citations_as_support(fresh_session):
         verifier=_BrokenCitationVerifier(),
         claim_support_verifier=claim_support,
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     )
     run = AnalysisService(
         fresh_session, executor=StagedRunExecutor(stage_runner=runner)
@@ -196,6 +202,7 @@ def test_all_supported_emits_no_warnings(fresh_session):
         llm_client=fake,
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -219,6 +226,7 @@ def test_run_metadata_records_injected_claim_support_verifier_version(fresh_sess
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=verifier,
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -236,6 +244,7 @@ def test_flagging_is_idempotent_across_retry(fresh_session):
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=verifier,
         incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
+        falsifier=FakeFalsifier(),
     )
 
     def flaky(stage, attempt, run):

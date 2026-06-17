@@ -12,8 +12,12 @@ EVIDENCE_REF_OWNER_CHECK = """\
 (CASE WHEN timeline_event_id IS NOT NULL THEN 1 ELSE 0 END) +
 (CASE WHEN hypothesis_id IS NOT NULL THEN 1 ELSE 0 END) +
 (CASE WHEN impact_claim_id IS NOT NULL THEN 1 ELSE 0 END) +
-(CASE WHEN action_item_id IS NOT NULL THEN 1 ELSE 0 END) = 1"""
+(CASE WHEN action_item_id IS NOT NULL THEN 1 ELSE 0 END) +
+(CASE WHEN counterclaim_id IS NOT NULL THEN 1 ELSE 0 END) = 1"""
 EVIDENCE_REF_ROLE_CHECK = "role IN ('supporting', 'contradicting')"
+# Challenge Severity is an enumerated invariant (ADR 0034): a persisted challenge
+# must carry one of the three causal-role severities.
+HYPOTHESIS_CHALLENGE_SEVERITY_CHECK = "severity IN ('critical', 'material', 'minor')"
 
 
 class Base(DeclarativeBase):
@@ -67,14 +71,21 @@ def _ensure_evidence_ref_constraints(engine: Engine) -> None:
                     "hypothesis_id",
                     "impact_claim_id",
                     "action_item_id",
+                    "counterclaim_id",
                     "role",
                 ):
                     condition = condition.replace(column, f"NEW.{column}")
                 for operation in ("INSERT", "UPDATE"):
+                    # Drop first so a condition change (e.g. adding the counterclaim
+                    # owner, ADR 0034) replaces the old trigger; CREATE ... IF NOT
+                    # EXISTS would otherwise keep a stale 4-owner check in place.
+                    connection.execute(
+                        text(f"DROP TRIGGER IF EXISTS ck_evidence_refs_{name}_{operation.lower()}")
+                    )
                     connection.execute(
                         text(
                             f"""
-                            CREATE TRIGGER IF NOT EXISTS ck_evidence_refs_{name}_{operation.lower()}
+                            CREATE TRIGGER ck_evidence_refs_{name}_{operation.lower()}
                             BEFORE {operation} ON evidence_refs
                             WHEN NOT ({condition})
                             BEGIN
@@ -89,6 +100,11 @@ def _ensure_evidence_ref_constraints(engine: Engine) -> None:
             "ck_evidence_refs_allowed_role": EVIDENCE_REF_ROLE_CHECK,
         }
         for name, condition in checks.items():
+            # Drop-then-add so a changed condition (the counterclaim owner,
+            # ADR 0034) supersedes an existing constraint instead of being
+            # skipped as a duplicate. Each runs in its own transaction.
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE evidence_refs DROP CONSTRAINT IF EXISTS {name}"))
             try:
                 with engine.begin() as connection:
                     connection.execute(
@@ -249,6 +265,10 @@ def ensure_schema_compatibility(engine: Engine) -> None:
             "hypothesis_id": "VARCHAR(36) REFERENCES hypotheses(id) ON DELETE CASCADE",
             "impact_claim_id": "VARCHAR(36) REFERENCES impact_claims(id) ON DELETE CASCADE",
             "action_item_id": "VARCHAR(36) REFERENCES action_items(id) ON DELETE CASCADE",
+            # Counterclaim ownership for falsifier-generated Major Claims (ADR 0034).
+            # create_all has already created the counterclaims table, so the FK
+            # target exists before this column is added to an existing database.
+            "counterclaim_id": "VARCHAR(36) REFERENCES counterclaims(id) ON DELETE CASCADE",
             "role": "VARCHAR(16) NOT NULL DEFAULT 'supporting'",
             # Citation-integrity status added in slice #7 (ADR 0014); existing refs
             # default to 'unverified' until a run re-verifies them.
@@ -304,6 +324,7 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         "hypothesis_id": "ix_evidence_refs_hypothesis_id",
         "impact_claim_id": "ix_evidence_refs_impact_claim_id",
         "action_item_id": "ix_evidence_refs_action_item_id",
+        "counterclaim_id": "ix_evidence_refs_counterclaim_id",
     }
     with engine.begin() as connection:
         for column, index in indexes.items():

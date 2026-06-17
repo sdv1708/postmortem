@@ -4,13 +4,18 @@ import json
 
 from fastapi.testclient import TestClient
 
+from postmortem.falsification import FalsificationCounterclaim
 from postmortem.incident_facts import FactsImpactClaim
 from postmortem.llm import FakeLLMClient
 from postmortem.rca import RcaEvidenceRef
 from postmortem.schemas import AnalysisRunCreate
 from postmortem.services import AnalysisService
 
-from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeFalsifier,
+    FakeIncidentFactExtractor,
+)
 
 
 def _impact(client, auth_headers, incident_id, run_id):
@@ -97,6 +102,17 @@ def _seed_run_with_hypotheses(app, client, auth_headers, claim_support_verifier=
             llm_client=FakeLLMClient([payload], label="fake-model"),
             claim_support_verifier=claim_support_verifier or FakeClaimSupportVerifier(),
             incident_fact_extractor=FakeIncidentFactExtractor(impact),
+            falsifier=FakeFalsifier(
+                severity="material",
+                counterclaims=[
+                    FalsificationCounterclaim(
+                        statement="The cited line does not establish causation.",
+                        evidence=[RcaEvidenceRef(artifact_id=artifact_id, line_start=2, line_end=2)],
+                    )
+                ],
+                evidence_gaps=["Pre-incident baseline metrics are missing."],
+                falsification_tests=["Replay the window in staging."],
+            ),
         ).execute_run(run_id, commit_progress=True)
         assert run.status == "succeeded"
         session.commit()
@@ -142,6 +158,34 @@ def test_list_hypotheses_returns_ranked_with_split_evidence(app, client: TestCli
     assert [c["description"] for c in impact] == ["Customers errored"]
     assert impact[0]["evidence_refs"][0]["verifier_status"] == "verified"
     assert impact[0]["support_status"] == "supported"
+
+
+def test_hypotheses_resource_exposes_the_falsifier_challenge(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_run_with_hypotheses(app, client, auth_headers)
+
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/hypotheses", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    hyps = resp.json()
+
+    for hypothesis in hyps:
+        # Every hypothesis in a successful run carries exactly one challenge (#28).
+        challenge = hypothesis["challenge"]
+        assert challenge is not None
+        assert challenge["severity"] == "material"
+        assert challenge["challenged_claim"]
+        assert challenge["evidence_gaps"] == ["Pre-incident baseline metrics are missing."]
+        assert challenge["falsification_tests"] == ["Replay the window in staging."]
+        # The Counterclaim is exposed as a Major Claim with an exact, verified
+        # citation the Evidence Panel can navigate to (ADR 0024 / 0034) — no hidden
+        # reasoning or chat history is surfaced.
+        assert len(challenge["counterclaims"]) == 1
+        counter = challenge["counterclaims"][0]
+        assert counter["statement"] == "The cited line does not establish causation."
+        assert counter["assumption"] is False
+        assert counter["evidence_refs"][0]["snippet"] == "beta line"
+        assert counter["evidence_refs"][0]["verifier_status"] == "verified"
 
 
 def test_support_status_separates_unsupported_and_partial_claims(

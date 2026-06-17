@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .db import Base, EVIDENCE_REF_OWNER_CHECK, EVIDENCE_REF_ROLE_CHECK
+from .db import (
+    Base,
+    EVIDENCE_REF_OWNER_CHECK,
+    EVIDENCE_REF_ROLE_CHECK,
+    HYPOTHESIS_CHALLENGE_SEVERITY_CHECK,
+)
 
 
 def _uuid() -> str:
@@ -310,6 +315,106 @@ class Hypothesis(Base):
         cascade="all, delete-orphan",
         order_by="ReviewerNote.created_at",
     )
+    # The bounded falsifier persists exactly one Hypothesis Challenge per
+    # hypothesis before stage 3 can succeed (ADR 0034). uselist=False makes the
+    # 1:1 explicit; the cascade removes the challenge (and its counterclaims) when
+    # a retry clears and regenerates hypotheses.
+    challenge: Mapped["HypothesisChallenge | None"] = relationship(
+        back_populates="hypothesis",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class HypothesisChallenge(Base):
+    """A persisted falsification review of one RCA Hypothesis (ADR 0034).
+
+    The bounded falsifier challenges every initial RCA Hypothesis before the
+    Causal Analysis Stage can succeed (PRD #28). A challenge identifies what
+    weakens the hypothesis without accepting or rejecting it: its ``severity``
+    advises causal-role suitability, ``counterclaims`` are cited Major Claims that
+    weaken it, and ``evidence_gaps`` / ``falsification_tests`` are procedural
+    guidance (no citations). Exactly one challenge per hypothesis (``hypothesis_id``
+    unique). Only structured Role Handoff outputs are persisted — never the
+    falsifier's hidden reasoning or chat history.
+    """
+
+    __tablename__ = "hypothesis_challenges"
+    __table_args__ = (
+        CheckConstraint(
+            HYPOTHESIS_CHALLENGE_SEVERITY_CHECK,
+            name="ck_hypothesis_challenges_severity",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # Denormalized run id so the falsifier substep's output is queryable per run
+    # (audit / stage-4 citation walk) without joining through the hypothesis.
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    hypothesis_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("hypotheses.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    # The specific hypothesis claim the falsifier challenged.
+    challenged_claim: Mapped[str] = mapped_column(Text, nullable=False)
+    # critical | material | minor (ADR 0034), enforced by the table CHECK above.
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Procedural guidance about missing evidence and how to confirm/refute the
+    # hypothesis. Not factual incident claims, so plain string lists with no
+    # citations (CONTEXT "Counterclaim vs Evidence Gap vs Falsification Test").
+    evidence_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    falsification_tests: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Versioned falsifier identity (ADR 0025 / 0034) so a challenged run records
+    # which role produced its challenges.
+    falsifier_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    hypothesis: Mapped["Hypothesis"] = relationship(back_populates="challenge")
+    counterclaims: Mapped[list["Counterclaim"]] = relationship(
+        back_populates="challenge",
+        cascade="all, delete-orphan",
+        order_by="Counterclaim.sequence",
+    )
+
+
+class Counterclaim(Base):
+    """A factual statement in a Hypothesis Challenge that weakens it (ADR 0034).
+
+    A Counterclaim is a Major Claim (CONTEXT): it carries supporting EvidenceRefs
+    resolved from immutable artifact lines, or is normalized to ``assumption=true``
+    with an ``uncited_claim`` warning (ADR 0013) so the falsifier cannot introduce
+    unchecked incident facts. Citations resolve from stored artifact lines, never
+    from model text, and are audited by the Final Citation Audit like any other
+    EvidenceRef.
+    """
+
+    __tablename__ = "counterclaims"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    challenge_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("hypothesis_challenges.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    # True when the counterclaim carried no supporting citation (ADR 0013); it
+    # stays auditable but is not presented as an evidence-backed fact.
+    assumption: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    challenge: Mapped[HypothesisChallenge] = relationship(back_populates="counterclaims")
+    evidence_refs: Mapped[list["EvidenceRef"]] = relationship(
+        back_populates="counterclaim",
+        cascade="all, delete-orphan",
+        order_by="EvidenceRef.line_start",
+    )
 
 
 class ReviewerNote(Base):
@@ -501,9 +606,10 @@ class EvidenceRef(Base):
     verification can confirm an exact match.
 
     One ref belongs to exactly one owner via the nullable owner FKs below
-    (timeline event, hypothesis, impact claim, or action item). ``role`` lets a
-    hypothesis distinguish ``supporting`` evidence from ``contradicting``
-    evidence (PRD stage 3); other owners use ``supporting``.
+    (timeline event, hypothesis, impact claim, action item, or counterclaim).
+    ``role`` lets a hypothesis distinguish ``supporting`` evidence from
+    ``contradicting`` evidence (PRD stage 3); other owners use ``supporting`` —
+    a Counterclaim's own evidence supports the counterclaim statement (ADR 0034).
     """
 
     __tablename__ = "evidence_refs"
@@ -531,6 +637,9 @@ class EvidenceRef(Base):
     action_item_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("action_items.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    counterclaim_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("counterclaims.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     # supporting | contradicting (ADR 0024 / PRD stage 3). Defaults to supporting
     # for non-hypothesis owners.
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="supporting")
@@ -553,4 +662,5 @@ class EvidenceRef(Base):
     hypothesis: Mapped["Hypothesis"] = relationship(back_populates="evidence_refs")
     impact_claim: Mapped["ImpactClaim"] = relationship(back_populates="evidence_refs")
     action_item: Mapped["ActionItem"] = relationship(back_populates="evidence_refs")
+    counterclaim: Mapped["Counterclaim"] = relationship(back_populates="evidence_refs")
     artifact: Mapped[Artifact] = relationship()

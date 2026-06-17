@@ -8,7 +8,11 @@ from postmortem.retrieval import RetrievalResult
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 
-from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeFalsifier,
+    FakeIncidentFactExtractor,
+)
 
 
 AMBIGUOUS_BODY = (
@@ -104,6 +108,7 @@ def test_ambiguous_evidence_yields_multiple_ranked_hypotheses(fresh_session):
         llm_client=fake,
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -180,6 +185,7 @@ def test_rca_generation_uses_injected_retrieval_strategy(fresh_session):
         claim_support_verifier=FakeClaimSupportVerifier(),
         retrieval_strategy=retrieval,
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -202,7 +208,7 @@ def test_schema_invalid_output_fails_stage_without_corrupting_prior_outputs(fres
     # stage 2 healthy so the malformed JSON is exercised by the RCA stage.
     fake = FakeLLMClient(lambda system, user: "{ not valid json")
     run = AnalysisService(
-        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor(), falsifier=FakeFalsifier()
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -241,7 +247,7 @@ def test_unknown_output_field_fails_stage(fresh_session):
     )
     fake = FakeLLMClient(lambda system, user: typo_field)
     run = AnalysisService(
-        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor(), falsifier=FakeFalsifier()
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -268,7 +274,7 @@ def test_uncited_hypothesis_normalized_to_assumption_with_warning(fresh_session)
     )
     fake = FakeLLMClient([uncited])
     run = AnalysisService(
-        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor(), falsifier=FakeFalsifier()
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -310,6 +316,7 @@ def test_invalid_citations_are_dropped_and_flagged(fresh_session):
         llm_client=fake,
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -344,7 +351,7 @@ def test_foreign_artifact_citation_becomes_uncited_assumption(fresh_session):
     )
     fake = FakeLLMClient([foreign_ref])
     run = AnalysisService(
-        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor(), falsifier=FakeFalsifier()
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -390,6 +397,7 @@ def test_rca_generation_is_idempotent_across_retry(fresh_session):
         llm_client=fake,
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     )
 
     def flaky(stage, attempt, run):

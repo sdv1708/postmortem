@@ -14,6 +14,11 @@ from ..drafting import (
     PostmortemComposer,
     PostmortemComposerContext,
 )
+from ..falsification import (
+    Falsifier,
+    HypothesisToChallenge,
+    LLMFalsifier,
+)
 from ..incident_facts import IncidentFactExtractor, LLMIncidentFactExtractor
 from ..llm import LLMClient, OfflineLLMClient
 from ..logging import log_event
@@ -21,9 +26,11 @@ from ..models import (
     ActionItem,
     AnalysisRun,
     Artifact,
+    Counterclaim,
     EvidenceChunk,
     EvidenceRef,
     Hypothesis,
+    HypothesisChallenge,
     ImpactClaim,
     Incident,
     Postmortem,
@@ -85,6 +92,7 @@ class PipelineStageRunner:
         postmortem_composer: PostmortemComposer | None = None,
         retrieval_strategy: RetrievalStrategy | None = None,
         incident_fact_extractor: IncidentFactExtractor | None = None,
+        falsifier: Falsifier | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
@@ -97,6 +105,11 @@ class PipelineStageRunner:
         # any causal interpretation. The default uses the configured LLM; the
         # offline client yields no impact so a run still completes.
         self._fact_extractor = incident_fact_extractor or LLMIncidentFactExtractor(self._llm)
+        # The falsifier is a separate Reasoning-Role boundary (ADR 0034): stage 3
+        # challenges every initial RCA Hypothesis through it before it can
+        # succeed. The default uses the configured LLM; with the offline client
+        # the builder produces no hypotheses, so the falsifier is never invoked.
+        self._falsifier = falsifier or LLMFalsifier(self._llm)
         # The citation verifier is a swappable boundary (ADR 0014 / 0009); the
         # MVP default is the deterministic integrity pass.
         self._verifier = verifier or DeterministicCitationIntegrityVerifier()
@@ -358,6 +371,7 @@ class PipelineStageRunner:
 
         by_id = {artifact.id: artifact for artifact in retrieval.artifacts}
         warning_codes: list[str] = []
+        hypotheses: list[Hypothesis] = []
         for rank, hyp in enumerate(output.hypotheses, start=1):
             supporting = self._resolve_refs(
                 by_id, hyp.supporting_evidence, "supporting", warning_codes
@@ -389,8 +403,16 @@ class PipelineStageRunner:
                 )
                 hypothesis.action_items.append(item)
             self._session.add(hypothesis)
+            hypotheses.append(hypothesis)
 
         self._session.flush()
+
+        # Bounded falsifier substep (ADR 0034): challenge every initial hypothesis
+        # before stage 3 can succeed. The falsifier searches all run artifacts, so
+        # counterclaims resolve against the full immutable evidence set, not just
+        # the builder's retrieval subset.
+        self._challenge_hypotheses(run, hypotheses, timeline, warning_codes)
+
         outcome: dict = {}
         if warning_codes:
             outcome["warning_codes"] = _dedupe(warning_codes)
@@ -406,6 +428,94 @@ class PipelineStageRunner:
             usage_keys=",".join(sorted(response.usage.keys())) if response.usage else None,
         )
         return outcome or None
+
+    def _challenge_hypotheses(
+        self,
+        run: AnalysisRun,
+        hypotheses: list[Hypothesis],
+        timeline: list[TimelineEvent],
+        warning_codes: list[str],
+    ) -> None:
+        """Challenge every initial RCA Hypothesis through the falsifier (ADR 0034).
+
+        Each hypothesis receives exactly one persisted Hypothesis Challenge —
+        severity, cited Counterclaims (or an explicit assumption marker, ADR 0013),
+        Evidence Gaps, and Falsification Tests — before stage 3 can succeed. The
+        falsifier is handed the persisted hypothesis and ALL run artifacts so it
+        can find counterevidence the builder's retrieval subset omitted (PRD user
+        story 13); a Counterclaim's citations resolve from the stored artifact
+        lines, never model text (ADR 0024).
+
+        Complete challenge coverage is mandatory: if the falsifier cannot produce a
+        schema-valid challenge for a hypothesis it raises, which fails the stage
+        after its single retry (ADR 0029) rather than presenting unchallenged
+        hypotheses as multi-pass output (PRD user stories 61-62). Idempotent across
+        the retry: ``_clear_hypotheses`` cascades the prior attempt's challenges
+        and counterclaims away before hypotheses are regenerated.
+        """
+        if not hypotheses:
+            return
+        all_artifacts = self._run_artifacts(run)
+        by_id = {artifact.id: artifact for artifact in all_artifacts}
+        challenged = 0
+        for hypothesis in hypotheses:
+            target = HypothesisToChallenge(
+                title=hypothesis.title,
+                summary=hypothesis.summary,
+                supporting_snippets=tuple(
+                    ref.snippet for ref in hypothesis.evidence_refs if ref.role != "contradicting"
+                ),
+                contradicting_snippets=tuple(
+                    ref.snippet for ref in hypothesis.evidence_refs if ref.role == "contradicting"
+                ),
+            )
+            result = self._falsifier.challenge(
+                hypothesis=target, artifacts=all_artifacts, timeline_events=timeline
+            )
+            challenge = HypothesisChallenge(
+                run_id=run.id,
+                hypothesis_id=hypothesis.id,
+                challenged_claim=result.challenged_claim,
+                severity=result.severity,
+                evidence_gaps=list(result.evidence_gaps),
+                falsification_tests=list(result.falsification_tests),
+                falsifier_version=self._falsifier.version,
+            )
+            for sequence, counter in enumerate(result.counterclaims, start=1):
+                # A Counterclaim is a Major Claim: resolve its citations from the
+                # stored artifact lines, or normalize it to an assumption when it
+                # cites nothing resolvable (ADR 0013), so the falsifier cannot
+                # introduce unchecked incident facts.
+                evidence = self._resolve_refs(by_id, counter.evidence, "supporting", warning_codes)
+                assumption = not evidence
+                if assumption:
+                    warning_codes.append("uncited_claim")
+                counterclaim = Counterclaim(
+                    sequence=sequence,
+                    statement=counter.statement,
+                    assumption=assumption,
+                )
+                counterclaim.evidence_refs.extend(evidence)
+                challenge.counterclaims.append(counterclaim)
+            self._session.add(challenge)
+            challenged += 1
+        self._session.flush()
+        # Defensive coverage gate (ADR 0034): the per-hypothesis loop always
+        # produces one challenge or raises, but assert completeness explicitly so a
+        # future falsifier that silently skips a hypothesis fails the stage rather
+        # than shipping partial coverage.
+        if challenged != len(hypotheses):
+            raise ValueError(
+                f"incomplete challenge coverage: challenged {challenged} of {len(hypotheses)} hypotheses"
+            )
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_challenging_hypotheses_completed",
+            run_id=run.id,
+            hypothesis_count=len(hypotheses),
+            falsifier_version=self._falsifier.version,
+        )
 
     def _resolve_refs(
         self,
@@ -528,6 +638,14 @@ class PipelineStageRunner:
             .join(ActionItem, EvidenceRef.action_item_id == ActionItem.id)
             .join(Hypothesis, ActionItem.hypothesis_id == Hypothesis.id)
             .where(Hypothesis.run_id == run.id)
+        )
+        # Counterclaims are Major Claims (ADR 0034); their citations are audited at
+        # the same trust checkpoint as every other EvidenceRef.
+        refs += self._session.scalars(
+            select(EvidenceRef)
+            .join(Counterclaim, EvidenceRef.counterclaim_id == Counterclaim.id)
+            .join(HypothesisChallenge, Counterclaim.challenge_id == HypothesisChallenge.id)
+            .where(HypothesisChallenge.run_id == run.id)
         )
         return refs
 

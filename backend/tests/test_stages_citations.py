@@ -14,7 +14,11 @@ from postmortem.verification import (
     CitationIntegrityStatus,
 )
 
-from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeFalsifier,
+    FakeIncidentFactExtractor,
+)
 
 
 BODY = (
@@ -116,6 +120,7 @@ def test_pipeline_stamps_every_citation_verified(fresh_session):
         llm_client=fake,
         claim_support_verifier=claim_support,
         incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -145,6 +150,7 @@ def test_reverification_flags_a_tampered_snippet_without_failing_the_run(fresh_s
         llm_client=fake,
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
     assert run.status == "succeeded"

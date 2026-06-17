@@ -4,6 +4,11 @@ from typing import Callable
 
 from postmortem.drafting import PostmortemComposerContext, PostmortemDraft
 from postmortem.evaluation import JudgeInput, JudgeResult
+from postmortem.falsification import (
+    FalsificationCounterclaim,
+    HypothesisChallengeOutput,
+    HypothesisToChallenge,
+)
 from postmortem.incident_facts import FactsImpactClaim, IncidentFactsOutput
 from postmortem.verification import (
     ClaimSupportJudgment,
@@ -68,6 +73,55 @@ class FakeIncidentFactExtractor:
     def extract(self, *, artifacts, timeline_events) -> IncidentFactsOutput:
         self.calls += 1
         return IncidentFactsOutput(impact_claims=list(self._impact_claims))
+
+
+class FakeFalsifier:
+    """Deterministic falsifier for tests (ADR 0009 / 0034 swappability).
+
+    Proves the falsifier boundary is real without a live model and lets
+    hypothesis-producing pipeline tests run stage 3's mandatory challenge substep
+    without seeding LLM responses for it. By default it returns a trivial
+    ``material`` challenge with no counterclaims. Pass ``challenge`` to drive a
+    per-hypothesis ``HypothesisChallengeOutput`` (e.g. keyed off
+    ``hypothesis.title``), or ``raise_for`` (a set of titles) to simulate a
+    falsifier that cannot challenge a hypothesis — the stage must then fail.
+    """
+
+    version = "fake-falsifier-0"
+
+    def __init__(
+        self,
+        challenge: Callable[[HypothesisToChallenge], HypothesisChallengeOutput] | None = None,
+        *,
+        severity: str = "material",
+        counterclaims: list[FalsificationCounterclaim] | None = None,
+        evidence_gaps: list[str] | None = None,
+        falsification_tests: list[str] | None = None,
+        raise_for: set[str] | None = None,
+    ) -> None:
+        self._challenge = challenge
+        self._severity = severity
+        self._counterclaims = counterclaims or []
+        self._evidence_gaps = evidence_gaps or []
+        self._falsification_tests = falsification_tests or []
+        self._raise_for = raise_for or set()
+        self.calls: list[HypothesisToChallenge] = []
+
+    def challenge(
+        self, *, hypothesis: HypothesisToChallenge, artifacts, timeline_events
+    ) -> HypothesisChallengeOutput:
+        self.calls.append(hypothesis)
+        if hypothesis.title in self._raise_for:
+            raise ValueError(f"fake falsifier cannot challenge {hypothesis.title!r}")
+        if self._challenge is not None:
+            return self._challenge(hypothesis)
+        return HypothesisChallengeOutput(
+            challenged_claim=f"Challenge of: {hypothesis.title}",
+            severity=self._severity,
+            counterclaims=list(self._counterclaims),
+            evidence_gaps=list(self._evidence_gaps),
+            falsification_tests=list(self._falsification_tests),
+        )
 
 
 class FakeClaimSupportVerifier:

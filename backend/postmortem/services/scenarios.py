@@ -12,6 +12,7 @@ from ..scenarios import (
     LoadedScenario,
     ScenarioNotFoundError,
     ScenarioReplayClaimSupportVerifier,
+    ScenarioReplayFalsifier,
     ScenarioReplayIncidentFactExtractor,
     ScenarioReplayLLMClient,
     list_scenarios,
@@ -100,6 +101,10 @@ class ScenarioSeedService:
         # produces the scenario's impact claims through its own Reasoning Role
         # (ADR 0033), leaving the RCA replay client consulted once for stage 3.
         incident_facts = resolve_replay_rca(scenario.incident_facts_replay, source_name_to_id)
+        # Resolve the falsifier replay the same way so stage 3 challenges every
+        # hypothesis through its own Reasoning Role (ADR 0034), keyed by title to
+        # the builder replay's hypotheses.
+        falsification = resolve_replay_rca(scenario.falsification_replay, source_name_to_id)
         run = AnalysisService(
             self._session,
             llm_client=ScenarioReplayLLMClient(scenario.id, rca_json),
@@ -109,6 +114,7 @@ class ScenarioSeedService:
             incident_fact_extractor=ScenarioReplayIncidentFactExtractor(
                 scenario.id, incident_facts
             ),
+            falsifier=ScenarioReplayFalsifier(scenario.id, falsification),
         ).start_run(incident.id, AnalysisRunCreate(), execute_inline=execute_inline)
         log_event(
             logger,

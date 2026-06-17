@@ -10,6 +10,7 @@ from postmortem.services.stages import PipelineStageRunner
 
 from tests._fakes import (
     FakeClaimSupportVerifier,
+    FakeFalsifier,
     FakeIncidentFactExtractor,
     FakePostmortemComposer,
 )
@@ -64,6 +65,7 @@ def _start(session, incident_id, *, composer=None, verifier=None):
         claim_support_verifier=verifier or FakeClaimSupportVerifier(),
         postmortem_composer=composer,
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     ).start_run(incident_id, AnalysisRunCreate())
 
 
@@ -122,6 +124,7 @@ def test_drafting_refuses_when_the_model_returns_no_hypotheses(fresh_session):
         llm_client=FakeLLMClient(['{"hypotheses": []}']),
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -151,6 +154,7 @@ def test_drafting_introduces_no_new_factual_claims(fresh_session):
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     )
 
     def spy(stage, attempt, run):
@@ -208,6 +212,7 @@ def test_drafting_is_idempotent_across_retry(fresh_session):
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
+        falsifier=FakeFalsifier(),
     )
 
     def flaky(stage, attempt, run):

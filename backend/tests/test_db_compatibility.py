@@ -46,6 +46,7 @@ def _insert_evidence_ref(engine, ref_id, *, role="supporting", verifier_status="
         "hypothesis_id": None,
         "impact_claim_id": None,
         "action_item_id": None,
+        "counterclaim_id": None,
         "role": role,
         "verifier_status": verifier_status,
         **owners,
@@ -56,12 +57,12 @@ def _insert_evidence_ref(engine, ref_id, *, role="supporting", verifier_status="
                 """
                 INSERT INTO evidence_refs (
                     id, timeline_event_id, hypothesis_id, impact_claim_id,
-                    action_item_id, role, verifier_status, artifact_id,
+                    action_item_id, counterclaim_id, role, verifier_status, artifact_id,
                     source_name, line_start, line_end, snippet, confidence_score,
                     created_at
                 ) VALUES (
                     :id, :timeline_event_id, :hypothesis_id, :impact_claim_id,
-                    :action_item_id, :role, :verifier_status, 'artifact-id',
+                    :action_item_id, :counterclaim_id, :role, :verifier_status, 'artifact-id',
                     'api.log', 1, 1, 'line one', 1.0, '2026-06-01 00:00:00'
                 )
                 """
@@ -128,6 +129,41 @@ def test_create_app_upgrades_issue_6_evidence_refs_table(tmp_path):
     } <= indexes
     _assert_invalid_refs_rejected(engine)
     _insert_evidence_ref(engine, "valid-ref", timeline_event_id="timeline-id")
+
+
+def test_create_app_adds_counterclaim_owner_to_evidence_refs(tmp_path):
+    """An existing evidence_refs table gains the counterclaim owner (ADR 0034).
+
+    The 5-owner exactly-one-owner invariant must hold afterward: a counterclaim-
+    only citation is valid, while pairing the counterclaim owner with another
+    owner is rejected.
+    """
+    database_url = f"sqlite:///{tmp_path}/issue-28.db"
+    engine = make_engine(database_url)
+    _create_issue_6_evidence_refs_table(engine)
+
+    create_app(
+        Settings(database_url=database_url, api_token=None, dev_bypass=True, cors_origins=())
+    )
+
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("evidence_refs")}
+    assert "counterclaim_id" in columns
+    indexes = {index["name"] for index in inspector.get_indexes("evidence_refs")}
+    assert "ix_evidence_refs_counterclaim_id" in indexes
+
+    # A counterclaim-owned citation is now a valid single owner.
+    _insert_evidence_ref(engine, "counterclaim-ref", counterclaim_id="counterclaim-id")
+    # Pairing the new owner with another still violates exactly-one-owner.
+    with pytest.raises(IntegrityError):
+        _insert_evidence_ref(
+            engine,
+            "counterclaim-plus-timeline",
+            counterclaim_id="counterclaim-id",
+            timeline_event_id="timeline-id",
+        )
+    # The pre-existing invariants still hold after the owner set grew.
+    _assert_invalid_refs_rejected(engine)
 
 
 def _create_issue_7_claim_tables(engine):

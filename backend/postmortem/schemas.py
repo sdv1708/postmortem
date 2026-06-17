@@ -226,6 +226,43 @@ class ReviewerNoteRead(BaseModel):
     created_at: datetime
 
 
+# Challenge Severity advises causal-role suitability (ADR 0034): critical blocks
+# use as the Failure Mechanism, material limits the causal role, minor qualifies.
+ChallengeSeverity = Literal["critical", "material", "minor"]
+
+
+class CounterclaimRead(BaseModel):
+    """A factual statement that weakens a hypothesis (ADR 0034).
+
+    A Counterclaim is a Major Claim: its EvidenceRefs are exact, verifiable
+    citations, and ``assumption`` marks one normalized for lack of a resolvable
+    citation (ADR 0013) so the falsifier cannot smuggle in unchecked facts.
+    """
+
+    id: str
+    sequence: int
+    statement: str
+    assumption: bool
+    evidence_refs: list[EvidenceRefRead]
+
+
+class HypothesisChallengeRead(BaseModel):
+    """The bounded falsifier's challenge of one RCA Hypothesis (ADR 0034).
+
+    Exposes the structured falsification output for the Review Surface — the
+    challenged claim, its advisory ``severity``, cited Counterclaims, and the
+    procedural Evidence Gaps and Falsification Tests — without exposing any hidden
+    reasoning or chat history (PRD user story 75 / 89).
+    """
+
+    id: str
+    challenged_claim: str
+    severity: ChallengeSeverity
+    counterclaims: list[CounterclaimRead]
+    evidence_gaps: list[str]
+    falsification_tests: list[str]
+
+
 class HypothesisRead(BaseModel):
     """A ranked RCA Hypothesis for the Review Surface (PRD stage 3).
 
@@ -233,6 +270,8 @@ class HypothesisRead(BaseModel):
     sides without re-deriving the distinction. ``assumption`` marks a hypothesis
     that carried no supporting citation and was normalized (ADR 0013), and
     ``review_status`` records the human accept/reject decision (ADR 0016).
+    ``challenge`` is the bounded falsifier's persisted Hypothesis Challenge
+    (ADR 0034), present on every hypothesis in a successful run.
     """
 
     id: str
@@ -250,6 +289,7 @@ class HypothesisRead(BaseModel):
     contradicting_evidence: list[EvidenceRefRead]
     action_items: list[ActionItemRead]
     reviewer_notes: list[ReviewerNoteRead] = Field(default_factory=list)
+    challenge: HypothesisChallengeRead | None = None
 
 
 class HypothesisReviewCreate(BaseModel):

@@ -129,6 +129,23 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   // than presented as fact (ADR 0015).
   await expect(page.getByText(/Review findings · unsupported · 1/)).toBeVisible();
 
+  // The bounded falsifier challenged every hypothesis (ADR 0034 / #28): the
+  // Review Surface shows the challenge, its severity, a cited counterclaim that
+  // navigates to exact evidence, and the procedural gaps/tests — visible without
+  // opening any debug log (PRD user stories 88-89).
+  await expect(page.getByText("Falsification challenge").first()).toBeVisible();
+  await expect(page.getByText("material challenge").first()).toBeVisible();
+  await expect(page.getByText("critical challenge").first()).toBeVisible();
+  await expect(
+    page.getByText(/max_connections unchanged at 40/),
+  ).toBeVisible();
+  await expect(page.getByText("Evidence gaps").first()).toBeVisible();
+  await expect(page.getByText("Falsification tests").first()).toBeVisible();
+  // A counterclaim citation resolves to its exact immutable artifact line.
+  await expect(
+    page.getByRole("button", { name: /deploy-notes\.md:4/ }).first(),
+  ).toBeVisible();
+
   // The structured postmortem and its clean/audit exports rendered.
   await expect(page.getByRole("button", { name: "Export clean" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Export audit" })).toBeVisible();

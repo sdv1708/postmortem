@@ -11,10 +11,12 @@ import {
   type AnalysisRun,
   type Artifact,
   type ArtifactSourceType,
+  type ChallengeSeverity,
   type ClaimSupportStatus,
   type EvidenceRef,
   type ExportMode,
   type Hypothesis,
+  type HypothesisChallenge,
   type HypothesisReviewStatus,
   type ImpactClaim,
   type Incident,
@@ -1237,6 +1239,9 @@ function HypothesisCard({
               )}
               <ClaimSupportBadge status={hypothesis.support_status} />
               <ReviewStatusBadge status={hypothesis.review_status} />
+              {hypothesis.challenge && (
+                <ChallengeSeverityBadge severity={hypothesis.challenge.severity} />
+              )}
             </div>
             <p className="mt-1 text-sm leading-relaxed text-slate-700">{hypothesis.summary}</p>
             <SupportRationale
@@ -1279,6 +1284,10 @@ function HypothesisCard({
             refs={hypothesis.contradicting_evidence}
             onFocusEvidence={onFocusEvidence}
           />
+        )}
+
+        {hypothesis.challenge && (
+          <ChallengePanel challenge={hypothesis.challenge} onFocusEvidence={onFocusEvidence} />
         )}
 
         {hypothesis.action_items.length > 0 && (
@@ -1477,6 +1486,75 @@ function BulletGroup({ label, items }: { label: string; items: string[] }) {
       </ul>
     </div>
   );
+}
+
+// The bounded falsifier's challenge of one hypothesis (ADR 0034): severity, the
+// challenged claim, cited counterclaims (navigable to exact evidence), and the
+// procedural evidence gaps and falsification tests. This is how the Review
+// Surface shows the analysis's work — contradicting evidence and critical
+// challenges are visible without opening debug logs (PRD user stories 88-89).
+function ChallengePanel({
+  challenge,
+  onFocusEvidence,
+}: {
+  challenge: HypothesisChallenge;
+  onFocusEvidence: (ref: EvidenceRef) => void;
+}) {
+  const critical = challenge.severity === "critical";
+  return (
+    <div
+      className={`space-y-3 rounded-lg border p-3 ${
+        critical ? "border-rose-200 bg-rose-50/50" : "border-slate-200 bg-slate-50/60"
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="label">Falsification challenge</p>
+        <ChallengeSeverityBadge severity={challenge.severity} />
+      </div>
+      <p className="text-sm leading-relaxed text-slate-700">{challenge.challenged_claim}</p>
+
+      {challenge.counterclaims.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="label">Counterclaims</p>
+          <ul className="space-y-2">
+            {challenge.counterclaims.map((counter) => (
+              <li key={counter.id} className="text-sm text-slate-700">
+                <span className="flex flex-wrap items-center gap-2">
+                  <span>{counter.statement}</span>
+                  {counter.assumption && (
+                    <span className="badge bg-amber-50 text-amber-700 ring-amber-200">assumption</span>
+                  )}
+                </span>
+                {counter.evidence_refs.length > 0 && (
+                  <EvidenceRefList refs={counter.evidence_refs} onFocusEvidence={onFocusEvidence} />
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {challenge.evidence_gaps.length > 0 && (
+        <BulletGroup label="Evidence gaps" items={challenge.evidence_gaps} />
+      )}
+      {challenge.falsification_tests.length > 0 && (
+        <BulletGroup label="Falsification tests" items={challenge.falsification_tests} />
+      )}
+    </div>
+  );
+}
+
+// Severity advises causal-role suitability (ADR 0034). A critical challenge, if
+// valid, blocks the hypothesis from being the failure mechanism.
+const CHALLENGE_SEVERITY_BADGE: Record<ChallengeSeverity, { label: string; cls: string }> = {
+  critical: { label: "critical challenge", cls: "bg-rose-50 text-rose-700 ring-rose-200" },
+  material: { label: "material challenge", cls: "bg-amber-50 text-amber-700 ring-amber-200" },
+  minor: { label: "minor challenge", cls: "bg-slate-100 text-slate-600 ring-slate-200" },
+};
+
+function ChallengeSeverityBadge({ severity }: { severity: ChallengeSeverity }) {
+  const config = CHALLENGE_SEVERITY_BADGE[severity];
+  return <span className={`badge ${config.cls}`}>{config.label}</span>;
 }
 
 function ReviewStatusBadge({ status }: { status: HypothesisReviewStatus }) {
