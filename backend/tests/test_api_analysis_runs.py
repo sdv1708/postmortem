@@ -155,8 +155,8 @@ def test_run_status_exposes_six_ordered_stage_events(client: TestClient, auth_he
     stages = [event["stage"] for event in body["stage_events"]]
     assert stages == [
         "normalizing_evidence",
-        "extracting_timeline_candidates",
-        "generating_rca_hypotheses",
+        "extracting_incident_facts",
+        "analyzing_causal_hypotheses",
         "verifying_citations",
         "drafting_postmortem",
         "flagging_unsupported_claims",
@@ -230,8 +230,8 @@ def test_start_run_returns_queued_state_before_background_execution(
     assert terminal["status"] == "succeeded"
     assert [event["stage"] for event in terminal["stage_events"]] == [
         "normalizing_evidence",
-        "extracting_timeline_candidates",
-        "generating_rca_hypotheses",
+        "extracting_incident_facts",
+        "analyzing_causal_hypotheses",
         "verifying_citations",
         "drafting_postmortem",
         "flagging_unsupported_claims",

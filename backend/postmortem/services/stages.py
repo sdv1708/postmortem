@@ -14,6 +14,7 @@ from ..drafting import (
     PostmortemComposer,
     PostmortemComposerContext,
 )
+from ..incident_facts import IncidentFactExtractor, LLMIncidentFactExtractor
 from ..llm import LLMClient, OfflineLLMClient
 from ..logging import log_event
 from ..models import (
@@ -83,6 +84,7 @@ class PipelineStageRunner:
         claim_support_verifier: ClaimSupportVerifier | None = None,
         postmortem_composer: PostmortemComposer | None = None,
         retrieval_strategy: RetrievalStrategy | None = None,
+        incident_fact_extractor: IncidentFactExtractor | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
@@ -90,6 +92,11 @@ class PipelineStageRunner:
         # run when no provider is configured; real runs inject a configured
         # client (ADR 0011).
         self._llm = llm_client or OfflineLLMClient()
+        # The incident-facts extractor is a swappable Reasoning-Role boundary
+        # (ADR 0033): stage 2 produces run-level Impact Claims through it before
+        # any causal interpretation. The default uses the configured LLM; the
+        # offline client yields no impact so a run still completes.
+        self._fact_extractor = incident_fact_extractor or LLMIncidentFactExtractor(self._llm)
         # The citation verifier is a swappable boundary (ADR 0014 / 0009); the
         # MVP default is the deterministic integrity pass.
         self._verifier = verifier or DeterministicCitationIntegrityVerifier()
@@ -112,9 +119,9 @@ class PipelineStageRunner:
     def __call__(self, stage: str, attempt: int, run: AnalysisRun) -> dict | None:
         if stage == "normalizing_evidence":
             return self._normalize_evidence(run)
-        if stage == "extracting_timeline_candidates":
-            return self._extract_timeline(run)
-        if stage == "generating_rca_hypotheses":
+        if stage == "extracting_incident_facts":
+            return self._extract_incident_facts(run)
+        if stage == "analyzing_causal_hypotheses":
             return self._generate_rca(run)
         if stage == "verifying_citations":
             return self._verify_citations(run)
@@ -171,17 +178,20 @@ class PipelineStageRunner:
         )
         return {"warning_codes": warning_codes}
 
-    def _extract_timeline(self, run: AnalysisRun) -> dict | None:
-        """Build Timeline Events with EvidenceRefs from timestamped lines.
+    def _extract_incident_facts(self, run: AnalysisRun) -> dict | None:
+        """Extract run-level incident facts: Timeline Events + Impact Claims.
 
-        Each line carrying a recognizable time anchor becomes a candidate event
-        citing its exact Artifact line (ADR 0024). Normalized timestamps sort
-        first chronologically; inferred/uncertain timestamps follow in source
-        order and are flagged (ADR 0019).
+        Incident facts are produced before any causal interpretation (ADR 0033).
+        Timeline Events are extracted deterministically from timestamped lines,
+        each citing its exact Artifact line (ADR 0024); normalized timestamps sort
+        first chronologically and inferred/uncertain timestamps follow in source
+        order, flagged (ADR 0019). Run-level Impact Claims are then generated once
+        for the whole run through the IncidentFactExtractor — independent of how
+        many RCA Hypotheses the later causal stage produces (PRD user stories 1-2).
 
-        Idempotent across the single stage retry (ADR 0029): any events left by
-        a failed prior attempt are cleared first, so a retry never duplicates
-        timeline events or collides on sequence numbers.
+        Idempotent across the single stage retry (ADR 0029): any timeline events
+        and impact claims left by a failed prior attempt are cleared first, so a
+        retry never duplicates them or collides on sequence numbers.
         """
         self._clear_timeline(run)
         artifacts = self._run_artifacts(run)
@@ -237,7 +247,60 @@ class PipelineStageRunner:
             timeline_event_count=len(ordered),
             uncertain_count=sum(1 for candidate in ordered if candidate.uncertain),
         )
-        return None
+
+        warning_codes = self._extract_impact_claims(run, artifacts)
+        return {"warning_codes": warning_codes} if warning_codes else None
+
+    def _extract_impact_claims(self, run: AnalysisRun, artifacts: list[Artifact]) -> list[str]:
+        """Generate run-level Impact Claims via the IncidentFactExtractor (ADR 0033).
+
+        Impact is a Major Claim, so each claim's citations are resolved from the
+        stored Artifact lines (the citation source of truth, ADR 0024); an
+        impact claim left without supporting evidence is normalized to an
+        assumption and flagged ``uncited_claim`` (ADR 0013). A model citation to
+        an artifact outside the run or to out-of-range lines is dropped and
+        flagged ``invalid_citation`` so one bad citation cannot block the rest.
+
+        Idempotent across the single stage retry: prior run-level impact claims
+        are cleared first.
+        """
+        self._clear_impact_claims(run)
+        if not artifacts:
+            return []
+        timeline = list(
+            self._session.scalars(
+                select(TimelineEvent)
+                .where(TimelineEvent.run_id == run.id)
+                .order_by(TimelineEvent.sequence.asc())
+            )
+        )
+        output = self._fact_extractor.extract(artifacts=artifacts, timeline_events=timeline)
+        by_id = {artifact.id: artifact for artifact in artifacts}
+        warning_codes: list[str] = []
+        for sequence, impact in enumerate(output.impact_claims, start=1):
+            evidence = self._resolve_refs(by_id, impact.evidence, "supporting", warning_codes)
+            assumption = not evidence
+            if assumption:
+                warning_codes.append("uncited_claim")
+            claim = ImpactClaim(
+                run_id=run.id,
+                sequence=sequence,
+                description=impact.description,
+                assumption=assumption,
+            )
+            claim.evidence_refs.extend(evidence)
+            self._session.add(claim)
+        self._session.flush()
+        warning_codes = _dedupe(warning_codes)
+        log_event(
+            logger,
+            logging.INFO,
+            "stage_extracting_impact_completed",
+            run_id=run.id,
+            impact_claim_count=len(output.impact_claims),
+            warning_codes=",".join(warning_codes) if warning_codes else None,
+        )
+        return warning_codes
 
     def _generate_rca(self, run: AnalysisRun) -> dict | None:
         """Generate ranked RCA Hypotheses from the run's cited evidence.
@@ -245,8 +308,10 @@ class PipelineStageRunner:
         Calls the configured LLMClient (ADR 0011), validates its output against a
         strict JSON schema (ADR 0028) — invalid JSON or a schema violation raises,
         which the executor turns into a stage failure with one retry (ADR 0029) —
-        then persists hypotheses, their impact claims, and remediation items with
-        EvidenceRefs resolved from the actual Artifact lines (ADR 0024). Any Major
+        then persists hypotheses and their remediation items with EvidenceRefs
+        resolved from the actual Artifact lines (ADR 0024). Impact Claims are not
+        produced here; they are run-level incident facts from the earlier stage
+        (ADR 0033). Any Major
         Claim left without supporting evidence is normalized to an assumption and
         counted as an `uncited_claim` warning (ADR 0013); that does not fail the
         run.
@@ -315,18 +380,6 @@ class PipelineStageRunner:
             )
             hypothesis.evidence_refs.extend(supporting)
             hypothesis.evidence_refs.extend(contradicting)
-            for sequence, impact in enumerate(hyp.impact_claims, start=1):
-                evidence = self._resolve_refs(by_id, impact.evidence, "supporting", warning_codes)
-                impact_assumption = not evidence
-                if impact_assumption:
-                    warning_codes.append("uncited_claim")
-                claim = ImpactClaim(
-                    sequence=sequence,
-                    description=impact.description,
-                    assumption=impact_assumption,
-                )
-                claim.evidence_refs.extend(evidence)
-                hypothesis.impact_claims.append(claim)
             for sequence, remediation in enumerate(hyp.remediation_items, start=1):
                 item = ActionItem(sequence=sequence, description=remediation.description)
                 item.evidence_refs.extend(
@@ -448,10 +501,10 @@ class PipelineStageRunner:
     def _run_evidence_refs(self, run: AnalysisRun) -> list[EvidenceRef]:
         """Every EvidenceRef owned by the run, across all four owner types.
 
-        EvidenceRefs hang off timeline events and hypotheses directly, and off
-        impact claims / action items through their parent hypothesis, so this
-        walks each owner's relationship to the run rather than assuming a single
-        join path.
+        EvidenceRefs hang off timeline events, hypotheses, and run-level impact
+        claims directly, and off action items through their parent hypothesis, so
+        this walks each owner's relationship to the run rather than assuming a
+        single join path.
         """
         refs: list[EvidenceRef] = list(
             self._session.scalars(
@@ -468,8 +521,7 @@ class PipelineStageRunner:
         refs += self._session.scalars(
             select(EvidenceRef)
             .join(ImpactClaim, EvidenceRef.impact_claim_id == ImpactClaim.id)
-            .join(Hypothesis, ImpactClaim.hypothesis_id == Hypothesis.id)
-            .where(Hypothesis.run_id == run.id)
+            .where(ImpactClaim.run_id == run.id)
         )
         refs += self._session.scalars(
             select(EvidenceRef)
@@ -600,6 +652,13 @@ class PipelineStageRunner:
                 select(Hypothesis).where(Hypothesis.run_id == run.id).order_by(Hypothesis.rank.asc())
             )
         )
+        impact_claims = list(
+            self._session.scalars(
+                select(ImpactClaim)
+                .where(ImpactClaim.run_id == run.id)
+                .order_by(ImpactClaim.sequence.asc())
+            )
+        )
         warning_codes: list[str] = []
         classified = 0
         for hypothesis in hypotheses:
@@ -607,9 +666,11 @@ class PipelineStageRunner:
                 hypothesis, f"{hypothesis.title}: {hypothesis.summary}", warning_codes
             )
             classified += 1
-            for claim in hypothesis.impact_claims:
-                self._classify_claim(claim, claim.description, warning_codes)
-                classified += 1
+        # Run-level Impact Claims are Major Claims too, classified once per run
+        # rather than per hypothesis (ADR 0033).
+        for claim in impact_claims:
+            self._classify_claim(claim, claim.description, warning_codes)
+            classified += 1
         self._session.flush()
         warning_codes = _dedupe(warning_codes)
         log_event(
@@ -708,8 +769,17 @@ class PipelineStageRunner:
             select(Hypothesis).where(Hypothesis.run_id == run.id)
         )
         for hypothesis in existing:
-            # cascade removes impact claims, action items, and all EvidenceRefs
+            # cascade removes action items and all hypothesis EvidenceRefs
             self._session.delete(hypothesis)
+        self._session.flush()
+
+    def _clear_impact_claims(self, run: AnalysisRun) -> None:
+        existing = self._session.scalars(
+            select(ImpactClaim).where(ImpactClaim.run_id == run.id)
+        )
+        for claim in existing:
+            # cascade removes the impact claim's EvidenceRefs
+            self._session.delete(claim)
         self._session.flush()
 
 

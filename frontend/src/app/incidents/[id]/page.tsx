@@ -16,6 +16,7 @@ import {
   type ExportMode,
   type Hypothesis,
   type HypothesisReviewStatus,
+  type ImpactClaim,
   type Incident,
   type Postmortem,
   type RunStage,
@@ -883,6 +884,9 @@ function RunStatusCard({
         <RunTimeline incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
       )}
       {run.status === "succeeded" && (
+        <RunImpact incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+      )}
+      {run.status === "succeeded" && (
         <RunHypotheses incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
       )}
       {run.status === "succeeded" && (
@@ -1277,37 +1281,6 @@ function HypothesisCard({
           />
         )}
 
-        {hypothesis.impact_claims.length > 0 && (
-          <div className="space-y-1.5">
-            <p className="label">Impact</p>
-            <ul className="space-y-2">
-              {hypothesis.impact_claims.map((claim) => (
-                <li key={claim.id} className="text-sm text-slate-700">
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span>{claim.description}</span>
-                    {claim.assumption && (
-                      <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
-                        assumption
-                      </span>
-                    )}
-                    <ClaimSupportBadge status={claim.support_status} />
-                  </span>
-                  <SupportRationale
-                    status={claim.support_status}
-                    rationale={claim.support_rationale}
-                  />
-                  {claim.evidence_refs.length > 0 && (
-                    <EvidenceRefList
-                      refs={claim.evidence_refs}
-                      onFocusEvidence={onFocusEvidence}
-                    />
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {hypothesis.action_items.length > 0 && (
           <div className="space-y-1.5">
             <p className="label">Remediation</p>
@@ -1635,6 +1608,81 @@ function RunTimeline({
           </li>
         ))}
       </ol>
+    </div>
+  );
+}
+
+function RunImpact({
+  incidentId,
+  runId,
+  onFocusEvidence,
+}: {
+  incidentId: string;
+  runId: string;
+  onFocusEvidence: (ref: EvidenceRef) => void;
+}) {
+  // Impact is a run-level incident fact shown once, independent of how many RCA
+  // hypotheses the run produced (ADR 0033 / PRD user stories 1-2).
+  const impactQuery = useQuery<ImpactClaim[]>({
+    queryKey: ["run-impact", incidentId, runId],
+    queryFn: () => api.listRunImpactClaims(incidentId, runId),
+  });
+
+  if (impactQuery.isPending) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        <Spinner /> Loading impact…
+      </div>
+    );
+  }
+
+  if (impactQuery.isError) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-rose-600">
+        Impact analysis could not be loaded.
+      </div>
+    );
+  }
+
+  const claims = impactQuery.data ?? [];
+  if (claims.length === 0) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        No impact recorded: the included evidence showed no observed incident impact.
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-slate-200">
+      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+        Impact · {claims.length}
+      </p>
+      <ul className="space-y-2 px-5 py-3">
+        {claims.map((claim) => (
+          <li key={claim.id} className="text-sm text-slate-700">
+            <span className="flex flex-wrap items-center gap-2">
+              <span>{claim.description}</span>
+              {claim.assumption && (
+                <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
+                  assumption
+                </span>
+              )}
+              <ClaimSupportBadge status={claim.support_status} />
+            </span>
+            <SupportRationale
+              status={claim.support_status}
+              rationale={claim.support_rationale}
+            />
+            {claim.evidence_refs.length > 0 && (
+              <EvidenceRefList
+                refs={claim.evidence_refs}
+                onFocusEvidence={onFocusEvidence}
+              />
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

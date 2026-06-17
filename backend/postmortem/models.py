@@ -115,6 +115,12 @@ class AnalysisRun(Base):
     stage_events: Mapped[list["RunStageEvent"]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="RunStageEvent.sequence"
     )
+    # Impact Claims are run-level incident facts (ADR 0033): produced once per run
+    # by the "extracting incident facts" stage and independent of how many RCA
+    # Hypotheses the causal stage later generates.
+    impact_claims: Mapped[list["ImpactClaim"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="ImpactClaim.sequence"
+    )
 
 
 class RunArtifact(Base):
@@ -254,8 +260,9 @@ class Hypothesis(Base):
     so it carries supporting EvidenceRefs or is normalized to ``assumption=true``
     with an `uncited_claim` warning (ADR 0013). Contradicting evidence, unknowns,
     and validation steps are persisted so a reviewer can judge it like an engineer
-    would, and impact claims + remediation items hang off the hypothesis context
-    (PRD stage 3). Reviewers accept/reject without rewriting the generated claims
+    would, and remediation items hang off the hypothesis context (PRD stage 3).
+    Impact Claims are no longer owned by a hypothesis — they are run-level incident
+    facts (ADR 0033). Reviewers accept/reject without rewriting the generated claims
     (ADR 0016); ``review_status`` records that decision separately.
     """
 
@@ -292,11 +299,6 @@ class Hypothesis(Base):
         back_populates="hypothesis",
         cascade="all, delete-orphan",
         order_by="(EvidenceRef.role, EvidenceRef.line_start)",
-    )
-    impact_claims: Mapped[list["ImpactClaim"]] = relationship(
-        back_populates="hypothesis",
-        cascade="all, delete-orphan",
-        order_by="ImpactClaim.sequence",
     )
     action_items: Mapped[list["ActionItem"]] = relationship(
         back_populates="hypothesis",
@@ -336,18 +338,21 @@ class ReviewerNote(Base):
 
 
 class ImpactClaim(Base):
-    """An evidence-backed statement of incident impact tied to a hypothesis.
+    """A run-level, evidence-backed statement of incident impact (ADR 0033).
 
-    Impact is a Major Claim (severity/customer impact must not be invented, PRD
-    user story 15), so it follows the same citation-or-assumption contract as a
-    hypothesis (ADR 0013).
+    Impact is an incident fact, not a causal interpretation: it describes observed
+    user/system consequences once per Analysis Run and is independent of any RCA
+    Hypothesis (PRD user stories 1-2). It is produced by the "extracting incident
+    facts" stage before causal analysis begins. Impact is a Major Claim
+    (severity/customer impact must not be invented), so it follows the same
+    citation-or-assumption contract as a hypothesis (ADR 0013).
     """
 
     __tablename__ = "impact_claims"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    hypothesis_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("hypotheses.id", ondelete="CASCADE"), nullable=False, index=True
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -358,7 +363,7 @@ class ImpactClaim(Base):
     support_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
-    hypothesis: Mapped[Hypothesis] = relationship(back_populates="impact_claims")
+    run: Mapped[AnalysisRun] = relationship(back_populates="impact_claims")
     evidence_refs: Mapped[list["EvidenceRef"]] = relationship(
         back_populates="impact_claim",
         cascade="all, delete-orphan",

@@ -178,7 +178,7 @@ def test_timeline_extraction_is_idempotent_across_retry(fresh_session):
     real = PipelineStageRunner(fresh_session)
 
     def flaky(stage, attempt, run):
-        if stage == "extracting_timeline_candidates":
+        if stage == "extracting_incident_facts":
             outcome = real(stage, attempt, run)  # writes the events
             if attempt == 1:
                 raise RuntimeError("boom after partial write")

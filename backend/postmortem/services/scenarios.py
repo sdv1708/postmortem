@@ -12,6 +12,7 @@ from ..scenarios import (
     LoadedScenario,
     ScenarioNotFoundError,
     ScenarioReplayClaimSupportVerifier,
+    ScenarioReplayIncidentFactExtractor,
     ScenarioReplayLLMClient,
     list_scenarios,
     load_scenario,
@@ -95,11 +96,18 @@ class ScenarioSeedService:
         # stage still validates the output and resolves snippets from the stored
         # lines (ADR 0024); claim support uses the scenario's replay verifier.
         rca_json = json.dumps(resolve_replay_rca(scenario.rca_replay, source_name_to_id))
+        # Resolve the run-level incident-facts replay the same way so stage 2
+        # produces the scenario's impact claims through its own Reasoning Role
+        # (ADR 0033), leaving the RCA replay client consulted once for stage 3.
+        incident_facts = resolve_replay_rca(scenario.incident_facts_replay, source_name_to_id)
         run = AnalysisService(
             self._session,
             llm_client=ScenarioReplayLLMClient(scenario.id, rca_json),
             claim_support_verifier=ScenarioReplayClaimSupportVerifier(
                 scenario.claim_support_overrides
+            ),
+            incident_fact_extractor=ScenarioReplayIncidentFactExtractor(
+                scenario.id, incident_facts
             ),
         ).start_run(incident.id, AnalysisRunCreate(), execute_inline=execute_inline)
         log_event(

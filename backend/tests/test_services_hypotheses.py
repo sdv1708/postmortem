@@ -5,13 +5,14 @@ import json
 import pytest
 
 from postmortem.config import Settings
+from postmortem.incident_facts import FactsImpactClaim
 from postmortem.llm import (
     FakeLLMClient,
     OfflineLLMClient,
     OpenAICompatibleLLMClient,
     build_llm_client,
 )
-from postmortem.rca import PROMPT_VERSION
+from postmortem.rca import PROMPT_VERSION, RcaEvidenceRef
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate, ReviewerNoteCreate
 from postmortem.services import (
     AnalysisService,
@@ -21,7 +22,7 @@ from postmortem.services import (
     hypothesis_read,
 )
 
-from tests._fakes import FakeClaimSupportVerifier
+from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
 
 
 def _run_with_hypotheses(session):
@@ -47,14 +48,6 @@ def _run_with_hypotheses(session):
                     "contradicting_evidence": [
                         {"artifact_id": artifact.id, "line_start": 2, "line_end": 2}
                     ],
-                    "impact_claims": [
-                        {
-                            "description": "Customers saw errors",
-                            "evidence": [
-                                {"artifact_id": artifact.id, "line_start": 3, "line_end": 3}
-                            ],
-                        }
-                    ],
                     "remediation_items": [{"description": "Roll back", "evidence": []}],
                 },
                 {
@@ -67,10 +60,17 @@ def _run_with_hypotheses(session):
             ]
         }
     )
+    impact = [
+        FactsImpactClaim(
+            description="Customers saw errors",
+            evidence=[RcaEvidenceRef(artifact_id=artifact.id, line_start=3, line_end=3)],
+        )
+    ]
     service = AnalysisService(
         session,
         llm_client=FakeLLMClient([payload], label="fake-model"),
         claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(impact),
     )
     run = service.start_run(incident.id, AnalysisRunCreate())
     session.commit()
@@ -91,16 +91,22 @@ def test_list_hypotheses_returns_ranked_with_split_evidence(fresh_session):
     assert len(shaped["contradicting_evidence"]) == 1
     assert shaped["supporting_evidence"][0].role == "supporting"
     assert shaped["contradicting_evidence"][0].role == "contradicting"
-    assert shaped["impact_claims"][0]["description"] == "Customers saw errors"
     assert shaped["action_items"][0]["description"] == "Roll back"
     assert shaped["review_status"] == "proposed"
     assert shaped["reviewer_notes"] == []
+    # Impact is run-level now (ADR 0033): it is not nested under the hypothesis.
+    assert "impact_claims" not in shaped
+    impact = service.list_impact_claims(incident.id, run.id)
+    assert [c.description for c in impact] == ["Customers saw errors"]
 
 
 def test_review_records_decision_without_rewriting_claims(fresh_session):
     service, incident, run = _run_with_hypotheses(fresh_session)
     target = service.list_hypotheses(incident.id, run.id)[0]
     before = hypothesis_read(target)
+    impact_before = [
+        (c.id, c.description) for c in service.list_impact_claims(incident.id, run.id)
+    ]
 
     accepted = service.review_hypothesis(incident.id, run.id, target.id, "accepted")
     fresh_session.commit()
@@ -120,9 +126,12 @@ def test_review_records_decision_without_rewriting_claims(fresh_session):
     assert [r.id for r in after["supporting_evidence"]] == [
         r.id for r in before["supporting_evidence"]
     ]
-    assert [c["description"] for c in after["impact_claims"]] == [
-        c["description"] for c in before["impact_claims"]
+    # Run-level impact is independent of hypothesis review decisions (ADR 0033 /
+    # PRD user stories 1-2): the same impact claims remain after accept/reject.
+    impact_after = [
+        (c.id, c.description) for c in service.list_impact_claims(incident.id, run.id)
     ]
+    assert impact_after == impact_before
 
 
 def test_reviewer_note_records_context_without_rewriting_claims(fresh_session):

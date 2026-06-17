@@ -228,8 +228,10 @@ class EvaluationRunner:
             HypothesisView(
                 rank=h.rank,
                 support_status=h.support_status,
+                # Impact Claims are run-level now (ADR 0033), so a hypothesis's
+                # citation count is its own supporting/contradicting evidence plus
+                # its remediation items.
                 citation_count=len(h.evidence_refs)
-                + sum(len(claim.evidence_refs) for claim in h.impact_claims)
                 + sum(len(item.evidence_refs) for item in h.action_items),
             )
             for h in hypotheses
@@ -284,8 +286,7 @@ class EvaluationRunner:
         refs += session.scalars(
             select(EvidenceRef)
             .join(ImpactClaim, EvidenceRef.impact_claim_id == ImpactClaim.id)
-            .join(Hypothesis, ImpactClaim.hypothesis_id == Hypothesis.id)
-            .where(Hypothesis.run_id == run.id)
+            .where(ImpactClaim.run_id == run.id)
         )
         refs += session.scalars(
             select(EvidenceRef)

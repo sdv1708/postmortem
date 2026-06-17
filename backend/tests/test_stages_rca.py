@@ -8,7 +8,7 @@ from postmortem.retrieval import RetrievalResult
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 
-from tests._fakes import FakeClaimSupportVerifier
+from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
 
 
 AMBIGUOUS_BODY = (
@@ -43,7 +43,7 @@ def _rca_event(session, run_id):
         session.query(RunStageEvent)
         .filter(
             RunStageEvent.run_id == run_id,
-            RunStageEvent.stage == "generating_rca_hypotheses",
+            RunStageEvent.stage == "analyzing_causal_hypotheses",
         )
         .order_by(RunStageEvent.sequence.desc())
         .first()
@@ -67,14 +67,6 @@ def _two_competing_hypotheses(artifact_id: str) -> str:
                     ],
                     "unknowns": ["Whether v184 touched the pool config"],
                     "validation_steps": ["Diff v183..v184 for pool settings"],
-                    "impact_claims": [
-                        {
-                            "description": "API returned 500s to users",
-                            "evidence": [
-                                {"artifact_id": artifact_id, "line_start": 3, "line_end": 3}
-                            ],
-                        }
-                    ],
                     "remediation_items": [
                         {"description": "Roll back v184", "evidence": []}
                     ],
@@ -88,7 +80,6 @@ def _two_competing_hypotheses(artifact_id: str) -> str:
                     "contradicting_evidence": [],
                     "unknowns": ["Cache hit-rate before the incident"],
                     "validation_steps": ["Check cache memory metrics at 14:33"],
-                    "impact_claims": [],
                     "remediation_items": [],
                 },
             ]
@@ -106,10 +97,13 @@ def test_ambiguous_evidence_yields_multiple_ranked_hypotheses(fresh_session):
         label="fake-model",
         usage={"total_tokens": 321},
     )
-    # Inject a fake claim-support verifier so stage 6 does not consume seeded RCA
-    # responses; this test only asserts RCA generation behavior.
+    # Inject fakes so stage 2 (incident facts) and stage 6 (claim support) do not
+    # consume the seeded RCA response; this test only asserts RCA generation.
     run = AnalysisService(
-        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -134,8 +128,8 @@ def test_ambiguous_evidence_yields_multiple_ranked_hypotheses(fresh_session):
     assert contradicting[0].line_start == 4
     assert top.assumption is False
 
-    assert [c.description for c in top.impact_claims] == ["API returned 500s to users"]
-    assert top.impact_claims[0].evidence_refs[0].line_start == 3
+    # Impact claims are no longer owned by a hypothesis (ADR 0033); the RCA stage
+    # only persists the hypothesis's own evidence and remediation.
     assert [a.description for a in top.action_items] == ["Roll back v184"]
 
     # Usage from the provider is recorded on the stage event (ADR 0021).
@@ -185,6 +179,7 @@ def test_rca_generation_uses_injected_retrieval_strategy(fresh_session):
         llm_client=fake,
         claim_support_verifier=FakeClaimSupportVerifier(),
         retrieval_strategy=retrieval,
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -203,11 +198,12 @@ def test_schema_invalid_output_fails_stage_without_corrupting_prior_outputs(fres
     fresh_session.commit()
 
     # Malformed on every attempt (covers the single retry too): the stage must
-    # fail rather than persist corrupt output (ADR 0028).
+    # fail rather than persist corrupt output (ADR 0028). A fake extractor keeps
+    # stage 2 healthy so the malformed JSON is exercised by the RCA stage.
     fake = FakeLLMClient(lambda system, user: "{ not valid json")
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    run = AnalysisService(
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
     assert run.status == "failed"
@@ -244,9 +240,9 @@ def test_unknown_output_field_fails_stage(fresh_session):
         }
     )
     fake = FakeLLMClient(lambda system, user: typo_field)
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    run = AnalysisService(
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
     assert run.status == "failed"
@@ -266,17 +262,14 @@ def test_uncited_hypothesis_normalized_to_assumption_with_warning(fresh_session)
                     "title": "Vague suspicion with no citation",
                     "summary": "Something in the deploy caused it, but we cannot cite a line.",
                     "supporting_evidence": [],
-                    "impact_claims": [
-                        {"description": "Users were affected", "evidence": []}
-                    ],
                 }
             ]
         }
     )
     fake = FakeLLMClient([uncited])
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    run = AnalysisService(
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
     assert run.status == "succeeded"
@@ -284,13 +277,9 @@ def test_uncited_hypothesis_normalized_to_assumption_with_warning(fresh_session)
     # An uncited Major Claim is normalized to an assumption rather than asserted
     # as fact (ADR 0013); it does not fail the run.
     assert hyp.assumption is True
-    assert hyp.impact_claims[0].assumption is True
 
     event = _rca_event(fresh_session, run.id)
     assert "uncited_claim" in event.warning_codes
-    # Warning codes are deduped even though both the hypothesis and its impact
-    # claim were uncited.
-    assert event.warning_codes.count("uncited_claim") == 1
     # artifact remains untouched as the citation source of truth.
     assert artifact.body == AMBIGUOUS_BODY
 
@@ -317,7 +306,10 @@ def test_invalid_citations_are_dropped_and_flagged(fresh_session):
     )
     fake = FakeLLMClient([bad_ref])
     run = AnalysisService(
-        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -351,9 +343,9 @@ def test_foreign_artifact_citation_becomes_uncited_assumption(fresh_session):
         }
     )
     fake = FakeLLMClient([foreign_ref])
-    run = AnalysisService(fresh_session, llm_client=fake).start_run(
-        incident.id, AnalysisRunCreate()
-    )
+    run = AnalysisService(
+        fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor()
+    ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
     assert run.status == "succeeded"
@@ -394,11 +386,14 @@ def test_rca_generation_is_idempotent_across_retry(fresh_session):
         ]
     )
     real = PipelineStageRunner(
-        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     )
 
     def flaky(stage, attempt, run):
-        if stage == "generating_rca_hypotheses":
+        if stage == "analyzing_causal_hypotheses":
             outcome = real(stage, attempt, run)  # persists hypotheses
             if attempt == 1:
                 raise RuntimeError("boom after persisting hypotheses")

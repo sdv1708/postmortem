@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 
+from postmortem.incident_facts import FactsImpactClaim
 from postmortem.llm import FakeLLMClient
-from postmortem.models import Hypothesis, RunStageEvent
+from postmortem.models import Hypothesis, ImpactClaim, RunStageEvent
+from postmortem.rca import RcaEvidenceRef
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService, StagedRunExecutor
 from postmortem.services.stages import PipelineStageRunner
@@ -14,7 +16,7 @@ from postmortem.verification import (
     ClaimSupportStatus,
 )
 
-from tests._fakes import FakeClaimSupportVerifier
+from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
 
 
 BODY = "deploy v184 rolled out\napi 500 rate climbing\ncache evicted under pressure"
@@ -40,14 +42,6 @@ def _rca_json(artifact_id: str) -> str:
                     "supporting_evidence": [
                         {"artifact_id": artifact_id, "line_start": 1, "line_end": 1}
                     ],
-                    "impact_claims": [
-                        {
-                            "description": "Users saw 500s",
-                            "evidence": [
-                                {"artifact_id": artifact_id, "line_start": 2, "line_end": 2}
-                            ],
-                        }
-                    ],
                 },
                 {
                     "title": "Cache pressure cascaded",
@@ -63,6 +57,24 @@ def _rca_json(artifact_id: str) -> str:
                 },
             ]
         }
+    )
+
+
+def _impact_facts(artifact_id: str) -> list[FactsImpactClaim]:
+    # Run-level impact is produced by stage 2 now (ADR 0033), not nested in RCA.
+    return [
+        FactsImpactClaim(
+            description="Users saw 500s",
+            evidence=[RcaEvidenceRef(artifact_id=artifact_id, line_start=2, line_end=2)],
+        )
+    ]
+
+
+def _impact(session, run_id):
+    return list(
+        session.query(ImpactClaim)
+        .filter(ImpactClaim.run_id == run_id)
+        .order_by(ImpactClaim.sequence)
     )
 
 
@@ -107,7 +119,10 @@ def test_flagging_classifies_each_major_claim(fresh_session):
     verifier = FakeClaimSupportVerifier(_judge)
     fake = FakeLLMClient([_rca_json(artifact.id)], label="fake-model")
     run = AnalysisService(
-        fresh_session, llm_client=fake, claim_support_verifier=verifier
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=verifier,
+        incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -117,11 +132,12 @@ def test_flagging_classifies_each_major_claim(fresh_session):
 
     # Cited claims are classified by the semantic verifier (ADR 0014).
     assert by_title["Deploy regressed the pool"].support_status == "supported"
-    assert by_title["Deploy regressed the pool"].impact_claims[0].support_status == "partial"
-    assert by_title["Deploy regressed the pool"].impact_claims[0].support_rationale == (
-        "Correlated, not causal."
-    )
     assert by_title["Cache pressure cascaded"].support_status == "unsupported"
+
+    # The run-level impact claim is classified too (ADR 0033).
+    impact = _impact(fresh_session, run.id)
+    assert impact[0].support_status == "partial"
+    assert impact[0].support_rationale == "Correlated, not causal."
 
     # The uncited hypothesis is an assumption: marked unsupported without ever
     # calling the model (ADR 0013).
@@ -151,6 +167,7 @@ def test_flagging_does_not_treat_broken_citations_as_support(fresh_session):
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         verifier=_BrokenCitationVerifier(),
         claim_support_verifier=claim_support,
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     )
     run = AnalysisService(
         fresh_session, executor=StagedRunExecutor(stage_runner=runner)
@@ -175,7 +192,10 @@ def test_all_supported_emits_no_warnings(fresh_session):
     # guess" remains unsupported.
     fake = FakeLLMClient([_rca_json(artifact.id)], label="fake-model")
     run = AnalysisService(
-        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -198,6 +218,7 @@ def test_run_metadata_records_injected_claim_support_verifier_version(fresh_sess
         fresh_session,
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=verifier,
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -211,7 +232,10 @@ def test_flagging_is_idempotent_across_retry(fresh_session):
 
     verifier = FakeClaimSupportVerifier(_judge)
     real = PipelineStageRunner(
-        fresh_session, llm_client=FakeLLMClient([_rca_json(artifact.id)]), claim_support_verifier=verifier
+        fresh_session,
+        llm_client=FakeLLMClient([_rca_json(artifact.id)]),
+        claim_support_verifier=verifier,
+        incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
     )
 
     def flaky(stage, attempt, run):

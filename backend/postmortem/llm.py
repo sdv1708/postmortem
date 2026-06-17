@@ -91,10 +91,13 @@ class FakeLLMClient:
 class OfflineLLMClient:
     """Safe default when no provider is configured (no API key).
 
-    Returns a schema-valid but empty generation so a run still completes its six
-    stages rather than failing for lack of a model. Real runs configure a
-    provider and never hit this; tests inject seeded fakes. It exists so local
-    dev and the deterministic timeline tests do not depend on a live model.
+    Returns an empty JSON object so a run still completes its six stages rather
+    than failing for lack of a model. ``{}`` validates as empty against every
+    strict stage contract whose collections default to empty (RCA hypotheses,
+    incident-facts impact claims), so neither the incident-facts stage nor the
+    RCA stage produces output. Real runs configure a provider and never hit this;
+    tests inject seeded fakes. It exists so local dev and the deterministic
+    timeline tests do not depend on a live model.
     """
 
     @property
@@ -103,7 +106,7 @@ class OfflineLLMClient:
 
     def complete(self, *, system: str, user: str) -> LLMResponse:
         logger.info("offline_llm_completion")
-        return LLMResponse(text=json.dumps({"hypotheses": []}))
+        return LLMResponse(text=json.dumps({}))
 
 
 class OpenAICompatibleLLMClient:

@@ -12,8 +12,8 @@ ArtifactSourceType = Literal["incident_notes", "logs", "stack_trace", "deploymen
 RunStatus = Literal["queued", "running", "succeeded", "failed"]
 RunStage = Literal[
     "normalizing_evidence",
-    "extracting_timeline_candidates",
-    "generating_rca_hypotheses",
+    "extracting_incident_facts",
+    "analyzing_causal_hypotheses",
     "verifying_citations",
     "drafting_postmortem",
     "flagging_unsupported_claims",
@@ -188,10 +188,12 @@ class TimelineEventRead(BaseModel):
 
 
 class ImpactClaimRead(BaseModel):
-    """An evidence-backed impact statement tied to a hypothesis (ADR 0013).
+    """A run-level, evidence-backed impact statement (ADR 0013 / 0033).
 
-    ``support_status`` carries the semantic claim-support judgment so the Review
-    Surface can separate supported impact from partial/unsupported (ADR 0014).
+    Impact is an incident fact owned by the Analysis Run, shown once regardless of
+    how many RCA Hypotheses exist. ``support_status`` carries the semantic
+    claim-support judgment so the Review Surface can separate supported impact
+    from partial/unsupported (ADR 0014).
     """
 
     id: str
@@ -246,7 +248,6 @@ class HypothesisRead(BaseModel):
     validation_steps: list[str]
     supporting_evidence: list[EvidenceRefRead]
     contradicting_evidence: list[EvidenceRefRead]
-    impact_claims: list[ImpactClaimRead]
     action_items: list[ActionItemRead]
     reviewer_notes: list[ReviewerNoteRead] = Field(default_factory=list)
 
@@ -272,9 +273,10 @@ class PostmortemRead(BaseModel):
     """The structured Postmortem for the Review Surface (ADR 0012).
 
     The composed ``summary`` and ``lessons_learned`` come from the Postmortem
-    row; ``timeline`` and ``hypotheses`` (with their nested impact analysis and
-    remediation) are composed from the run's existing structured rows so the
-    citation source of truth stays the EvidenceRefs (ADR 0024).
+    row; ``timeline``, run-level ``impact_claims``, and ``hypotheses`` (with their
+    nested remediation) are composed from the run's existing structured rows so
+    the citation source of truth stays the EvidenceRefs (ADR 0024). Impact is a
+    run-level incident fact shown once, independent of hypothesis count (ADR 0033).
     """
 
     id: str
@@ -292,6 +294,7 @@ class PostmortemRead(BaseModel):
     next_validation_steps: list[str]
     composer_version: str
     timeline: list[TimelineEventRead]
+    impact_claims: list[ImpactClaimRead]
     hypotheses: list[HypothesisRead]
     created_at: datetime
 

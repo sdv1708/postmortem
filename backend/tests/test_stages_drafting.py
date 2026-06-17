@@ -8,7 +8,11 @@ from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService, StagedRunExecutor
 from postmortem.services.stages import PipelineStageRunner
 
-from tests._fakes import FakeClaimSupportVerifier, FakePostmortemComposer
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeIncidentFactExtractor,
+    FakePostmortemComposer,
+)
 
 
 BODY = "deploy v184 rolled out\napi 500 rate climbing\ncache evicted under pressure"
@@ -33,14 +37,6 @@ def _rca_json(artifact_id: str) -> str:
                     "summary": "v184 preceded the spike.",
                     "supporting_evidence": [
                         {"artifact_id": artifact_id, "line_start": 1, "line_end": 1}
-                    ],
-                    "impact_claims": [
-                        {
-                            "description": "Users saw 500s",
-                            "evidence": [
-                                {"artifact_id": artifact_id, "line_start": 2, "line_end": 2}
-                            ],
-                        }
                     ],
                     "remediation_items": [{"description": "Add a pool alert"}],
                     "unknowns": ["Was the pool size changed in v184?"],
@@ -67,6 +63,7 @@ def _start(session, incident_id, *, composer=None, verifier=None):
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=verifier or FakeClaimSupportVerifier(),
         postmortem_composer=composer,
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     ).start_run(incident_id, AnalysisRunCreate())
 
 
@@ -124,6 +121,7 @@ def test_drafting_refuses_when_the_model_returns_no_hypotheses(fresh_session):
         fresh_session,
         llm_client=FakeLLMClient(['{"hypotheses": []}']),
         claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -152,6 +150,7 @@ def test_drafting_introduces_no_new_factual_claims(fresh_session):
         fresh_session,
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     )
 
     def spy(stage, attempt, run):
@@ -208,6 +207,7 @@ def test_drafting_is_idempotent_across_retry(fresh_session):
         fresh_session,
         llm_client=FakeLLMClient([_rca_json(artifact.id)]),
         claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(),
     )
 
     def flaky(stage, attempt, run):

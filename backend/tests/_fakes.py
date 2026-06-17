@@ -4,6 +4,7 @@ from typing import Callable
 
 from postmortem.drafting import PostmortemComposerContext, PostmortemDraft
 from postmortem.evaluation import JudgeInput, JudgeResult
+from postmortem.incident_facts import FactsImpactClaim, IncidentFactsOutput
 from postmortem.verification import (
     ClaimSupportJudgment,
     ClaimSupportStatus,
@@ -45,6 +46,28 @@ class FakePostmortemJudge:
             rationale=self._rationale,
             version=self.version,
         )
+
+
+class FakeIncidentFactExtractor:
+    """Deterministic incident-facts extractor for tests (ADR 0009 / 0033).
+
+    Proves the stage-2 extractor boundary is real without a live model and,
+    crucially, lets RCA-focused pipeline tests run stage 2 without consuming the
+    LLM responses they seeded for the RCA stage. By default it extracts no impact
+    claims; pass ``impact_claims`` (a list of ``(description, [(source_name?,
+    artifact_id, line_start, line_end)])``)-shaped fixtures, or pre-built
+    ``FactsImpactClaim`` objects, to drive run-level impact.
+    """
+
+    version = "fake-incident-facts-0"
+
+    def __init__(self, impact_claims: list[FactsImpactClaim] | None = None) -> None:
+        self._impact_claims = impact_claims or []
+        self.calls = 0
+
+    def extract(self, *, artifacts, timeline_events) -> IncidentFactsOutput:
+        self.calls += 1
+        return IncidentFactsOutput(impact_claims=list(self._impact_claims))
 
 
 class FakeClaimSupportVerifier:

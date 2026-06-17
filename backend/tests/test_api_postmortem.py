@@ -4,11 +4,13 @@ import json
 
 from fastapi.testclient import TestClient
 
+from postmortem.incident_facts import FactsImpactClaim
 from postmortem.llm import FakeLLMClient
+from postmortem.rca import RcaEvidenceRef
 from postmortem.services import AnalysisService
 from postmortem.verification import ClaimSupportJudgment, ClaimSupportStatus
 
-from tests._fakes import FakeClaimSupportVerifier
+from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
 
 
 def _create_incident(client: TestClient, auth_headers) -> str:
@@ -57,14 +59,6 @@ def _seed_drafted_run(app, client, auth_headers):
                     "supporting_evidence": [
                         {"artifact_id": artifact_id, "line_start": 1, "line_end": 1}
                     ],
-                    "impact_claims": [
-                        {
-                            "description": "Customers errored",
-                            "evidence": [
-                                {"artifact_id": artifact_id, "line_start": 2, "line_end": 2}
-                            ],
-                        }
-                    ],
                     "remediation_items": [{"description": "Roll back the deploy"}],
                     "unknowns": ["why did alpha happen"],
                 },
@@ -79,12 +73,19 @@ def _seed_drafted_run(app, client, auth_headers):
             ]
         }
     )
+    impact = [
+        FactsImpactClaim(
+            description="Customers errored",
+            evidence=[RcaEvidenceRef(artifact_id=artifact_id, line_start=2, line_end=2)],
+        )
+    ]
     session = app.state.session_factory()
     try:
         run = AnalysisService(
             session,
             llm_client=FakeLLMClient([payload], label="fake-model"),
             claim_support_verifier=FakeClaimSupportVerifier(_judge),
+            incident_fact_extractor=FakeIncidentFactExtractor(impact),
         ).execute_run(run_id, commit_progress=True)
         assert run.status == "succeeded"
         session.commit()
@@ -110,7 +111,9 @@ def test_get_postmortem_returns_structured_document(app, client: TestClient, aut
     # The structured read is the full source of truth — it includes all
     # hypotheses (the clean/audit split is an export concern, not a read concern).
     assert {h["title"] for h in body["hypotheses"]} == {"Primary cause", "Alternative cause"}
-    assert body["hypotheses"][0]["impact_claims"][0]["description"] == "Customers errored"
+    # Impact is a run-level section shown once, not nested per hypothesis (ADR 0033).
+    assert "impact_claims" not in body["hypotheses"][0]
+    assert [c["description"] for c in body["impact_claims"]] == ["Customers errored"]
 
 
 def _seed_refused_run(app, client, auth_headers):
@@ -122,6 +125,7 @@ def _seed_refused_run(app, client, auth_headers):
             session,
             llm_client=FakeLLMClient(['{"hypotheses": []}'], label="fake-model"),
             claim_support_verifier=FakeClaimSupportVerifier(),
+            incident_fact_extractor=FakeIncidentFactExtractor(),
         ).execute_run(run_id, commit_progress=True)
         assert run.status == "succeeded"
         session.commit()

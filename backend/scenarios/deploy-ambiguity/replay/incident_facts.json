@@ -1,0 +1,16 @@
+{
+  "impact_claims": [
+    {
+      "description": "HTTP 500 errors reached 22% of requests on checkout and cart endpoints",
+      "evidence": [
+        {"source_name": "api-gateway.log", "line_start": 5, "line_end": 5}
+      ]
+    },
+    {
+      "description": "Database connection acquisition waits exceeded 3 seconds during the incident",
+      "evidence": [
+        {"source_name": "db-pool.log", "line_start": 4, "line_end": 4}
+      ]
+    }
+  ]
+}

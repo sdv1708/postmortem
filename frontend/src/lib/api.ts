@@ -24,8 +24,8 @@ export type RunStatus = "queued" | "running" | "succeeded" | "failed";
 
 export type RunStage =
   | "normalizing_evidence"
-  | "extracting_timeline_candidates"
-  | "generating_rca_hypotheses"
+  | "extracting_incident_facts"
+  | "analyzing_causal_hypotheses"
   | "verifying_citations"
   | "drafting_postmortem"
   | "flagging_unsupported_claims";
@@ -37,8 +37,8 @@ export type StageStatus = "running" | "succeeded" | "failed";
 // produced an event for a later stage.
 export const RUN_STAGES: ReadonlyArray<{ stage: RunStage; label: string }> = [
   { stage: "normalizing_evidence", label: "Normalizing evidence" },
-  { stage: "extracting_timeline_candidates", label: "Extracting timeline candidates" },
-  { stage: "generating_rca_hypotheses", label: "Generating RCA hypotheses" },
+  { stage: "extracting_incident_facts", label: "Extracting incident facts" },
+  { stage: "analyzing_causal_hypotheses", label: "Analyzing causal hypotheses" },
   { stage: "verifying_citations", label: "Verifying citations" },
   { stage: "drafting_postmortem", label: "Drafting postmortem" },
   { stage: "flagging_unsupported_claims", label: "Flagging unsupported claims" },
@@ -187,7 +187,6 @@ export interface Hypothesis {
   validation_steps: string[];
   supporting_evidence: EvidenceRef[];
   contradicting_evidence: EvidenceRef[];
-  impact_claims: ImpactClaim[];
   action_items: ActionItem[];
   reviewer_notes: ReviewerNote[];
 }
@@ -203,8 +202,10 @@ export interface TimelineEvent {
 }
 
 // The structured Postmortem composed by the drafting stage (ADR 0012). The
-// summary and lessons come from the Postmortem itself; timeline and hypotheses
-// (with nested impact + remediation) are composed from the run's structured rows.
+// summary and lessons come from the Postmortem itself; timeline, run-level
+// impact, and hypotheses (with nested remediation) are composed from the run's
+// structured rows. Impact is a run-level incident fact shown once, independent
+// of hypothesis count (ADR 0033).
 export interface Postmortem {
   id: string;
   run_id: string;
@@ -219,6 +220,7 @@ export interface Postmortem {
   next_validation_steps: string[];
   composer_version: string;
   timeline: TimelineEvent[];
+  impact_claims: ImpactClaim[];
   hypotheses: Hypothesis[];
   created_at: string;
 }
@@ -428,6 +430,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  },
+
+  listRunImpactClaims(incidentId: string, runId: string): Promise<ImpactClaim[]> {
+    return request<ImpactClaim[]>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/impact`,
+    );
   },
 
   listRunHypotheses(incidentId: string, runId: string): Promise<Hypothesis[]> {
