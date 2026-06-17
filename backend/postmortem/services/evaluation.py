@@ -233,6 +233,7 @@ class EvaluationRunner:
                 # its remediation items.
                 citation_count=len(h.evidence_refs)
                 + sum(len(item.evidence_refs) for item in h.action_items),
+                advisory_rank=h.advisory_rank,
             )
             for h in hypotheses
         )

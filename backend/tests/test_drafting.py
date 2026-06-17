@@ -152,11 +152,14 @@ def _ref(snippet: str, line: int = 1) -> EvidenceRefRead:
 
 
 def _hypothesis(*, rank, title, summary, support_status, assumption=False, rationale=None,
-                actions=None, origin="initial") -> HypothesisRead:
+                actions=None, origin="initial", advisory_rank=None,
+                leading_but_critically_challenged=False) -> HypothesisRead:
     return HypothesisRead(
         id=f"hyp-{rank}",
         run_id="run-1",
         rank=rank,
+        advisory_rank=advisory_rank,
+        leading_but_critically_challenged=leading_but_critically_challenged,
         origin=origin,
         title=title,
         summary=summary,
@@ -251,6 +254,34 @@ def test_audit_export_includes_unsupported_claims_labeled():
     assert "Sunspot interference theory" in markdown
     assert "No supporting evidence was cited." in markdown
     assert "_(support: unsupported)_" in markdown
+
+
+def test_export_numbers_hypotheses_by_advisory_rank_and_labels_leader():
+    # A critically challenged advisory leader is numbered by its advisory rank and
+    # labeled wherever it is rendered, so the ranking is never read as confidence
+    # (ADR 0037, PRD #26 user stories 21-22).
+    leader = _hypothesis(
+        rank=2,
+        title="Cache eviction shifted read load",
+        summary="A cache eviction pushed reads onto the primary database.",
+        support_status="supported",
+        advisory_rank=1,
+        leading_but_critically_challenged=True,
+    )
+    runner_up = _hypothesis(
+        rank=1,
+        title="Deploy v184 regressed the pool",
+        summary="The v184 deploy preceded the error spike.",
+        support_status="supported",
+        advisory_rank=2,
+    )
+    postmortem = _postmortem()
+    postmortem.hypotheses = [leader, runner_up]
+    markdown = render_markdown(postmortem, ExportMode.CLEAN)
+    # Numbered by advisory rank (leader is builder #2 but advisory #1).
+    assert "### 1. Cache eviction shifted read load" in markdown
+    assert "### 2. Deploy v184 regressed the pool" in markdown
+    assert "_(Leading but critically challenged)_" in markdown
 
 
 def test_provisional_label_present_in_clean_and_audit_exports():

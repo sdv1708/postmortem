@@ -294,6 +294,20 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         {"origin": "VARCHAR(16) NOT NULL DEFAULT 'initial'"},
     )
 
+    # Advisory Hypothesis Ranking added in slice #31 (ADR 0037): existing
+    # hypotheses have no advisory rank or rationale until a run re-ranks them, so
+    # both are nullable. ``rank`` continues to hold the original builder order.
+    # Nullable INTEGER/JSON ddl is valid on both SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "hypotheses",
+        {
+            "advisory_rank": "INTEGER",
+            "ranking_rationale": "JSON",
+        },
+    )
+
     # Re-own Impact Claims from a hypothesis to the run (ADR 0033). Runs after the
     # support columns exist so the SQLite table rebuild can copy them.
     _migrate_impact_claims_to_run_level(engine, inspect(engine))

@@ -12,6 +12,7 @@ from ..drafting import PostmortemComposer
 from ..falsification import Falsifier
 from ..incident_facts import IncidentFactExtractor
 from ..llm import LLMClient
+from ..ranking import AdvisoryRanker
 from ..logging import log_event
 from ..models import (
     AnalysisRun,
@@ -87,6 +88,7 @@ class AnalysisService:
         retrieval_strategy: RetrievalStrategy | None = None,
         incident_fact_extractor: IncidentFactExtractor | None = None,
         falsifier: Falsifier | None = None,
+        advisory_ranker: AdvisoryRanker | None = None,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
@@ -115,6 +117,7 @@ class AnalysisService:
                 retrieval_strategy=retrieval_strategy,
                 incident_fact_extractor=incident_fact_extractor,
                 falsifier=falsifier,
+                advisory_ranker=advisory_ranker,
             )
         )
 
@@ -253,12 +256,7 @@ class AnalysisService:
         leak another incident's hypotheses.
         """
         self.get_run(incident_id, run_id)
-        stmt = (
-            select(Hypothesis)
-            .where(Hypothesis.run_id == run_id)
-            .order_by(Hypothesis.rank.asc())
-        )
-        return list(self._session.scalars(stmt))
+        return list(self._session.scalars(_hypotheses_in_advisory_order(run_id)))
 
     def get_postmortem(self, incident_id: str, run_id: str) -> Postmortem:
         """The structured Postmortem composed for a run (ADR 0012).
@@ -298,11 +296,7 @@ class AnalysisService:
                 .order_by(ImpactClaim.sequence.asc())
             )
         )
-        hypotheses = list(
-            self._session.scalars(
-                select(Hypothesis).where(Hypothesis.run_id == run_id).order_by(Hypothesis.rank.asc())
-            )
-        )
+        hypotheses = list(self._session.scalars(_hypotheses_in_advisory_order(run_id)))
         return postmortem_read(
             postmortem, postmortem.run.incident, timeline, impact_claims, hypotheses
         )
@@ -440,6 +434,26 @@ def _elapsed_ms(start: datetime | None, end: datetime | None) -> int | None:
     return max(0, int((end - start).total_seconds() * 1000))
 
 
+def _hypotheses_in_advisory_order(run_id: str):
+    """Select a run's hypotheses in Advisory Hypothesis Ranking order (ADR 0037).
+
+    The post-challenge advisory ranking is the review aid, so it drives display
+    order: ranked candidates first by ``advisory_rank`` ascending, then any
+    not-yet-ranked hypotheses by their original builder ``rank``. ``advisory_rank``
+    is null only before stage 3's ranking substep runs (or on an older run), so
+    ``is_(None)`` sorts ranked rows ahead of unranked ones deterministically.
+    """
+    return (
+        select(Hypothesis)
+        .where(Hypothesis.run_id == run_id)
+        .order_by(
+            Hypothesis.advisory_rank.is_(None),
+            Hypothesis.advisory_rank.asc(),
+            Hypothesis.rank.asc(),
+        )
+    )
+
+
 def run_artifact_ids(run: AnalysisRun) -> list[str]:
     return [ref.artifact_id for ref in run.run_artifacts]
 
@@ -508,10 +522,23 @@ def hypothesis_read(hypothesis: Hypothesis) -> dict:
     """
     supporting = [ref for ref in hypothesis.evidence_refs if ref.role != "contradicting"]
     contradicting = [ref for ref in hypothesis.evidence_refs if ref.role == "contradicting"]
+    challenge = hypothesis.challenge
+    # "Leading but critically challenged" (PRD #26 user stories 21-22): a derived
+    # rendering label, not stored state. The advisory leader (advisory_rank == 1)
+    # carries it when its persisted challenge is critical, so a top-ranked
+    # candidate is never shown as if the ranking were confidence.
+    leading_but_critically_challenged = (
+        hypothesis.advisory_rank == 1
+        and challenge is not None
+        and challenge.severity == "critical"
+    )
     return {
         "id": hypothesis.id,
         "run_id": hypothesis.run_id,
         "rank": hypothesis.rank,
+        "advisory_rank": hypothesis.advisory_rank,
+        "ranking_rationale": hypothesis.ranking_rationale,
+        "leading_but_critically_challenged": leading_but_critically_challenged,
         "origin": hypothesis.origin or "initial",
         "title": hypothesis.title,
         "summary": hypothesis.summary,

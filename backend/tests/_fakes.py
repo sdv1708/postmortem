@@ -10,6 +10,13 @@ from postmortem.falsification import (
     HypothesisToChallenge,
 )
 from postmortem.incident_facts import FactsImpactClaim, IncidentFactsOutput
+from postmortem.ranking import (
+    AdvisoryRankingOutput,
+    DeterministicAdvisoryRanker,
+    RankedCandidate,
+    RankingCandidate,
+    RankingRationale,
+)
 from postmortem.verification import (
     ClaimSupportJudgment,
     ClaimSupportStatus,
@@ -159,6 +166,70 @@ class FakeClaimSupportVerifier:
         if self._judge is not None:
             return self._judge(claim)
         return ClaimSupportJudgment(status=self._status, rationale=self._rationale)
+
+
+def _trivial_rationale(candidate: RankingCandidate) -> RankingRationale:
+    return RankingRationale(
+        support_strength=f"support={candidate.support_status}",
+        counterevidence_severity=f"severity={candidate.challenge_severity}",
+        explanatory_coverage="coverage",
+        evidence_gaps=f"gaps={candidate.evidence_gap_count}",
+        assumption_dependence=f"assumption={candidate.assumption}",
+        summary=f"Ranked {candidate.title}.",
+    )
+
+
+class FakeAdvisoryRanker:
+    """Deterministic advisory ranker for tests (ADR 0009 / 0037 swappability).
+
+    Proves the ranker boundary is real without a live model and lets stage-3 tests
+    drive ranking behavior precisely. By default it delegates ordering to the
+    production ``DeterministicAdvisoryRanker`` (so a pipeline test gets a sensible
+    ranking for free), but ``order`` can fix the output order by hypothesis title,
+    and ``drop`` can omit a candidate by title to exercise the missing-candidate
+    Runtime Reasoning Gate.
+    """
+
+    version = "fake-advisory-ranker-0"
+
+    def __init__(
+        self,
+        *,
+        order: list[str] | None = None,
+        drop: set[str] | None = None,
+        duplicate: str | None = None,
+    ) -> None:
+        self._order = order
+        self._drop = drop or set()
+        self._duplicate = duplicate
+        self.calls: list[list[RankingCandidate]] = []
+
+    def rank(self, candidates: list[RankingCandidate]) -> AdvisoryRankingOutput:
+        self.calls.append(list(candidates))
+        kept = [c for c in candidates if c.title not in self._drop]
+        if self._order is not None:
+            by_title = {c.title: c for c in kept}
+            ordered = [by_title[title] for title in self._order if title in by_title]
+        else:
+            # Reuse the production ordering so the fake is realistic by default.
+            ranked = DeterministicAdvisoryRanker().rank(kept)
+            by_id = {c.hypothesis_id: c for c in kept}
+            ordered = [by_id[entry.hypothesis_id] for entry in ranked.rankings]
+        rankings = [
+            RankedCandidate(hypothesis_id=c.hypothesis_id, rationale=_trivial_rationale(c))
+            for c in ordered
+        ]
+        if self._duplicate is not None:
+            for candidate in ordered:
+                if candidate.title == self._duplicate:
+                    rankings.append(
+                        RankedCandidate(
+                            hypothesis_id=candidate.hypothesis_id,
+                            rationale=_trivial_rationale(candidate),
+                        )
+                    )
+                    break
+        return AdvisoryRankingOutput(rankings=rankings)
 
 
 class FakePostmortemComposer:

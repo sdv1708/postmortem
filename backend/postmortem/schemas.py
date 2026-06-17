@@ -263,6 +263,22 @@ class HypothesisChallengeRead(BaseModel):
     falsification_tests: list[str]
 
 
+class RankingRationaleRead(BaseModel):
+    """Per-dimension explanation of a hypothesis's advisory rank (ADR 0037).
+
+    The five assessment dimensions the ranker explains plus a one-line summary
+    (PRD user story 19). Ordering is explained through these, never as a
+    probability or percentage (PRD user story 18).
+    """
+
+    support_strength: str
+    counterevidence_severity: str
+    explanatory_coverage: str
+    evidence_gaps: str
+    assumption_dependence: str
+    summary: str
+
+
 class HypothesisRead(BaseModel):
     """A ranked RCA Hypothesis for the Review Surface (PRD stage 3).
 
@@ -272,11 +288,22 @@ class HypothesisRead(BaseModel):
     ``review_status`` records the human accept/reject decision (ADR 0016).
     ``challenge`` is the bounded falsifier's persisted Hypothesis Challenge
     (ADR 0034), present on every hypothesis in a successful run.
+
+    ``advisory_rank`` is the post-challenge Advisory Hypothesis Ranking position
+    and drives display order; ``rank`` is the original builder/generation order,
+    retained for audit (ADR 0037, PRD user story 20). ``ranking_rationale``
+    explains the advisory rank across the five assessment dimensions, and
+    ``leading_but_critically_challenged`` flags the advisory leader when its
+    challenge is critical so the ranking is never mistaken for confidence
+    (PRD user stories 21-22).
     """
 
     id: str
     run_id: str
     rank: int
+    advisory_rank: int | None = None
+    ranking_rationale: RankingRationaleRead | None = None
+    leading_but_critically_challenged: bool = False
     # Provenance within the Causal Analysis Stage (ADR 0036): 'initial' for a
     # builder hypothesis, 'proposed' for a falsifier-introduced missed alternative.
     # The Review Surface distinguishes the two without treating either as a
