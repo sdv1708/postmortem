@@ -8,6 +8,7 @@ from typing import Final, Mapping
 import yaml
 from pydantic import ValidationError
 
+from .incident_facts import INCIDENT_FACT_EXTRACTOR_VERSION, IncidentFactsOutput
 from .llm import LLMResponse
 from .rca import RcaGenerationOutput
 from .verification import ClaimSupportJudgment, ClaimSupportStatus, ClaimToVerify
@@ -77,6 +78,10 @@ class LoadedScenario:
     ground_truth_postmortem: str
     evidence: tuple[ScenarioEvidence, ...]
     rca_replay: dict
+    # Run-level incident-facts replay (ADR 0033): impact claims produced in stage
+    # 2, still citing by ``source_name`` until resolved to artifact ids at seed
+    # time. Defaults to empty when a scenario declares no observed impact.
+    incident_facts_replay: dict
     claim_support_overrides: tuple[ClaimSupportOverride, ...]
 
 
@@ -180,6 +185,24 @@ def load_scenario(scenario_id: str, base_dir: Path | None = None) -> LoadedScena
     _validate_replay_refs(scenario_id, rca_replay, bodies_by_name)
     _validate_replay_schema(scenario_id, rca_replay, bodies_by_name.keys())
 
+    # Run-level incident-facts replay (ADR 0033). Optional: a scenario with no
+    # observed impact (e.g. insufficient-evidence) may omit it.
+    incident_facts_replay: dict = {"impact_claims": []}
+    if "incident_facts" in replay:
+        facts_path = scenario_dir / str(replay["incident_facts"])
+        if not facts_path.is_file():
+            raise ScenarioValidationError(
+                f"{scenario_id}: replay incident_facts references missing file {replay['incident_facts']!r}"
+            )
+        try:
+            incident_facts_replay = json.loads(facts_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ScenarioValidationError(
+                f"{scenario_id}: replay incident_facts is not valid JSON: {exc}"
+            ) from exc
+        _validate_replay_refs(scenario_id, incident_facts_replay, bodies_by_name)
+        _validate_incident_facts_schema(scenario_id, incident_facts_replay, bodies_by_name.keys())
+
     overrides = tuple(
         ClaimSupportOverride(
             match=str(item["match"]),
@@ -206,6 +229,7 @@ def load_scenario(scenario_id: str, base_dir: Path | None = None) -> LoadedScena
         ground_truth_postmortem=ground_truth,
         evidence=tuple(evidence),
         rca_replay=rca_replay,
+        incident_facts_replay=incident_facts_replay,
         claim_support_overrides=overrides,
     )
 
@@ -287,6 +311,19 @@ def _validate_replay_schema(
         ) from exc
 
 
+def _validate_incident_facts_schema(
+    scenario_id: str, facts_replay: object, source_names: object
+) -> None:
+    """Validate the incident-facts replay against the strict contract (ADR 0028 / 0033)."""
+    placeholders = {str(name): str(name) for name in source_names}
+    try:
+        IncidentFactsOutput.model_validate(resolve_replay_rca(facts_replay, placeholders))
+    except (ScenarioValidationError, ValidationError) as exc:
+        raise ScenarioValidationError(
+            f"{scenario_id}: replay incident_facts violates the strict schema: {exc}"
+        ) from exc
+
+
 def resolve_replay_rca(rca_replay: object, source_name_to_id: Mapping[str, str]) -> object:
     """Rewrite a replay's ``source_name`` citations to seeded ``artifact_id``s.
 
@@ -332,6 +369,27 @@ class ScenarioReplayLLMClient:
     def complete(self, *, system: str, user: str) -> LLMResponse:
         self.calls.append((system, user))
         return LLMResponse(text=self._rca_json, usage={"replay": True})
+
+
+class ScenarioReplayIncidentFactExtractor:
+    """Replays a scenario's bundled run-level incident facts (ADR 0009 / 0033).
+
+    A swappable IncidentFactExtractor so stage 2 produces the scenario's impact
+    claims deterministically and offline. Constructed with the facts citations
+    already resolved to seeded artifact ids; the stage still resolves snippets
+    from the stored lines (ADR 0024), so the replay never supplies snippet text.
+    """
+
+    version: Final[str] = INCIDENT_FACT_EXTRACTOR_VERSION
+
+    def __init__(self, scenario_id: str, facts_replay: dict) -> None:
+        self._scenario_id = scenario_id
+        self._output = IncidentFactsOutput.model_validate(facts_replay)
+        self.calls = 0
+
+    def extract(self, *, artifacts, timeline_events) -> IncidentFactsOutput:
+        self.calls += 1
+        return self._output
 
 
 class ScenarioReplayClaimSupportVerifier:

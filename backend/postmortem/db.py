@@ -122,6 +122,114 @@ def _add_columns_if_missing(
                 raise
 
 
+def _migrate_impact_claims_to_run_level(engine: Engine, inspector) -> None:
+    """Re-own existing ``impact_claims`` from a hypothesis to the run (ADR 0033).
+
+    Earlier slices stored Impact Claims under ``hypothesis_id``; they are now
+    run-level incident facts keyed by ``run_id``. This upgrades existing
+    databases in place without losing impact data: each claim's ``run_id`` is
+    backfilled from its former hypothesis. The migration is idempotent — once a
+    database has the new shape (``run_id`` present, ``hypothesis_id`` absent) it
+    is skipped — and runs after the support columns are ensured so the copy can
+    rely on them.
+
+    SQLite cannot drop a ``NOT NULL`` column, so the table is rebuilt; PostgreSQL
+    adds the column, backfills, enforces ``NOT NULL``, then drops the old one. The
+    EvidenceRef ownership constraint is untouched because ``impact_claim_id``
+    stays a valid owner and claim ids are preserved.
+
+    The SQLite rebuild deliberately keeps the canonical name ``impact_claims``: it
+    builds a temporary ``impact_claims_new`` table, drops the old ``impact_claims``,
+    then renames the new table into place. Renaming the *referenced* table instead
+    (old → legacy) would make SQLite rewrite ``evidence_refs.impact_claim_id`` to
+    point at the legacy name, which then gets dropped — leaving a dangling foreign
+    key. Renaming only the new temporary table never touches existing references,
+    so EvidenceRefs keep resolving to the rebuilt table and ``PRAGMA
+    foreign_key_check`` stays clean.
+    """
+    if "impact_claims" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("impact_claims")}
+    if "run_id" in columns or "hypothesis_id" not in columns:
+        # Already migrated (or a fresh DB created from the current model).
+        return
+
+    if engine.dialect.name == "sqlite":
+        # PRAGMA foreign_keys is connection-scoped and only effective outside a
+        # transaction, so run the whole rebuild on one AUTOCOMMIT connection with
+        # enforcement disabled. DROP IF EXISTS guards a re-run after a partial
+        # failure (the idempotency check above otherwise re-enters this branch).
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.exec_driver_sql("DROP TABLE IF EXISTS impact_claims_new")
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE impact_claims_new (
+                    id VARCHAR(36) NOT NULL PRIMARY KEY,
+                    run_id VARCHAR(36) NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    description TEXT NOT NULL,
+                    assumption BOOLEAN NOT NULL DEFAULT 0,
+                    support_status VARCHAR(16) NOT NULL DEFAULT 'unevaluated',
+                    support_rationale TEXT,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+            # Inner join on the former hypothesis backfills run_id; any orphaned
+            # claim (its hypothesis already gone) carries no run and is dropped.
+            connection.exec_driver_sql(
+                """
+                INSERT INTO impact_claims_new
+                    (id, run_id, sequence, description, assumption,
+                     support_status, support_rationale, created_at)
+                SELECT ic.id, h.run_id, ic.sequence, ic.description, ic.assumption,
+                       COALESCE(ic.support_status, 'unevaluated'),
+                       ic.support_rationale, ic.created_at
+                FROM impact_claims ic
+                JOIN hypotheses h ON h.id = ic.hypothesis_id
+                """
+            )
+            # Drop the old table, then rename the new one into its place. Renaming
+            # the *new* (unreferenced) table never rewrites existing
+            # evidence_refs.impact_claim_id references, so they keep resolving to
+            # ``impact_claims`` and PRAGMA foreign_key_check stays clean.
+            connection.exec_driver_sql("DROP TABLE impact_claims")
+            connection.exec_driver_sql(
+                "ALTER TABLE impact_claims_new RENAME TO impact_claims"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX ix_impact_claims_run_id ON impact_claims (run_id)"
+            )
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+    elif engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE impact_claims ADD COLUMN run_id VARCHAR(36) "
+                    "REFERENCES analysis_runs(id) ON DELETE CASCADE"
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE impact_claims AS ic
+                    SET run_id = h.run_id
+                    FROM hypotheses AS h
+                    WHERE h.id = ic.hypothesis_id
+                    """
+                )
+            )
+            # Drop claims that could not be re-owned so the NOT NULL invariant can
+            # be enforced without weakening it.
+            connection.execute(text("DELETE FROM impact_claims WHERE run_id IS NULL"))
+            connection.execute(text("ALTER TABLE impact_claims ALTER COLUMN run_id SET NOT NULL"))
+            connection.execute(text("ALTER TABLE impact_claims DROP COLUMN hypothesis_id"))
+            connection.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_impact_claims_run_id ON impact_claims (run_id)")
+            )
+
+
 def ensure_schema_compatibility(engine: Engine) -> None:
     """Apply the narrow schema additions needed by existing MVP databases.
 
@@ -155,6 +263,28 @@ def ensure_schema_compatibility(engine: Engine) -> None:
     }
     _add_columns_if_missing(engine, inspector, "hypotheses", support_columns)
     _add_columns_if_missing(engine, inspector, "impact_claims", support_columns)
+
+    # Re-own Impact Claims from a hypothesis to the run (ADR 0033). Runs after the
+    # support columns exist so the SQLite table rebuild can copy them.
+    _migrate_impact_claims_to_run_level(engine, inspect(engine))
+
+    # Rename persisted Run Stage identifiers to the ADR 0033 names so existing runs
+    # still read through the renamed-stage API contract (RunStageEventRead only
+    # accepts the new literals). Idempotent: the UPDATEs match only old values.
+    if "run_stage_events" in inspector.get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE run_stage_events SET stage = 'extracting_incident_facts' "
+                    "WHERE stage = 'extracting_timeline_candidates'"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE run_stage_events SET stage = 'analyzing_causal_hypotheses' "
+                    "WHERE stage = 'generating_rca_hypotheses'"
+                )
+            )
 
     # Refusal/sufficiency assessment added in slice #12 (ADR 0032). Existing
     # postmortems default to 'sufficient'; the JSON lists read as NULL → [] until a

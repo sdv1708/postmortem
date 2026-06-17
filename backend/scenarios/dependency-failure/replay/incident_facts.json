@@ -1,0 +1,10 @@
+{
+  "impact_claims": [
+    {
+      "description": "Checkout returned 502 errors to 31% of requests across all regions",
+      "evidence": [
+        {"source_name": "api-gateway.log", "line_start": 4, "line_end": 4}
+      ]
+    }
+  ]
+}

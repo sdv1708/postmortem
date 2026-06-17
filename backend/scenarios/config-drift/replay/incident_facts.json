@@ -1,0 +1,10 @@
+{
+  "impact_claims": [
+    {
+      "description": "Product listing p99 latency reached 5 seconds during the incident",
+      "evidence": [
+        {"source_name": "app.log", "line_start": 4, "line_end": 4}
+      ]
+    }
+  ]
+}

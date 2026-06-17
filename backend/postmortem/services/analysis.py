@@ -9,9 +9,19 @@ from sqlalchemy.orm import Session
 from ..chunking import CHUNKING_STRATEGY_VERSION
 from ..config import DEFAULT_EXPERIMENT_METADATA
 from ..drafting import PostmortemComposer
+from ..incident_facts import IncidentFactExtractor
 from ..llm import LLMClient
 from ..logging import log_event
-from ..models import AnalysisRun, Artifact, Hypothesis, Postmortem, ReviewerNote, RunArtifact, TimelineEvent
+from ..models import (
+    AnalysisRun,
+    Artifact,
+    Hypothesis,
+    ImpactClaim,
+    Postmortem,
+    ReviewerNote,
+    RunArtifact,
+    TimelineEvent,
+)
 from ..rca import PROMPT_VERSION
 from ..retrieval import RETRIEVAL_STRATEGY_VERSION, RetrievalStrategy
 from ..schemas import AnalysisRunCreate, ReviewerNoteCreate
@@ -74,6 +84,7 @@ class AnalysisService:
         claim_support_verifier: ClaimSupportVerifier | None = None,
         postmortem_composer: PostmortemComposer | None = None,
         retrieval_strategy: RetrievalStrategy | None = None,
+        incident_fact_extractor: IncidentFactExtractor | None = None,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
@@ -100,6 +111,7 @@ class AnalysisService:
                 claim_support_verifier=claim_support_verifier,
                 postmortem_composer=postmortem_composer,
                 retrieval_strategy=retrieval_strategy,
+                incident_fact_extractor=incident_fact_extractor,
             )
         )
 
@@ -216,6 +228,21 @@ class AnalysisService:
         )
         return list(self._session.scalars(stmt))
 
+    def list_impact_claims(self, incident_id: str, run_id: str) -> list[ImpactClaim]:
+        """Run-level Impact Claims for a run, with their EvidenceRefs (ADR 0033).
+
+        Impact is an incident fact owned by the run and shown once regardless of
+        hypothesis count (PRD user stories 1-2). Validates the run belongs to the
+        incident first so the endpoint cannot leak another incident's impact.
+        """
+        self.get_run(incident_id, run_id)
+        stmt = (
+            select(ImpactClaim)
+            .where(ImpactClaim.run_id == run_id)
+            .order_by(ImpactClaim.sequence.asc())
+        )
+        return list(self._session.scalars(stmt))
+
     def list_hypotheses(self, incident_id: str, run_id: str) -> list[Hypothesis]:
         """Ranked RCA Hypotheses for a run, with their claims and citations.
 
@@ -261,12 +288,21 @@ class AnalysisService:
                 .order_by(TimelineEvent.sequence.asc())
             )
         )
+        impact_claims = list(
+            self._session.scalars(
+                select(ImpactClaim)
+                .where(ImpactClaim.run_id == run_id)
+                .order_by(ImpactClaim.sequence.asc())
+            )
+        )
         hypotheses = list(
             self._session.scalars(
                 select(Hypothesis).where(Hypothesis.run_id == run_id).order_by(Hypothesis.rank.asc())
             )
         )
-        return postmortem_read(postmortem, postmortem.run.incident, timeline, hypotheses)
+        return postmortem_read(
+            postmortem, postmortem.run.incident, timeline, impact_claims, hypotheses
+        )
 
     def review_hypothesis(
         self, incident_id: str, run_id: str, hypothesis_id: str, decision: str
@@ -425,7 +461,7 @@ def timeline_event_read(event: TimelineEvent) -> dict:
     }
 
 
-def _impact_claim_read(claim) -> dict:
+def impact_claim_read(claim) -> dict:
     return {
         "id": claim.id,
         "sequence": claim.sequence,
@@ -483,18 +519,19 @@ def hypothesis_read(hypothesis: Hypothesis) -> dict:
         "validation_steps": list(hypothesis.validation_steps),
         "supporting_evidence": supporting,
         "contradicting_evidence": contradicting,
-        "impact_claims": [_impact_claim_read(claim) for claim in hypothesis.impact_claims],
         "action_items": [_action_item_read(item) for item in hypothesis.action_items],
         "reviewer_notes": [reviewer_note_read(note) for note in hypothesis.reviewer_notes],
     }
 
 
-def postmortem_read(postmortem, incident, timeline_events, hypotheses) -> dict:
-    """Shape a Postmortem (with its run's timeline/hypotheses) for PostmortemRead.
+def postmortem_read(postmortem, incident, timeline_events, impact_claims, hypotheses) -> dict:
+    """Shape a Postmortem (with its run's timeline/impact/hypotheses) for PostmortemRead.
 
     The factual sections are composed from the existing structured rows rather
     than duplicated onto the Postmortem, so the citation source of truth stays
-    the EvidenceRefs (ADR 0024). ``incident`` provides the title/severity header.
+    the EvidenceRefs (ADR 0024). Impact Claims are run-level incident facts shown
+    once, independent of hypothesis count (ADR 0033). ``incident`` provides the
+    title/severity header.
     """
     return {
         "id": postmortem.id,
@@ -508,6 +545,7 @@ def postmortem_read(postmortem, incident, timeline_events, hypotheses) -> dict:
         "next_validation_steps": list(postmortem.next_validation_steps or []),
         "composer_version": postmortem.composer_version,
         "timeline": [timeline_event_read(event) for event in timeline_events],
+        "impact_claims": [impact_claim_read(claim) for claim in impact_claims],
         "hypotheses": [hypothesis_read(hypothesis) for hypothesis in hypotheses],
         "created_at": postmortem.created_at,
     }

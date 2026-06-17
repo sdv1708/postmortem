@@ -68,7 +68,7 @@ def test_each_stage_persisted_before_the_next_starts(fresh_session):
     assert snapshots[0] == ["normalizing_evidence:running"]
     assert snapshots[1] == [
         "normalizing_evidence:succeeded",
-        "extracting_timeline_candidates:running",
+        "extracting_incident_facts:running",
     ]
     assert snapshots[5][0] == "normalizing_evidence:succeeded"
     assert snapshots[5][-1] == "flagging_unsupported_claims:running"
@@ -110,7 +110,7 @@ def test_commit_progress_makes_stage_transitions_visible_to_other_sessions(fresh
         "running",
         [
             "normalizing_evidence:succeeded",
-            "extracting_timeline_candidates:running",
+            "extracting_incident_facts:running",
         ],
     )
     assert snapshots[-1][1][-1] == "flagging_unsupported_claims:running"
@@ -143,7 +143,7 @@ def test_stage_failing_twice_fails_run_and_preserves_prior_outputs(fresh_session
     incident = _incident_with_artifact(fresh_session)
 
     def runner(stage, attempt, run):
-        if stage == "generating_rca_hypotheses":
+        if stage == "analyzing_causal_hypotheses":
             raise RuntimeError("model unavailable")
         return None
 
@@ -157,9 +157,9 @@ def test_stage_failing_twice_fails_run_and_preserves_prior_outputs(fresh_session
 
     # Stages 1-2 succeeded and remain inspectable.
     assert events[0].stage == "normalizing_evidence" and events[0].status == "succeeded"
-    assert events[1].stage == "extracting_timeline_candidates" and events[1].status == "succeeded"
+    assert events[1].stage == "extracting_incident_facts" and events[1].status == "succeeded"
     # The failing stage produced exactly two failed attempts (original + retry).
-    rca = [e for e in events if e.stage == "generating_rca_hypotheses"]
+    rca = [e for e in events if e.stage == "analyzing_causal_hypotheses"]
     assert [e.status for e in rca] == ["failed", "failed"]
     assert [e.attempt for e in rca] == [1, 2]
     # Later stages never ran (ADR 0029).
@@ -168,7 +168,7 @@ def test_stage_failing_twice_fails_run_and_preserves_prior_outputs(fresh_session
     assert "flagging_unsupported_claims" not in stages_seen
 
     assert run.status == "failed"
-    assert "generating_rca_hypotheses" in run.error
+    assert "analyzing_causal_hypotheses" in run.error
     # The Artifact lock is preserved through failure (ADR 0018 + 0029).
     artifact = fresh_session.query(Artifact).filter_by(incident_id=incident.id).first()
     assert artifact.included_in_analysis_run is True

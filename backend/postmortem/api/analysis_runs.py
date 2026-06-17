@@ -15,6 +15,7 @@ from ..schemas import (
     AnalysisRunRead,
     HypothesisRead,
     HypothesisReviewCreate,
+    ImpactClaimRead,
     MarkdownExportCreate,
     MarkdownExportRead,
     PostmortemRead,
@@ -32,6 +33,7 @@ from ..services import (
     PostmortemNotFoundError,
     analysis_run_read,
     hypothesis_read,
+    impact_claim_read,
     reviewer_note_read,
     timeline_event_read,
 )
@@ -167,6 +169,20 @@ def list_run_timeline(
     except AnalysisRunNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
     return [TimelineEventRead.model_validate(timeline_event_read(event)) for event in events]
+
+
+@router.get("/{run_id}/impact", response_model=list[ImpactClaimRead])
+def list_run_impact_claims(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> list[ImpactClaimRead]:
+    """Run-level Impact Claims for a run, shown once regardless of hypothesis count (ADR 0033)."""
+    try:
+        claims = AnalysisService(db).list_impact_claims(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    return [ImpactClaimRead.model_validate(impact_claim_read(claim)) for claim in claims]
 
 
 @router.get("/{run_id}/hypotheses", response_model=list[HypothesisRead])

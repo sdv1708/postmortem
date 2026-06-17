@@ -185,6 +185,248 @@ def test_create_app_upgrades_issue_7_claim_tables(tmp_path):
         assert {"support_status", "support_rationale"} <= columns
 
 
+def test_create_app_migrates_impact_claims_to_run_level(tmp_path):
+    """Existing impact_claims are re-owned to the run without losing data (ADR 0033)."""
+    database_url = f"sqlite:///{tmp_path}/issue-27.db"
+    engine = make_engine(database_url)
+    _create_issue_6_evidence_refs_table(engine)
+    _create_issue_7_claim_tables(engine)
+
+    # Seed a hypothesis and an impact claim under the pre-#27 hypothesis-owned shape.
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO hypotheses (
+                    id, run_id, rank, title, summary, assumption, review_status,
+                    unknowns, validation_steps, created_at
+                ) VALUES (
+                    'hyp-1', 'run-xyz', 1, 'Cause', 'Summary', 0, 'proposed',
+                    '[]', '[]', '2026-06-01 00:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO impact_claims (
+                    id, hypothesis_id, sequence, description, assumption, created_at
+                ) VALUES (
+                    'imp-1', 'hyp-1', 1, 'Users saw 500s', 0, '2026-06-01 00:00:00'
+                )
+                """
+            )
+        )
+
+    create_app(
+        Settings(database_url=database_url, api_token=None, dev_bypass=True, cors_origins=())
+    )
+
+    columns = {column["name"] for column in inspect(engine).get_columns("impact_claims")}
+    # Re-owned to the run; the former hypothesis ownership column is gone.
+    assert "run_id" in columns
+    assert "hypothesis_id" not in columns
+    with engine.begin() as connection:
+        rows = connection.execute(
+            text("SELECT id, run_id, description FROM impact_claims")
+        ).all()
+    # The impact data is preserved and its run_id is backfilled from the hypothesis.
+    assert rows == [("imp-1", "run-xyz", "Users saw 500s")]
+
+
+def test_impact_migration_keeps_evidence_ref_foreign_keys_valid(tmp_path):
+    """Re-owning impact_claims must not dangle EvidenceRef foreign keys (ADR 0033)."""
+    database_url = f"sqlite:///{tmp_path}/issue-27-fk.db"
+    engine = make_engine(database_url)
+    _create_issue_7_claim_tables(engine)  # hypotheses + pre-#27 impact_claims
+    # An evidence_refs table from the post-#8 era (already has impact_claim_id),
+    # with a citation owned by an impact claim.
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE evidence_refs (
+                    id VARCHAR(36) NOT NULL PRIMARY KEY,
+                    timeline_event_id VARCHAR(36),
+                    hypothesis_id VARCHAR(36),
+                    impact_claim_id VARCHAR(36) REFERENCES impact_claims(id) ON DELETE CASCADE,
+                    action_item_id VARCHAR(36),
+                    role VARCHAR(16) NOT NULL DEFAULT 'supporting',
+                    artifact_id VARCHAR(36) NOT NULL,
+                    source_name VARCHAR(255) NOT NULL,
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER NOT NULL,
+                    snippet TEXT NOT NULL,
+                    confidence_score FLOAT NOT NULL,
+                    verifier_status VARCHAR(24) NOT NULL DEFAULT 'unverified',
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO hypotheses (
+                    id, run_id, rank, title, summary, assumption, review_status,
+                    unknowns, validation_steps, created_at
+                ) VALUES (
+                    'hyp-1', 'run-xyz', 1, 'Cause', 'Summary', 0, 'proposed',
+                    '[]', '[]', '2026-06-01 00:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO impact_claims (
+                    id, hypothesis_id, sequence, description, assumption, created_at
+                ) VALUES (
+                    'imp-1', 'hyp-1', 1, 'Users saw 500s', 0, '2026-06-01 00:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO evidence_refs (
+                    id, impact_claim_id, role, artifact_id, source_name,
+                    line_start, line_end, snippet, confidence_score, verifier_status, created_at
+                ) VALUES (
+                    'ref-1', 'imp-1', 'supporting', 'art-1', 'api.log',
+                    1, 1, 'line one', 1.0, 'verified', '2026-06-01 00:00:00'
+                )
+                """
+            )
+        )
+
+    create_app(
+        Settings(database_url=database_url, api_token=None, dev_bypass=True, cors_origins=())
+    )
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        # The impact-owned citation still references the rebuilt impact_claims table
+        # (not a dropped legacy/temp table), so the FK integrity check is clean.
+        fk_tables = {
+            row[2] for row in connection.exec_driver_sql(
+                "PRAGMA foreign_key_list(evidence_refs)"
+            ).fetchall()
+        }
+        assert "impact_claims" in fk_tables
+        assert "impact_claims_legacy" not in fk_tables
+        assert "impact_claims_new" not in fk_tables
+        # No evidence_refs citation dangles after the rebuild. (Other foreign_key
+        # _check rows can appear only because this minimal fixture omits the
+        # analysis_runs row that impact_claims.run_id points at — unrelated to the
+        # citation FK under test, which is what the buggy migration broke.)
+        violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+        evidence_ref_violations = [row for row in violations if row[0] == "evidence_refs"]
+        assert evidence_ref_violations == []
+        # The citation and its migrated, re-owned impact claim both survive.
+        ref = connection.exec_driver_sql(
+            "SELECT impact_claim_id FROM evidence_refs WHERE id = 'ref-1'"
+        ).fetchall()
+        claim = connection.exec_driver_sql(
+            "SELECT run_id FROM impact_claims WHERE id = 'imp-1'"
+        ).fetchall()
+    assert ref == [("imp-1",)]
+    assert claim == [("run-xyz",)]
+
+
+def _create_legacy_run_stage_events_table(engine):
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE run_stage_events (
+                    id VARCHAR(36) NOT NULL PRIMARY KEY,
+                    run_id VARCHAR(36) NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    stage VARCHAR(64) NOT NULL,
+                    status VARCHAR(16) NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    warning_codes JSON NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        for seq, stage in enumerate(
+            [
+                "normalizing_evidence",
+                "extracting_timeline_candidates",
+                "generating_rca_hypotheses",
+                "verifying_citations",
+            ],
+            start=1,
+        ):
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO run_stage_events (
+                        id, run_id, sequence, stage, status, attempt, warning_codes, created_at
+                    ) VALUES (
+                        :id, 'run-1', :seq, :stage, 'succeeded', 1, '[]', '2026-06-01 00:00:00'
+                    )
+                    """
+                ),
+                {"id": f"evt-{seq}", "seq": seq, "stage": stage},
+            )
+
+
+def test_create_app_renames_legacy_run_stage_identifiers(tmp_path):
+    """Persisted run stage identifiers are renamed to the ADR 0033 names.
+
+    Otherwise an old run's stage values fall outside the RunStage literal and
+    reading it through the API fails response validation.
+    """
+    from postmortem.schemas import RunStageEventRead
+
+    database_url = f"sqlite:///{tmp_path}/issue-27-stages.db"
+    engine = make_engine(database_url)
+    _create_issue_6_evidence_refs_table(engine)
+    _create_legacy_run_stage_events_table(engine)
+
+    create_app(
+        Settings(database_url=database_url, api_token=None, dev_bypass=True, cors_origins=())
+    )
+
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        stages = [
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT stage FROM run_stage_events ORDER BY sequence"
+            ).fetchall()
+        ]
+    assert stages == [
+        "normalizing_evidence",
+        "extracting_incident_facts",
+        "analyzing_causal_hypotheses",
+        "verifying_citations",
+    ]
+    # The migrated values are all accepted by the API response schema.
+    for seq, stage in enumerate(stages, start=1):
+        RunStageEventRead.model_validate(
+            {
+                "id": f"evt-{seq}",
+                "sequence": seq,
+                "stage": stage,
+                "status": "succeeded",
+                "attempt": 1,
+                "started_at": None,
+                "completed_at": None,
+                "duration_ms": None,
+                "usage": None,
+                "warning_codes": [],
+                "error": None,
+            }
+        )
+
+
 def _create_issue_11_postmortems_table(engine):
     """Postmortems before slice #12 had no refusal/sufficiency columns."""
     with engine.begin() as connection:

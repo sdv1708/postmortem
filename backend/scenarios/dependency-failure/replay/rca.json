@@ -16,14 +16,6 @@
         "Correlate the provider 504 timestamps with our 502 spike",
         "Confirm the provider incident window against their status API"
       ],
-      "impact_claims": [
-        {
-          "description": "Checkout returned 502 errors to 31% of requests across all regions",
-          "evidence": [
-            {"source_name": "api-gateway.log", "line_start": 4, "line_end": 4}
-          ]
-        }
-      ],
       "remediation_items": [
         {
           "description": "Add a fallback and circuit-aware handling for charge.create outages",
@@ -49,7 +41,6 @@
       "validation_steps": [
         "Replay the provider timeout window against a retry-enabled client in staging"
       ],
-      "impact_claims": [],
       "remediation_items": [
         {
           "description": "Implement idempotent retries with jittered backoff on charge.create",
@@ -70,7 +61,6 @@
       "validation_steps": [
         "Audit the deploy log for the checkout service around 09:00-09:10"
       ],
-      "impact_claims": [],
       "remediation_items": []
     }
   ]

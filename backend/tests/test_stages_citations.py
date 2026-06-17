@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 
+from postmortem.incident_facts import FactsImpactClaim
 from postmortem.llm import FakeLLMClient
 from postmortem.models import EvidenceRef, RunStageEvent
+from postmortem.rca import RcaEvidenceRef
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 from postmortem.services.stages import PipelineStageRunner
@@ -12,7 +14,7 @@ from postmortem.verification import (
     CitationIntegrityStatus,
 )
 
-from tests._fakes import FakeClaimSupportVerifier
+from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
 
 
 BODY = (
@@ -34,8 +36,9 @@ def _add(session, incident_id):
 
 
 def _hypotheses_json(artifact_id: str) -> str:
-    # Cites supporting + contradicting + impact + remediation evidence so the
-    # verification stage exercises all four EvidenceRef owner types.
+    # Cites supporting + contradicting + remediation evidence; combined with the
+    # run-level impact claim below, the verification stage exercises all four
+    # EvidenceRef owner types (timeline, hypothesis, impact claim, action item).
     return json.dumps(
         {
             "hypotheses": [
@@ -47,14 +50,6 @@ def _hypotheses_json(artifact_id: str) -> str:
                     ],
                     "contradicting_evidence": [
                         {"artifact_id": artifact_id, "line_start": 3, "line_end": 3}
-                    ],
-                    "impact_claims": [
-                        {
-                            "description": "API served 500s",
-                            "evidence": [
-                                {"artifact_id": artifact_id, "line_start": 3, "line_end": 3}
-                            ],
-                        }
                     ],
                     "remediation_items": [
                         {
@@ -68,6 +63,15 @@ def _hypotheses_json(artifact_id: str) -> str:
             ]
         }
     )
+
+
+def _impact_facts(artifact_id: str) -> list[FactsImpactClaim]:
+    return [
+        FactsImpactClaim(
+            description="API served 500s",
+            evidence=[RcaEvidenceRef(artifact_id=artifact_id, line_start=3, line_end=3)],
+        )
+    ]
 
 
 def _all_refs(session, run_id):
@@ -108,7 +112,10 @@ def test_pipeline_stamps_every_citation_verified(fresh_session):
     fake = FakeLLMClient([_hypotheses_json(artifact.id)], label="fake-model")
     claim_support = FakeClaimSupportVerifier()
     run = AnalysisService(
-        fresh_session, llm_client=fake, claim_support_verifier=claim_support
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=claim_support,
+        incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 
@@ -134,7 +141,10 @@ def test_reverification_flags_a_tampered_snippet_without_failing_the_run(fresh_s
 
     fake = FakeLLMClient([_hypotheses_json(artifact.id)], label="fake-model")
     run = AnalysisService(
-        fresh_session, llm_client=fake, claim_support_verifier=FakeClaimSupportVerifier()
+        fresh_session,
+        llm_client=fake,
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(_impact_facts(artifact.id)),
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
     assert run.status == "succeeded"

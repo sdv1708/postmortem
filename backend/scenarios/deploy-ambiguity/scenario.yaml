@@ -45,6 +45,7 @@ evidence:
 # demo shows the full support spectrum (supported / partial / unsupported).
 replay:
   rca: replay/rca.json
+  incident_facts: replay/incident_facts.json
   claim_support_overrides:
     - match: undersized
       status: partial

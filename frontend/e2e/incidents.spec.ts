@@ -51,8 +51,8 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   // All six MVP stages render in order.
   for (const stage of [
     "Normalizing evidence",
-    "Extracting timeline candidates",
-    "Generating RCA hypotheses",
+    "Extracting incident facts",
+    "Analyzing causal hypotheses",
     "Verifying citations",
     "Drafting postmortem",
     "Flagging unsupported claims",

@@ -77,7 +77,7 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
         lines.append("_No timeline events were extracted from the evidence._")
     lines.append("")
 
-    _impact_section(lines, authoritative, postmortem.hypotheses, mode)
+    _impact_section(lines, postmortem.impact_claims, mode)
     _hypotheses_section(lines, authoritative, mode)
     if mode is ExportMode.AUDIT and review_findings:
         _review_findings_section(lines, review_findings)
@@ -119,17 +119,21 @@ def _timeline_line(event: TimelineEventRead) -> str:
 
 def _impact_section(
     lines: list[str],
-    authoritative: list[HypothesisRead],
-    all_hypotheses: list[HypothesisRead],
+    impact_claims: list[ImpactClaimRead],
     mode: ExportMode,
 ) -> None:
+    """Render run-level Impact Claims once (ADR 0033).
+
+    Impact is an incident fact owned by the run, not by any hypothesis, so it is
+    rendered a single time regardless of how many hypotheses the run produced. A
+    clean export shows only evidence-backed (supported/partial) impact; an audit
+    export additionally retains unsupported/assumption impact, labeled.
+    """
     lines.append("## Impact analysis")
     lines.append("")
-    source = all_hypotheses if mode is ExportMode.AUDIT else authoritative
     rendered = [
         _impact_line(claim, mode)
-        for hypothesis in source
-        for claim in hypothesis.impact_claims
+        for claim in impact_claims
         if mode is ExportMode.AUDIT or _is_authoritative(claim.support_status)
     ]
     if rendered:

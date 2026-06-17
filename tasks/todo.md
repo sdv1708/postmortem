@@ -1,112 +1,111 @@
-# Polish Markdown Export Quality
+# Issue #27 — Extract run-level incident facts
 
-- [x] Inspect the exported clean Markdown file.
-- [x] Add guardrails so a requested clean/audit export cannot silently download mismatched content.
-- [x] Trim incident titles at creation/export boundaries to remove trailing whitespace in generated docs.
-- [x] Rename deterministic unknowns in Markdown from "Lessons learned" to "Open questions" so output reads credibly.
-- [x] Verify backend export tests and frontend typecheck.
+Branch: `feature/27-run-level-incident-facts` (parent epic #26)
 
-## Review
+## Goal
+Make incident facts (Impact Claims) a complete **run-level** product path, produced in
+the renamed stage 2 **"Extracting incident facts"**, shown **once** across API / Review
+Surface / Markdown exports regardless of hypothesis count. Rename stage 3 to
+**"Analyzing causal hypotheses"**. Keep six visible stages and DB-persisted handoffs.
 
-The inspected file was named `*-clean.md` but contained `Export mode: audit`,
-the audit warning note, and an unsupported impact claim. Backend clean/audit
-rendering was already covered, so the UI now refuses to download an export if
-the response mode, filename, or Markdown mode header does not match the requested
-button. Also trimmed incident title/summary on create and changed presentation
-of deterministic hypothesis unknowns from "Lessons learned" to "Open questions".
+Covers PRD user stories 1–2 and 54–56.
 
-Verification:
-- `tests/test_api_incidents.py tests/test_drafting.py tests/test_api_postmortem.py`: 27 passed.
-- Full backend suite: 218 passed, 1 existing FastAPI/Starlette deprecation warning.
-- Frontend `npm run typecheck`: passed.
+## Key design decision
+Impact Claims move from `Hypothesis` ownership to `AnalysisRun` ownership, and impact
+**generation** moves out of the stage-3 RCA model output into stage 2 via a dedicated,
+strict structured LLM contract (`IncidentFactsOutput`) behind a swappable
+`IncidentFactExtractor` boundary. Offline path returns `{}` so both strict schemas
+validate empty. This realizes PRD US1 "incident facts separated from causal interpretation."
 
-# Grill Client Brief: Bounded Multi-Pass RCA
+## Plan (checkable)
 
-- [x] Read the client brief, domain glossary, relevant ADRs, and current pipeline.
-- [x] Resolve the falsification pass's authority and canonical domain language.
-- [x] Resolve orchestration, persistence, claim-generation, and verification boundaries.
-- [x] Resolve product presentation, evaluation criteria, failure behavior, and MVP scope.
-- [x] Update `CONTEXT.md` inline as domain terms are agreed.
-- [x] Record an ADR only if the final architecture decision meets the ADR threshold.
-- [x] Add a review section summarizing decisions and documentation changes.
+### Backend — contracts & model
+- [ ] Rename stage identifiers in `pipeline.py`: `extracting_timeline_candidates` →
+      `extracting_incident_facts`, `generating_rca_hypotheses` → `analyzing_causal_hypotheses`.
+- [ ] `models.py`: `ImpactClaim` — drop `hypothesis_id`, add `run_id` (FK run, NOT NULL);
+      add `AnalysisRun.impact_claims` relationship; remove `Hypothesis.impact_claims`.
+- [ ] New `incident_facts.py`: `IncidentFactsOutput` strict schema + `build_incident_facts_prompt`
+      + `IncidentFactExtractor` protocol + `LLMIncidentFactExtractor` default + version.
+- [ ] `rca.py`: remove `RcaImpactClaim` + `impact_claims` from `RcaHypothesis`/prompt.
+- [ ] `llm.py`: `OfflineLLMClient` returns `{}`; give `RcaGenerationOutput.hypotheses` a default.
 
-## Review
+### Backend — pipeline stages
+- [ ] `stages.py`: stage 2 (`_extract_incident_facts`) — keep deterministic timeline +
+      add run-level impact-claim generation via extractor; clear run impact on retry.
+- [ ] `stages.py`: stage 3 (`_generate_rca`) — stop creating impact claims.
+- [ ] `stages.py`: `_run_evidence_refs` — join impact refs by `ImpactClaim.run_id`.
+- [ ] `stages.py`: `_flag_unsupported_claims` — classify run-level impact claims.
 
-Resolved architecture:
-- Keep the existing framework-neutral, DB-persisted orchestration; consider
-  LangGraph only if dynamic branching or mid-stage pause/resume becomes necessary.
-- Keep six visible stages. Stage 2 extracts incident facts; stage 3 performs
-  bounded causal analysis: build, falsify, add at most two alternatives, verify,
-  and produce an ordinal advisory ranking.
-- The system never declares a root cause. Humans review hypotheses and finalize
-  a structured causal account with exactly one Failure Mechanism and optional
-  repeatable Triggers and Amplifying Conditions.
-- Conclusions are evidence-governed and immutable. Discrepancies are append-only,
-  make conclusions disputed, and may lead to a new immutable superseding conclusion.
-- Builder, falsifier, ranker, and support verifier are separate Reasoning Roles
-  with structured handoffs, even when they share one configured model.
-- Incremental citation checks and provisional semantic support protect ranking;
-  final audit stages remain the visible trust checkpoints.
-- Runtime repair is bounded and deterministic. Missing challenge coverage or
-  exhausted repair budgets fail causal analysis rather than publishing degraded output.
-- Evaluation compares the multi-pass flow with a builder-only baseline using
-  structured scenario expectations plus token and latency constraints.
+### Backend — read models / API / export
+- [ ] `schemas.py`: rename `RunStage` literals; remove `impact_claims` from `HypothesisRead`;
+      add `impact_claims` to `PostmortemRead`.
+- [ ] `services/analysis.py`: read-model + `get_postmortem_document` run-level impact;
+      add `list_impact`.
+- [ ] `api/analysis_runs.py`: add `GET /{run_id}/impact` endpoint.
+- [ ] `markdown_export.py`: render impact once from run-level claims.
 
-No ADR was added during the interview. The architecture is substantial enough
-to warrant one when implementation starts, but its exact persistence schema and
-migration sequence should be recorded with that implementation plan rather than
-guessed during domain discovery.
+### Backend — DB compatibility
+- [ ] `db.py`: migrate existing `impact_claims` to run-level without losing data
+      (SQLite rebuild; Postgres add/backfill/not-null/drop). Keep EvidenceRef owner check.
 
-# Publish PRD: Bounded Multi-Pass Causal Analysis
+### Scenarios / replay
+- [ ] Add per-scenario `incident_facts.json` replay; strip impact from `rca.json`.
+- [ ] `scenarios.py` loader + replay wiring for incident facts.
 
-- [x] Re-read the domain glossary, current pipeline, review surface, and evaluation architecture.
-- [x] Identify deep implementation modules and testing boundaries.
-- [x] Check GitHub for an existing equivalent PRD issue.
-- [x] Draft the feature PRD using canonical domain language.
-- [x] Publish the PRD to GitHub with the `ready-for-agent` label.
-- [x] Record the published issue in this review section.
+### Frontend
+- [ ] `lib/api.ts`: rename `RunStage` + labels; move `impact_claims` to `Postmortem`.
+- [ ] `incidents/[id]/page.tsx`: render run-level Impact section once; drop per-hypothesis impact.
+
+### ADR + tests
+- [ ] ADR 0033 superseding affected parts of 0026 (impact → stage 2 / run-level; stage labels).
+- [ ] Update existing backend tests; add integration tests for 0/1/multiple hypotheses and
+      impact independence from hypothesis review decisions.
+- [ ] Run full backend pytest + frontend typecheck/build.
 
 ## Review
 
-Published [GitHub issue #26](https://github.com/sdv1708/postmortem/issues/26):
-`PRD: Bounded multi-pass causal analysis and human root cause conclusions`.
+Implemented as a vertical slice across the stack. All plan items done.
 
-Verification:
-- No equivalent open issue was found.
-- The published body is 30,599 characters.
-- The issue has the `ready-for-agent` label.
-- The local source is `tasks/bounded-multi-pass-causal-analysis-prd.md`.
+**Backend**
+- `ImpactClaim` re-owned from `Hypothesis` to `AnalysisRun` (`run_id` FK); `AnalysisRun.impact_claims`
+  relationship added; `Hypothesis.impact_claims` removed.
+- New `incident_facts.py`: strict `IncidentFactsOutput` contract, `build_incident_facts_prompt`,
+  `IncidentFactExtractor` protocol + `LLMIncidentFactExtractor` default.
+- Stage 2 renamed `extracting_incident_facts` (timeline + run-level impact via the extractor);
+  stage 3 renamed `analyzing_causal_hypotheses` (RCA no longer emits impact). Flagging + citation
+  walks updated to run-level impact.
+- Read models / API: `PostmortemRead.impact_claims`, `HypothesisRead.impact_claims` removed,
+  new `GET /analysis-runs/{id}/impact`, `AnalysisService.list_impact_claims`.
+- Markdown export renders impact once from run-level claims.
+- `db.py`: idempotent SQLite-rebuild / Postgres alter migration backfilling `run_id` from the
+  former hypothesis; EvidenceRef owner constraint untouched.
+- Offline client returns `{}`; both strict contracts default their collections to empty.
 
-# Publish Vertical Slices for PRD #26
+**Scenarios**: per-scenario `incident_facts.json` replays added, impact stripped from `rca.json`,
+loader + `ScenarioReplayIncidentFactExtractor` wired through `seed_and_run`.
 
-- [x] Read the parent PRD and current issue tracker state.
-- [x] Draft independently testable end-to-end slices.
-- [x] Get user approval for granularity, dependencies, and AFK/HITL classification.
-- [x] Publish 13 slices in dependency order with real blocker references.
-- [x] Verify parent links, blocker links, and `ready-for-agent` labels.
-- [x] Record the published issue map in this review section.
+**Frontend**: stage labels + `RunStage` renamed; `impact_claims` moved to `Postmortem`; new
+`RunImpact` panel renders impact once between timeline and hypotheses; per-hypothesis impact removed.
 
-## Review
+**ADR**: 0033 added; 0026 annotated as partially superseded.
 
-Published under parent [#26](https://github.com/sdv1708/postmortem/issues/26):
+**Tests**: full backend suite green (219 passed). Added `FakeIncidentFactExtractor`, a db-compat
+migration test, and run-level impact assertions incl. independence from hypothesis review decisions
+(0/1/multiple hypotheses covered across stage + API tests). Frontend `next build` (typecheck) clean;
+e2e stage-label expectations updated. Canonical demo verified end-to-end: 3 hypotheses + 2 run-level
+impact claims, renamed stages.
 
-- [#27](https://github.com/sdv1708/postmortem/issues/27) Extract run-level incident facts
-- [#28](https://github.com/sdv1708/postmortem/issues/28) Challenge every initial RCA hypothesis
-- [#29](https://github.com/sdv1708/postmortem/issues/29) Mark automated output as a provisional postmortem
-- [#30](https://github.com/sdv1708/postmortem/issues/30) Add one bounded alternative-expansion round
-- [#31](https://github.com/sdv1708/postmortem/issues/31) Produce an evidence-explained advisory ranking
-- [#32](https://github.com/sdv1708/postmortem/issues/32) Expose reasoning and retrieval provenance
-- [#33](https://github.com/sdv1708/postmortem/issues/33) Finalize a supported human root cause conclusion
-- [#34](https://github.com/sdv1708/postmortem/issues/34) Flag an immutable conclusion as disputed
-- [#35](https://github.com/sdv1708/postmortem/issues/35) Review remediation proposals after finalization
-- [#36](https://github.com/sdv1708/postmortem/issues/36) Qualify partial and critically challenged conclusions
-- [#37](https://github.com/sdv1708/postmortem/issues/37) Bound causal analysis and repair invalid outputs
-- [#38](https://github.com/sdv1708/postmortem/issues/38) Compare multi-pass analysis with a builder-only baseline
-- [#39](https://github.com/sdv1708/postmortem/issues/39) Supersede a disputed conclusion
+**Note for reviewer**: design decision — impact *generation* moved into stage 2 (a dedicated
+Reasoning Role), realizing PRD US1 "facts separated from causal interpretation," not just re-owning
+the row. This is the intended direction for epic #26.
 
-Verification:
-- Every issue references parent #26.
-- Every issue has the `ready-for-agent` label.
-- Every dependency references a real published issue.
-- No unresolved blocker placeholders remain.
-- Parent #26 was not modified or closed.
+### Adversarial-review follow-ups (both fixed)
+- **Legacy run-stage rows would fail the renamed API schema**: added a `run_stage_events.stage`
+  data migration (`extracting_timeline_candidates` → `extracting_incident_facts`,
+  `generating_rca_hypotheses` → `analyzing_causal_hypotheses`) + a compat test that also validates
+  the migrated values through `RunStageEventRead`.
+- **SQLite impact rebuild dangled EvidenceRef FKs**: the rename-the-referenced-table approach made
+  `evidence_refs.impact_claim_id` point at the dropped legacy table. Switched to a
+  create-new / drop-old / rename-new rebuild on an AUTOCOMMIT connection with `foreign_keys` off;
+  added a test asserting the citation FK resolves to `impact_claims` and `PRAGMA foreign_key_check`
+  is clean for `evidence_refs`. Backend suite now 221 passed.

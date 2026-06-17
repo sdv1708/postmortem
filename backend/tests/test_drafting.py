@@ -152,7 +152,7 @@ def _ref(snippet: str, line: int = 1) -> EvidenceRefRead:
 
 
 def _hypothesis(*, rank, title, summary, support_status, assumption=False, rationale=None,
-                impact=None, actions=None) -> HypothesisRead:
+                actions=None) -> HypothesisRead:
     return HypothesisRead(
         id=f"hyp-{rank}",
         run_id="run-1",
@@ -167,7 +167,6 @@ def _hypothesis(*, rank, title, summary, support_status, assumption=False, ratio
         validation_steps=[],
         supporting_evidence=[_ref("deploy v184 rolled out")],
         contradicting_evidence=[],
-        impact_claims=impact or [],
         action_items=actions or [],
     )
 
@@ -178,14 +177,6 @@ def _postmortem() -> PostmortemRead:
         title="Deploy v184 regressed the pool",
         summary="The v184 deploy preceded the error spike.",
         support_status="supported",
-        impact=[
-            ImpactClaimRead(
-                id="imp-1", sequence=1, description="Users saw elevated 500s",
-                assumption=False, support_status="partial",
-                support_rationale="Correlated, not proven causal.",
-                evidence_refs=[_ref("api 500 rate climbing", 2)],
-            )
-        ],
         actions=[
             ActionItemRead(
                 id="act-1", sequence=1, description="Add pool-size regression alert",
@@ -193,6 +184,15 @@ def _postmortem() -> PostmortemRead:
             )
         ],
     )
+    # Impact is run-level now (ADR 0033): one impact claim owned by the run.
+    impact_claims = [
+        ImpactClaimRead(
+            id="imp-1", sequence=1, description="Users saw elevated 500s",
+            assumption=False, support_status="partial",
+            support_rationale="Correlated, not proven causal.",
+            evidence_refs=[_ref("api 500 rate climbing", 2)],
+        )
+    ]
     unsupported = _hypothesis(
         rank=2,
         title="Sunspot interference theory",
@@ -220,6 +220,7 @@ def _postmortem() -> PostmortemRead:
                 evidence_refs=[_ref("deploy v184 rolled out")],
             )
         ],
+        impact_claims=impact_claims,
         hypotheses=[supported, unsupported],
     )
 

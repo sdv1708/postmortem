@@ -18,14 +18,6 @@
         "Diff v183..v184 for the connection pool acquisition changes",
         "Replay v184 under a staging load test and watch pool saturation"
       ],
-      "impact_claims": [
-        {
-          "description": "HTTP 500 errors reached 22% of requests on checkout and cart endpoints",
-          "evidence": [
-            {"source_name": "api-gateway.log", "line_start": 5, "line_end": 5}
-          ]
-        }
-      ],
       "remediation_items": [
         {
           "description": "Roll back to v183 and re-test the pool acquisition refactor behind a canary",
@@ -52,14 +44,6 @@
       "validation_steps": [
         "Compare request volume and pool saturation before and after 14:28"
       ],
-      "impact_claims": [
-        {
-          "description": "Database connection acquisition waits exceeded 3 seconds during the incident",
-          "evidence": [
-            {"source_name": "db-pool.log", "line_start": 4, "line_end": 4}
-          ]
-        }
-      ],
       "remediation_items": [
         {
           "description": "Size pool max_connections from measured concurrency and alert on sustained pending waits",
@@ -82,7 +66,6 @@
       "validation_steps": [
         "Check status pages and metrics for each upstream dependency across 14:28-14:40"
       ],
-      "impact_claims": [],
       "remediation_items": []
     }
   ]

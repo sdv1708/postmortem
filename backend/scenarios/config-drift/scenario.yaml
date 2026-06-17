@@ -40,6 +40,7 @@ evidence:
 
 replay:
   rca: replay/rca.json
+  incident_facts: replay/incident_facts.json
   claim_support_overrides:
     - match: surge
       status: partial

@@ -4,11 +4,21 @@ import json
 
 from fastapi.testclient import TestClient
 
+from postmortem.incident_facts import FactsImpactClaim
 from postmortem.llm import FakeLLMClient
+from postmortem.rca import RcaEvidenceRef
 from postmortem.schemas import AnalysisRunCreate
 from postmortem.services import AnalysisService
 
-from tests._fakes import FakeClaimSupportVerifier
+from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
+
+
+def _impact(client, auth_headers, incident_id, run_id):
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/impact", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
 
 
 def create_incident(client: TestClient, auth_headers) -> str:
@@ -62,14 +72,6 @@ def _seed_run_with_hypotheses(app, client, auth_headers, claim_support_verifier=
                     ],
                     "unknowns": ["one open question"],
                     "validation_steps": ["confirm via metrics"],
-                    "impact_claims": [
-                        {
-                            "description": "Customers errored",
-                            "evidence": [
-                                {"artifact_id": artifact_id, "line_start": 2, "line_end": 2}
-                            ],
-                        }
-                    ],
                     "remediation_items": [{"description": "Roll back", "evidence": []}],
                 },
                 {
@@ -82,12 +84,19 @@ def _seed_run_with_hypotheses(app, client, auth_headers, claim_support_verifier=
             ]
         }
     )
+    impact = [
+        FactsImpactClaim(
+            description="Customers errored",
+            evidence=[RcaEvidenceRef(artifact_id=artifact_id, line_start=2, line_end=2)],
+        )
+    ]
     session = app.state.session_factory()
     try:
         run = AnalysisService(
             session,
             llm_client=FakeLLMClient([payload], label="fake-model"),
             claim_support_verifier=claim_support_verifier or FakeClaimSupportVerifier(),
+            incident_fact_extractor=FakeIncidentFactExtractor(impact),
         ).execute_run(run_id, commit_progress=True)
         assert run.status == "succeeded"
         session.commit()
@@ -119,8 +128,6 @@ def test_list_hypotheses_returns_ranked_with_split_evidence(app, client: TestCli
     # citation verified, so the Review Surface can show citation trust (ADR 0014).
     assert top["supporting_evidence"][0]["verifier_status"] == "verified"
     assert top["contradicting_evidence"][0]["verifier_status"] == "verified"
-    assert top["impact_claims"][0]["evidence_refs"][0]["verifier_status"] == "verified"
-    assert top["impact_claims"][0]["description"] == "Customers errored"
     assert top["action_items"][0]["description"] == "Roll back"
     assert top["unknowns"] == ["one open question"]
     assert top["validation_steps"] == ["confirm via metrics"]
@@ -128,7 +135,13 @@ def test_list_hypotheses_returns_ranked_with_split_evidence(app, client: TestCli
     # Surface to separate authoritative from auditable-only (ADR 0014).
     assert top["support_status"] == "supported"
     assert top["support_rationale"]
-    assert top["impact_claims"][0]["support_status"] == "supported"
+    # Impact is a run-level incident fact served once, not nested per hypothesis
+    # (ADR 0033).
+    assert "impact_claims" not in top
+    impact = _impact(client, auth_headers, incident_id, run_id)
+    assert [c["description"] for c in impact] == ["Customers errored"]
+    assert impact[0]["evidence_refs"][0]["verifier_status"] == "verified"
+    assert impact[0]["support_status"] == "supported"
 
 
 def test_support_status_separates_unsupported_and_partial_claims(
@@ -154,9 +167,10 @@ def test_support_status_separates_unsupported_and_partial_claims(
     # and a rationale so the UI can route them to Review Findings (ADR 0015).
     assert hyps["Primary cause"]["support_status"] == "unsupported"
     assert hyps["Primary cause"]["support_rationale"] == "Evidence does not establish this."
-    # The impact claim under the primary hypothesis was judged partial.
-    assert hyps["Primary cause"]["impact_claims"][0]["support_status"] == "partial"
     assert hyps["Alternative cause"]["support_status"] == "partial"
+    # The run-level impact claim was judged partial (ADR 0033).
+    impact = _impact(client, auth_headers, incident_id, run_id)
+    assert impact[0]["support_status"] == "partial"
 
 
 def test_review_hypothesis_sets_status_without_altering_claims(
@@ -178,7 +192,8 @@ def test_review_hypothesis_sets_status_without_altering_claims(
     assert [r["id"] for r in updated["supporting_evidence"]] == [
         r["id"] for r in before["supporting_evidence"]
     ]
-    assert updated["impact_claims"] == before["impact_claims"]
+    # Impact is run-level and unaffected by the review decision (ADR 0033).
+    assert "impact_claims" not in updated
 
     # The new status is durable on the next read.
     after = client.get(base, headers=auth_headers).json()[0]

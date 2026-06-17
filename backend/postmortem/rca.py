@@ -29,11 +29,6 @@ class RcaEvidenceRef(StrictRcaModel):
     confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
-class RcaImpactClaim(StrictRcaModel):
-    description: str = Field(min_length=1)
-    evidence: list[RcaEvidenceRef] = Field(default_factory=list)
-
-
 class RcaRemediationItem(StrictRcaModel):
     description: str = Field(min_length=1)
     evidence: list[RcaEvidenceRef] = Field(default_factory=list)
@@ -46,14 +41,19 @@ class RcaHypothesis(StrictRcaModel):
     contradicting_evidence: list[RcaEvidenceRef] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
     validation_steps: list[str] = Field(default_factory=list)
-    impact_claims: list[RcaImpactClaim] = Field(default_factory=list)
     remediation_items: list[RcaRemediationItem] = Field(default_factory=list)
 
 
 class RcaGenerationOutput(StrictRcaModel):
-    """Top-level RCA stage output: ranked hypotheses (highest support first)."""
+    """Top-level RCA stage output: ranked hypotheses (highest support first).
 
-    hypotheses: list[RcaHypothesis]
+    ``hypotheses`` defaults to empty so the offline/no-provider client (which
+    returns ``{}``) validates as "no hypotheses generated" rather than failing
+    the stage. Impact Claims are no longer part of this contract — they are
+    run-level incident facts produced by the earlier stage (ADR 0033).
+    """
+
+    hypotheses: list[RcaHypothesis] = Field(default_factory=list)
 
 
 _SYSTEM_PROMPT = """\
@@ -67,11 +67,12 @@ Rules:
   than committing to one. Rank them most-supported first.
 - Cite evidence by Artifact id and exact 1-based inclusive line ranges from the
   EVIDENCE block. Never invent artifact ids or line numbers.
-- Every hypothesis and every impact claim must include supporting evidence when
-  the evidence exists. If you cannot cite it, state it as an unknown instead of
-  asserting it.
+- Every hypothesis must include supporting evidence when the evidence exists. If
+  you cannot cite it, state it as an unknown instead of asserting it.
 - Include contradicting evidence, open unknowns, and concrete validation steps
-  for each hypothesis. Tie impact claims and remediation items to the hypothesis.
+  for each hypothesis. Tie remediation items to the hypothesis.
+- Do NOT restate observed incident impact here; impact is extracted separately as
+  a run-level incident fact. Focus on the suspected cause.
 
 The JSON object must match this shape:
 {
@@ -83,7 +84,6 @@ The JSON object must match this shape:
       "contradicting_evidence": [{"artifact_id": "...", "line_start": 1, "line_end": 1}],
       "unknowns": ["what we still cannot determine"],
       "validation_steps": ["how to confirm or refute this"],
-      "impact_claims": [{"description": "evidence-backed impact", "evidence": [{"artifact_id": "...", "line_start": 1, "line_end": 1}]}],
       "remediation_items": [{"description": "concrete action", "evidence": []}]
     }
   ]
