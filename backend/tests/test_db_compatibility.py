@@ -494,7 +494,13 @@ def test_create_app_upgrades_issue_11_postmortems_table(tmp_path):
     )
 
     columns = {column["name"] for column in inspect(engine).get_columns("postmortems")}
-    assert {"evidence_sufficiency", "evidence_gaps", "next_validation_steps"} <= columns
+    assert {
+        "evidence_sufficiency",
+        "evidence_gaps",
+        "next_validation_steps",
+        # Provisional/finalized lifecycle added in slice #29 (ADR 0035).
+        "conclusion_status",
+    } <= columns
 
 
 def test_schema_compatibility_rejects_existing_orphaned_evidence_ref(tmp_path):

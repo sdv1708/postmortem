@@ -246,6 +246,10 @@ export interface Postmortem {
   evidence_sufficiency: "sufficient" | "insufficient";
   evidence_gaps: string[];
   next_validation_steps: string[];
+  // Lifecycle state (ADR 0035, PRD #26): an automated run is always "provisional"
+  // until a human finalizes a Root Cause Conclusion. The Review Surface labels a
+  // provisional draft "Draft: Root cause not finalized".
+  conclusion_status: "provisional" | "finalized";
   composer_version: string;
   timeline: TimelineEvent[];
   impact_claims: ImpactClaim[];

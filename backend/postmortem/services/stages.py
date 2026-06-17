@@ -688,6 +688,9 @@ class PipelineStageRunner:
                 evidence_sufficiency=draft.evidence_sufficiency,
                 evidence_gaps=list(draft.evidence_gaps),
                 next_validation_steps=list(draft.next_validation_steps),
+                # An automated run only produces a provisional draft; finalization
+                # is a separate human action (ADR 0035, PRD #26 stories 26-30).
+                conclusion_status="provisional",
                 composer_version=self._composer.version,
             )
         )

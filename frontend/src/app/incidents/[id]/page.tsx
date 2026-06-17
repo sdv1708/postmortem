@@ -949,12 +949,18 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
 
   const postmortem = postmortemQuery.data;
   const insufficient = postmortem.evidence_sufficiency === "insufficient";
+  const provisional = postmortem.conclusion_status === "provisional";
 
   return (
     <div className="border-t border-slate-200 bg-slate-50/40">
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-3">
         <div className="flex items-center gap-2">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Postmortem</p>
+          {provisional && (
+            <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
+              Draft: Root cause not finalized
+            </span>
+          )}
           {insufficient && (
             <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
               insufficient evidence
@@ -993,6 +999,29 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
       )}
 
       <div className="space-y-3 p-5">
+        {provisional && (
+          <div className="flex items-start gap-2 rounded-lg border border-indigo-200 bg-indigo-50/70 p-4">
+            <svg
+              className="mt-0.5 shrink-0 text-indigo-600"
+              width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            >
+              <path d="M12 8v4" />
+              <path d="M12 16h.01" />
+              <circle cx="12" cy="12" r="10" />
+            </svg>
+            <div>
+              <h4 className="text-sm font-semibold text-indigo-900">
+                Draft: Root cause not finalized
+              </h4>
+              <p className="mt-0.5 text-xs leading-relaxed text-indigo-800">
+                This is an automated provisional postmortem. It presents hypotheses and
+                uncertainty for review; no root cause has been established. Only a human
+                reviewer finalizes a Root Cause Conclusion.
+              </p>
+            </div>
+          </div>
+        )}
         {insufficient && (
           <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-50/70 p-4">
             <div className="flex items-start gap-2">

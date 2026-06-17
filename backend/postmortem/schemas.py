@@ -332,6 +332,11 @@ class PostmortemRead(BaseModel):
     evidence_sufficiency: Literal["sufficient", "insufficient"]
     evidence_gaps: list[str]
     next_validation_steps: list[str]
+    # Lifecycle state of the automated draft (ADR 0035, PRD #26). 'provisional'
+    # means no human Root Cause Conclusion exists yet, so the Review Surface and
+    # exports must label it "Draft: Root cause not finalized". 'finalized' is
+    # reserved for a future human-finalization slice; automated runs never set it.
+    conclusion_status: Literal["provisional", "finalized"]
     composer_version: str
     timeline: list[TimelineEventRead]
     impact_claims: list[ImpactClaimRead]
