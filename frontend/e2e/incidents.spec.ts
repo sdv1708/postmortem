@@ -128,12 +128,21 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
 
   // Multiple ranked hypotheses with verified citations and contradicting
-  // evidence — the founder-demo trust path (ADR 0032).
-  await expect(page.getByText(/RCA hypotheses · 2/)).toBeVisible();
+  // evidence — the founder-demo trust path (ADR 0032). Two builder hypotheses
+  // plus the falsifier's proposed alternative are evidence-backed (ADR 0036).
+  await expect(page.getByText(/RCA hypotheses · 3/)).toBeVisible();
   await expect(
     page.getByText("Deploy v184 connection-pool refactor regressed connection handling"),
   ).toBeVisible();
   await expect(page.getByRole("img", { name: /Citation verified/ }).first()).toBeVisible();
+
+  // The bounded expansion round surfaced a missed alternative, labeled distinctly
+  // and travelling the full citation/challenge/review path (ADR 0036, #30). It is
+  // shown as a proposed alternative, never as a root cause.
+  await expect(
+    page.getByText("Cache-node eviction shifted read load onto the primary database"),
+  ).toBeVisible();
+  await expect(page.getByText("proposed alternative").first()).toBeVisible();
 
   // The unevidenced suspicion is separated into auditable Review Findings rather
   // than presented as fact (ADR 0015).

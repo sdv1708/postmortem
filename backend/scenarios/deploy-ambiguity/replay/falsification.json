@@ -21,6 +21,46 @@
     ],
     "falsification_tests": [
       "Replay v184 under a staging load test without a cache eviction and watch for pool saturation."
+    ],
+    "proposed_hypotheses": [
+      {
+        "title": "Cache-node eviction shifted read load onto the primary database",
+        "summary": "A cache node evicted under memory pressure mid-incident, pushing previously cached reads onto the primary database and saturating the connection pool independently of the v184 deploy.",
+        "supporting_evidence": [
+          {"source_name": "db-pool.log", "line_start": 3, "line_end": 4, "confidence_score": 0.7},
+          {"source_name": "api-gateway.log", "line_start": 6, "line_end": 6, "confidence_score": 0.6}
+        ],
+        "contradicting_evidence": [
+          {"source_name": "api-gateway.log", "line_start": 4, "line_end": 4, "confidence_score": 0.5}
+        ],
+        "unknowns": [
+          "Whether cache-2's eviction alone could account for the full pending-connection growth."
+        ],
+        "validation_steps": [
+          "Correlate the cache_evict timestamp with the pending-connection climb in db-pool.log."
+        ],
+        "remediation_items": [
+          {"description": "Add cache-eviction alerting tied to database pending-connection spikes.", "evidence": []}
+        ]
+      }
+    ]
+  },
+  "Cache-node eviction shifted read load onto the primary database": {
+    "challenged_claim": "A cache-node eviction, not the deploy, drove the connection-pool saturation.",
+    "severity": "material",
+    "counterclaims": [
+      {
+        "statement": "Pending connections were already climbing at 14:31, before the 14:33 cache eviction, so the eviction cannot be the sole trigger.",
+        "evidence": [
+          {"source_name": "db-pool.log", "line_start": 1, "line_end": 1, "confidence_score": 0.8}
+        ]
+      }
+    ],
+    "evidence_gaps": [
+      "Cache hit-rate and read-volume metrics around 14:33 are not in the collected evidence."
+    ],
+    "falsification_tests": [
+      "Pull cache hit-rate and primary read QPS for 14:30-14:40 to size the eviction's database impact."
     ]
   },
   "Primary connection pool was undersized for the offered load": {

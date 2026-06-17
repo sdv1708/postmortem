@@ -512,6 +512,7 @@ def hypothesis_read(hypothesis: Hypothesis) -> dict:
         "id": hypothesis.id,
         "run_id": hypothesis.run_id,
         "rank": hypothesis.rank,
+        "origin": hypothesis.origin or "initial",
         "title": hypothesis.title,
         "summary": hypothesis.summary,
         "assumption": hypothesis.assumption,

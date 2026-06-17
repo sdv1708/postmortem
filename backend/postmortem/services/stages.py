@@ -15,7 +15,9 @@ from ..drafting import (
     PostmortemComposerContext,
 )
 from ..falsification import (
+    MAX_PROPOSED_HYPOTHESES,
     Falsifier,
+    HypothesisChallengeOutput,
     HypothesisToChallenge,
     LLMFalsifier,
 )
@@ -385,6 +387,7 @@ class PipelineStageRunner:
             hypothesis = Hypothesis(
                 run_id=run.id,
                 rank=rank,
+                origin="initial",
                 title=hyp.title,
                 summary=hyp.summary,
                 assumption=assumption,
@@ -407,11 +410,13 @@ class PipelineStageRunner:
 
         self._session.flush()
 
-        # Bounded falsifier substep (ADR 0034): challenge every initial hypothesis
-        # before stage 3 can succeed. The falsifier searches all run artifacts, so
-        # counterclaims resolve against the full immutable evidence set, not just
-        # the builder's retrieval subset.
-        self._challenge_hypotheses(run, hypotheses, timeline, warning_codes)
+        # Bounded Falsification Round (ADR 0034 / 0036): challenge every initial
+        # hypothesis, then run one bounded alternative-expansion pass that may add
+        # up to two Proposed RCA Hypotheses and challenges those once. The falsifier
+        # searches all run artifacts, so counterclaims and proposed-alternative
+        # citations resolve against the full immutable evidence set, not just the
+        # builder's retrieval subset.
+        self._run_falsification_round(run, hypotheses, timeline, warning_codes)
 
         outcome: dict = {}
         if warning_codes:
@@ -429,93 +434,206 @@ class PipelineStageRunner:
         )
         return outcome or None
 
-    def _challenge_hypotheses(
+    def _run_falsification_round(
         self,
         run: AnalysisRun,
-        hypotheses: list[Hypothesis],
+        initial_hypotheses: list[Hypothesis],
         timeline: list[TimelineEvent],
         warning_codes: list[str],
     ) -> None:
-        """Challenge every initial RCA Hypothesis through the falsifier (ADR 0034).
+        """Run the single bounded Falsification Round (ADR 0034 / 0036).
 
-        Each hypothesis receives exactly one persisted Hypothesis Challenge —
-        severity, cited Counterclaims (or an explicit assumption marker, ADR 0013),
-        Evidence Gaps, and Falsification Tests — before stage 3 can succeed. The
-        falsifier is handed the persisted hypothesis and ALL run artifacts so it
-        can find counterevidence the builder's retrieval subset omitted (PRD user
-        story 13); a Counterclaim's citations resolve from the stored artifact
-        lines, never model text (ADR 0024).
+        The round has two passes and never recurses (PRD user story 16):
 
-        Complete challenge coverage is mandatory: if the falsifier cannot produce a
-        schema-valid challenge for a hypothesis it raises, which fails the stage
-        after its single retry (ADR 0029) rather than presenting unchallenged
-        hypotheses as multi-pass output (PRD user stories 61-62). Idempotent across
-        the retry: ``_clear_hypotheses`` cascades the prior attempt's challenges
-        and counterclaims away before hypotheses are regenerated.
+        1. Challenge every initial RCA Hypothesis. Each receives exactly one
+           persisted Hypothesis Challenge — severity, cited Counterclaims (or an
+           explicit assumption marker, ADR 0013), Evidence Gaps, and Falsification
+           Tests. While challenging an initial hypothesis the falsifier may surface
+           missed alternatives; they are collected in order.
+
+        2. Persist at most ``MAX_PROPOSED_HYPOTHESES`` Proposed RCA Hypotheses
+           (``origin='proposed'``) from those collected, then challenge each once
+           with proposals disabled. A proposed alternative thus travels the exact
+           same citation/challenge/review path as an initial hypothesis and is
+           challenged exactly once (PRD user story 15).
+
+        Runtime Reasoning Gate (ADR 0036, PRD user story 65 / AC #4): more than two
+        proposed alternatives, or a second-round challenge that tries to propose
+        again, raises — which fails the stage after its single retry (ADR 0029),
+        the bounded repair/failure contract available at this point. Complete
+        challenge coverage stays mandatory (ADR 0034). Idempotent across the retry:
+        ``_clear_hypotheses`` cascades both initial and proposed hypotheses, their
+        challenges, and counterclaims away before regeneration.
         """
-        if not hypotheses:
+        if not initial_hypotheses:
             return
         all_artifacts = self._run_artifacts(run)
         by_id = {artifact.id: artifact for artifact in all_artifacts}
-        challenged = 0
-        for hypothesis in hypotheses:
-            target = HypothesisToChallenge(
-                title=hypothesis.title,
-                summary=hypothesis.summary,
-                supporting_snippets=tuple(
-                    ref.snippet for ref in hypothesis.evidence_refs if ref.role != "contradicting"
-                ),
-                contradicting_snippets=tuple(
-                    ref.snippet for ref in hypothesis.evidence_refs if ref.role == "contradicting"
-                ),
+
+        # Pass 1: challenge initial hypotheses, collecting proposed alternatives.
+        proposed: list = []
+        for hypothesis in initial_hypotheses:
+            result = self._challenge_hypothesis(
+                run, hypothesis, all_artifacts, timeline, by_id, warning_codes, allow_proposals=True
             )
-            result = self._falsifier.challenge(
-                hypothesis=target, artifacts=all_artifacts, timeline_events=timeline
-            )
-            challenge = HypothesisChallenge(
-                run_id=run.id,
-                hypothesis_id=hypothesis.id,
-                challenged_claim=result.challenged_claim,
-                severity=result.severity,
-                evidence_gaps=list(result.evidence_gaps),
-                falsification_tests=list(result.falsification_tests),
-                falsifier_version=self._falsifier.version,
-            )
-            for sequence, counter in enumerate(result.counterclaims, start=1):
-                # A Counterclaim is a Major Claim: resolve its citations from the
-                # stored artifact lines, or normalize it to an assumption when it
-                # cites nothing resolvable (ADR 0013), so the falsifier cannot
-                # introduce unchecked incident facts.
-                evidence = self._resolve_refs(by_id, counter.evidence, "supporting", warning_codes)
-                assumption = not evidence
-                if assumption:
-                    warning_codes.append("uncited_claim")
-                counterclaim = Counterclaim(
-                    sequence=sequence,
-                    statement=counter.statement,
-                    assumption=assumption,
-                )
-                counterclaim.evidence_refs.extend(evidence)
-                challenge.counterclaims.append(counterclaim)
-            self._session.add(challenge)
-            challenged += 1
-        self._session.flush()
-        # Defensive coverage gate (ADR 0034): the per-hypothesis loop always
-        # produces one challenge or raises, but assert completeness explicitly so a
-        # future falsifier that silently skips a hypothesis fails the stage rather
-        # than shipping partial coverage.
-        if challenged != len(hypotheses):
+            proposed.extend(result.proposed_hypotheses)
+
+        # Runtime Reasoning Gate: the expansion round is bounded. Exceeding the cap
+        # fails the stage rather than silently truncating, so the bound is auditable.
+        if len(proposed) > MAX_PROPOSED_HYPOTHESES:
             raise ValueError(
-                f"incomplete challenge coverage: challenged {challenged} of {len(hypotheses)} hypotheses"
+                f"falsification proposed {len(proposed)} alternatives, exceeding the "
+                f"bounded maximum of {MAX_PROPOSED_HYPOTHESES}"
             )
+
+        # Pass 2: persist each proposed alternative as an origin='proposed'
+        # hypothesis and challenge it once with proposals disabled (no recursion).
+        proposed_hypotheses: list[Hypothesis] = []
+        next_rank = len(initial_hypotheses)
+        for offset, candidate in enumerate(proposed, start=1):
+            next_rank += 1
+            hypothesis = self._persist_proposed_hypothesis(
+                run, candidate, next_rank, by_id, warning_codes
+            )
+            proposed_hypotheses.append(hypothesis)
+        self._session.flush()
+        for hypothesis in proposed_hypotheses:
+            result = self._challenge_hypothesis(
+                run, hypothesis, all_artifacts, timeline, by_id, warning_codes, allow_proposals=False
+            )
+            if result.proposed_hypotheses:
+                # No recursive expansion: a proposed hypothesis may not itself
+                # spawn further alternatives (ADR 0036, PRD user story 16 / AC #1).
+                raise ValueError(
+                    "falsification attempted a second expansion round while challenging a "
+                    "proposed alternative"
+                )
+
+        self._session.flush()
+        total = len(initial_hypotheses) + len(proposed_hypotheses)
         log_event(
             logger,
             logging.INFO,
             "stage_challenging_hypotheses_completed",
             run_id=run.id,
-            hypothesis_count=len(hypotheses),
+            hypothesis_count=total,
+            initial_count=len(initial_hypotheses),
+            proposed_count=len(proposed_hypotheses),
             falsifier_version=self._falsifier.version,
         )
+
+    def _challenge_hypothesis(
+        self,
+        run: AnalysisRun,
+        hypothesis: Hypothesis,
+        all_artifacts: list[Artifact],
+        timeline: list[TimelineEvent],
+        by_id: dict[str, Artifact],
+        warning_codes: list[str],
+        *,
+        allow_proposals: bool,
+    ) -> HypothesisChallengeOutput:
+        """Challenge one hypothesis and persist its Hypothesis Challenge (ADR 0034).
+
+        The falsifier is handed the persisted hypothesis and ALL run artifacts so
+        it can find counterevidence the builder's retrieval subset omitted (PRD
+        user story 13); a Counterclaim's citations resolve from the stored artifact
+        lines, never model text (ADR 0024). A schema-invalid or missing challenge
+        raises, failing the stage after its single retry rather than shipping
+        partial coverage (PRD user stories 61-62). Returns the falsifier output so
+        the caller can read any proposed alternatives.
+        """
+        target = HypothesisToChallenge(
+            title=hypothesis.title,
+            summary=hypothesis.summary,
+            supporting_snippets=tuple(
+                ref.snippet for ref in hypothesis.evidence_refs if ref.role != "contradicting"
+            ),
+            contradicting_snippets=tuple(
+                ref.snippet for ref in hypothesis.evidence_refs if ref.role == "contradicting"
+            ),
+        )
+        result = self._falsifier.challenge(
+            hypothesis=target,
+            artifacts=all_artifacts,
+            timeline_events=timeline,
+            allow_proposals=allow_proposals,
+        )
+        challenge = HypothesisChallenge(
+            run_id=run.id,
+            hypothesis_id=hypothesis.id,
+            challenged_claim=result.challenged_claim,
+            severity=result.severity,
+            evidence_gaps=list(result.evidence_gaps),
+            falsification_tests=list(result.falsification_tests),
+            falsifier_version=self._falsifier.version,
+        )
+        for sequence, counter in enumerate(result.counterclaims, start=1):
+            # A Counterclaim is a Major Claim: resolve its citations from the
+            # stored artifact lines, or normalize it to an assumption when it cites
+            # nothing resolvable (ADR 0013), so the falsifier cannot introduce
+            # unchecked incident facts.
+            evidence = self._resolve_refs(by_id, counter.evidence, "supporting", warning_codes)
+            assumption = not evidence
+            if assumption:
+                warning_codes.append("uncited_claim")
+            counterclaim = Counterclaim(
+                sequence=sequence,
+                statement=counter.statement,
+                assumption=assumption,
+            )
+            counterclaim.evidence_refs.extend(evidence)
+            challenge.counterclaims.append(counterclaim)
+        self._session.add(challenge)
+        return result
+
+    def _persist_proposed_hypothesis(
+        self,
+        run: AnalysisRun,
+        candidate,
+        rank: int,
+        by_id: dict[str, Artifact],
+        warning_codes: list[str],
+    ) -> Hypothesis:
+        """Persist a falsifier-proposed alternative as an origin='proposed' row.
+
+        Mirrors the builder's hypothesis persistence (ADR 0036): citations resolve
+        from the stored artifact lines over the full immutable run-artifact set,
+        an uncited statement is normalized to an assumption (ADR 0013), and
+        remediation items hang off the hypothesis. The hypothesis then receives the
+        same challenge, citation-audit, and support treatment as an initial one;
+        ``origin`` only records how it entered, never a different trust level.
+        """
+        supporting = self._resolve_refs(
+            by_id, candidate.supporting_evidence, "supporting", warning_codes
+        )
+        contradicting = self._resolve_refs(
+            by_id, candidate.contradicting_evidence, "contradicting", warning_codes
+        )
+        assumption = not supporting
+        if assumption:
+            warning_codes.append("uncited_claim")
+        hypothesis = Hypothesis(
+            run_id=run.id,
+            rank=rank,
+            origin="proposed",
+            title=candidate.title,
+            summary=candidate.summary,
+            assumption=assumption,
+            review_status="proposed",
+            unknowns=list(candidate.unknowns),
+            validation_steps=list(candidate.validation_steps),
+        )
+        hypothesis.evidence_refs.extend(supporting)
+        hypothesis.evidence_refs.extend(contradicting)
+        for sequence, remediation in enumerate(candidate.remediation_items, start=1):
+            item = ActionItem(sequence=sequence, description=remediation.description)
+            item.evidence_refs.extend(
+                self._resolve_refs(by_id, remediation.evidence, "supporting", warning_codes)
+            )
+            hypothesis.action_items.append(item)
+        self._session.add(hypothesis)
+        return hypothesis
 
     def _resolve_refs(
         self,

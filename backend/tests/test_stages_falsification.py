@@ -196,10 +196,13 @@ def test_falsifier_sees_all_run_artifacts_not_just_the_cited_subset(fresh_sessio
         return HypothesisChallengeOutput(challenged_claim="x", severity="minor")
 
     class RecordingFalsifier(FakeFalsifier):
-        def challenge(self, *, hypothesis, artifacts, timeline_events):
+        def challenge(self, *, hypothesis, artifacts, timeline_events, allow_proposals=True):
             seen_artifact_ids.update(a.id for a in artifacts)
             return super().challenge(
-                hypothesis=hypothesis, artifacts=artifacts, timeline_events=timeline_events
+                hypothesis=hypothesis,
+                artifacts=artifacts,
+                timeline_events=timeline_events,
+                allow_proposals=allow_proposals,
             )
 
     run = AnalysisService(
