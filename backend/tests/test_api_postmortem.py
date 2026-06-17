@@ -108,6 +108,9 @@ def test_get_postmortem_returns_structured_document(app, client: TestClient, aut
     body = resp.json()
     assert body["incident_title"] == "PM incident"
     assert body["composer_version"] == "postmortem-template-1"
+    # An automated run produces a provisional draft, never a finalized conclusion
+    # (ADR 0035, PRD #26 stories 26-28).
+    assert body["conclusion_status"] == "provisional"
     assert "2 root-cause hypotheses were generated for evidence review" in body["summary"]
     assert "Primary cause" not in body["summary"]
     assert "Alternative cause" not in body["summary"]
@@ -172,6 +175,31 @@ def test_export_marks_refusal_for_insufficient_evidence(app, client: TestClient,
     assert "Suggested next evidence" in markdown
     # A clean export of an insufficient run presents no confident root cause.
     assert "_No evidence-backed root-cause hypotheses were recorded._" in markdown
+
+
+def test_export_marks_provisional_in_both_modes(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_drafted_run(app, client, auth_headers)
+    for mode in ("clean", "audit"):
+        resp = client.post(
+            f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem/export",
+            json={"mode": mode},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        markdown = resp.json()["markdown"]
+        # Provisional labeling survives through export in either mode (AC #2/#5).
+        assert "Draft: Root cause not finalized" in markdown
+        assert "**Status:** provisional" in markdown
+
+
+def test_refused_run_postmortem_is_provisional(app, client: TestClient, auth_headers):
+    # Refusal and provisional labeling coexist (AC #4).
+    incident_id, run_id = _seed_refused_run(app, client, auth_headers)
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem", headers=auth_headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["conclusion_status"] == "provisional"
 
 
 def test_get_postmortem_404_before_drafting(app, client: TestClient, auth_headers):

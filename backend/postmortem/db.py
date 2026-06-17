@@ -317,6 +317,10 @@ def ensure_schema_compatibility(engine: Engine) -> None:
             "evidence_sufficiency": "VARCHAR(16) NOT NULL DEFAULT 'sufficient'",
             "evidence_gaps": "JSON",
             "next_validation_steps": "JSON",
+            # Provisional/finalized lifecycle added in slice #29 (ADR 0035).
+            # Existing automated drafts are provisional: no human Root Cause
+            # Conclusion has been finalized for them.
+            "conclusion_status": "VARCHAR(16) NOT NULL DEFAULT 'provisional'",
         },
     )
 

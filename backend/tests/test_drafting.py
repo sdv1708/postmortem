@@ -211,6 +211,7 @@ def _postmortem() -> PostmortemRead:
         evidence_sufficiency="sufficient",
         evidence_gaps=[],
         next_validation_steps=[],
+        conclusion_status="provisional",
         composer_version="postmortem-template-1",
         created_at=datetime.now(timezone.utc),
         timeline=[
@@ -249,6 +250,49 @@ def test_audit_export_includes_unsupported_claims_labeled():
     assert "Sunspot interference theory" in markdown
     assert "No supporting evidence was cited." in markdown
     assert "_(support: unsupported)_" in markdown
+
+
+def test_provisional_label_present_in_clean_and_audit_exports():
+    # Both export modes must carry the provisional label so a shared draft can
+    # never read as a finalized human conclusion (ADR 0035, PRD #26 stories 27-28).
+    for mode in (ExportMode.CLEAN, ExportMode.AUDIT):
+        markdown = render_markdown(_postmortem(), mode)
+        assert "Draft: Root cause not finalized" in markdown
+        assert "**Status:** provisional" in markdown
+        # The label is stamped into the heading so it survives a copied fragment.
+        assert markdown.splitlines()[0].endswith("[Draft: Root cause not finalized]")
+
+
+def test_provisional_export_asserts_no_root_cause_conclusion():
+    # A provisional draft never states an established root cause (ADR 0035).
+    markdown = render_markdown(_postmortem(), ExportMode.CLEAN)
+    assert "no root cause has been established" in markdown.lower()
+    assert "root cause conclusion" not in markdown.lower().replace(
+        "finalizes a root cause conclusion", ""
+    )
+
+
+def test_finalized_postmortem_omits_provisional_label():
+    # Forward-compat: a future finalized conclusion drops the draft banner. The
+    # renderer keys only off conclusion_status, not run success.
+    finalized = _postmortem().model_copy(update={"conclusion_status": "finalized"})
+    markdown = render_markdown(finalized, ExportMode.CLEAN)
+    assert "Draft: Root cause not finalized" not in markdown
+    assert "**Status:** finalized" in markdown
+
+
+def test_refusal_export_remains_provisional():
+    # Insufficient-evidence refusal and provisional labeling coexist (AC #4).
+    refused = _postmortem().model_copy(
+        update={
+            "evidence_sufficiency": "insufficient",
+            "evidence_gaps": ["No deploy history was provided."],
+            "next_validation_steps": ["Attach the deploy log."],
+        }
+    )
+    markdown = render_markdown(refused, ExportMode.CLEAN)
+    assert "Draft: Root cause not finalized" in markdown
+    assert "**Evidence sufficiency:** insufficient" in markdown
 
 
 def test_markdown_is_derived_only_from_structured_data():

@@ -24,6 +24,11 @@ class ExportMode(str, Enum):
 # clean exports and moved to the audit-only Review Findings section.
 _AUTHORITATIVE_SUPPORT = frozenset({"supported", "partial"})
 
+# The mandatory provisional label (ADR 0035, PRD #26 stories 27-28). Every export
+# of a provisional draft — clean or audit — carries this so a shared draft can
+# never be mistaken for a human-finalized Root Cause Conclusion.
+DRAFT_NOT_FINALIZED = "Draft: Root cause not finalized"
+
 
 def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
     """Render a structured Postmortem to Markdown (ADR 0012 / 0022).
@@ -37,10 +42,25 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
     review_findings = [h for h in postmortem.hypotheses if not _is_authoritative(h.support_status)]
 
     insufficient = postmortem.evidence_sufficiency == "insufficient"
+    provisional = postmortem.conclusion_status == "provisional"
 
-    lines: list[str] = [f"# Postmortem — {postmortem.incident_title}", ""]
+    title = f"# Postmortem — {postmortem.incident_title}"
+    if provisional:
+        # Stamp the provisional status into the heading itself so it survives
+        # copy/paste of a fragment, not just the metadata block (ADR 0035).
+        title = f"{title} [{DRAFT_NOT_FINALIZED}]"
+    lines: list[str] = [title, ""]
+    if provisional:
+        lines.append(
+            f"> **{DRAFT_NOT_FINALIZED}.** This is an automated provisional "
+            "postmortem. It presents hypotheses and uncertainty for review; no "
+            "root cause has been established. Only a human reviewer finalizes a "
+            "Root Cause Conclusion."
+        )
+        lines.append("")
     lines.append(f"- **Severity:** {postmortem.incident_severity or '—'}")
     lines.append(f"- **Export mode:** {mode.value}")
+    lines.append(f"- **Status:** {postmortem.conclusion_status}")
     lines.append(f"- **Evidence sufficiency:** {postmortem.evidence_sufficiency}")
     if insufficient:
         lines.append(

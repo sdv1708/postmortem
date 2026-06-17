@@ -583,6 +583,7 @@ def postmortem_read(postmortem, incident, timeline_events, impact_claims, hypoth
         "evidence_sufficiency": postmortem.evidence_sufficiency or "sufficient",
         "evidence_gaps": list(postmortem.evidence_gaps or []),
         "next_validation_steps": list(postmortem.next_validation_steps or []),
+        "conclusion_status": postmortem.conclusion_status or "provisional",
         "composer_version": postmortem.composer_version,
         "timeline": [timeline_event_read(event) for event in timeline_events],
         "impact_claims": [impact_claim_read(claim) for claim in impact_claims],

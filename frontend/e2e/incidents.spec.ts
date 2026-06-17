@@ -1,6 +1,16 @@
 import { test, expect } from "@playwright/test";
+import type { Readable } from "node:stream";
 
 const BASE = process.env.UI_BASE ?? "http://localhost:3000";
+
+async function streamToString(stream: Readable | null): Promise<string> {
+  if (!stream) return "";
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
 
 test("create incident and view it in the workflow hub", async ({ page }) => {
   await page.goto(`${BASE}/incidents`);
@@ -149,6 +159,25 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   // The structured postmortem and its clean/audit exports rendered.
   await expect(page.getByRole("button", { name: "Export clean" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Export audit" })).toBeVisible();
+
+  // The automated draft is labeled provisional: no human Root Cause Conclusion
+  // has been finalized, so it cannot be mistaken for one (ADR 0035, #29).
+  await expect(
+    page.getByRole("heading", { name: "Draft: Root cause not finalized" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/This is an automated provisional postmortem/),
+  ).toBeVisible();
+
+  // Provisional labeling survives into the exported Markdown (AC #2/#5).
+  const download = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export clean" }).click(),
+  ]).then(([d]) => d);
+  const stream = await download.createReadStream();
+  const exported = await streamToString(stream);
+  expect(exported).toContain("Draft: Root cause not finalized");
+  expect(exported).toContain("**Status:** provisional");
 });
 
 test("run the evaluation suite and review the deterministic dashboard", async ({ page }) => {
@@ -196,6 +225,11 @@ test("seed the insufficient-evidence scenario and see a refusal, not a confident
   // The system refuses rather than asserting a confident root cause (ADR 0032).
   await expect(
     page.getByText("Insufficient evidence — no confident root cause asserted"),
+  ).toBeVisible();
+  // Refusal and provisional labeling coexist: a refused run is still a draft
+  // pending a human conclusion (ADR 0035, #29 AC #4).
+  await expect(
+    page.getByRole("heading", { name: "Draft: Root cause not finalized" }),
   ).toBeVisible();
   // It stays useful: it says what to collect next (AC #5).
   await expect(page.getByText("Suggested next evidence")).toBeVisible();

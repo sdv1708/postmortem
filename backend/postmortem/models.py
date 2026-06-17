@@ -539,6 +539,13 @@ class Postmortem(Base):
     evidence_sufficiency: Mapped[str] = mapped_column(String(16), nullable=False, default="sufficient")
     evidence_gaps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     next_validation_steps: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # Provisional vs finalized lifecycle (ADR 0035, PRD #26 stories 26-28). An
+    # automated Analysis Run only ever produces a 'provisional' draft: it presents
+    # hypotheses and uncertainty but never a Root Cause Conclusion, which is a
+    # separate human finalization action. The value stays 'provisional' until a
+    # human finalizes; the column exists now so the provisional state is explicit
+    # product data and distinguishable from a future finalized conclusion.
+    conclusion_status: Mapped[str] = mapped_column(String(16), nullable=False, default="provisional")
     composer_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
