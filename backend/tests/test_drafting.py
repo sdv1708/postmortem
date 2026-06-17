@@ -152,11 +152,12 @@ def _ref(snippet: str, line: int = 1) -> EvidenceRefRead:
 
 
 def _hypothesis(*, rank, title, summary, support_status, assumption=False, rationale=None,
-                actions=None) -> HypothesisRead:
+                actions=None, origin="initial") -> HypothesisRead:
     return HypothesisRead(
         id=f"hyp-{rank}",
         run_id="run-1",
         rank=rank,
+        origin=origin,
         title=title,
         summary=summary,
         assumption=assumption,

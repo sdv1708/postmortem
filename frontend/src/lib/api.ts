@@ -202,6 +202,11 @@ export interface Hypothesis {
   id: string;
   run_id: string;
   rank: number;
+  // Provenance within the Causal Analysis Stage (ADR 0036): "initial" for a
+  // builder hypothesis, "proposed" for a falsifier-introduced missed alternative
+  // from the bounded expansion round. The Review Surface distinguishes the two
+  // without treating either as a Root Cause Conclusion (PRD #30).
+  origin: "initial" | "proposed";
   title: string;
   summary: string;
   assumption: boolean;

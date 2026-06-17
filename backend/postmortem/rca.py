@@ -8,6 +8,14 @@ from pydantic import BaseModel, ConfigDict, Field
 # the prompt or the expected output contract changes so runs stay comparable.
 PROMPT_VERSION: Final[str] = "rca-1"
 
+# The bounded builder cardinality (ADR 0036, PRD #26 / #30 user story 65, Hypothesis
+# Budget): the builder may generate at most this many initial RCA Hypotheses. More
+# than this fails the Runtime Reasoning Gate rather than persisting an unbounded
+# candidate set, keeping the review and token surface predictable. This is the
+# initial-hypothesis sibling of ``MAX_PROPOSED_HYPOTHESES`` (at most two), which
+# together cap the final advisory list at seven.
+MAX_INITIAL_HYPOTHESES: Final[int] = 5
+
 
 # --- Strict structured model-output contract (ADR 0028) ---------------------
 #

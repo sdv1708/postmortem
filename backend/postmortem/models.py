@@ -279,6 +279,12 @@ class Hypothesis(Base):
     )
     # 1-based rank; lower is the more strongly supported hypothesis.
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Provenance within the Causal Analysis Stage (ADR 0036, PRD #26 / #30):
+    # 'initial' for a builder-generated hypothesis, 'proposed' for a missed
+    # alternative the falsifier introduced in the one bounded expansion round. A
+    # proposed alternative still travels the full citation/support/challenge/review
+    # path; origin only distinguishes how it entered, never its trust level.
+    origin: Mapped[str] = mapped_column(String(16), nullable=False, default="initial")
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     # True when the statement has no supporting citation (ADR 0013). The narrative

@@ -284,6 +284,16 @@ def ensure_schema_compatibility(engine: Engine) -> None:
     _add_columns_if_missing(engine, inspector, "hypotheses", support_columns)
     _add_columns_if_missing(engine, inspector, "impact_claims", support_columns)
 
+    # Hypothesis provenance added in slice #30 (ADR 0036): existing hypotheses are
+    # builder-generated, so they default to 'initial'. Proposed alternatives from
+    # the falsifier's bounded expansion round carry 'proposed'.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "hypotheses",
+        {"origin": "VARCHAR(16) NOT NULL DEFAULT 'initial'"},
+    )
+
     # Re-own Impact Claims from a hypothesis to the run (ADR 0033). Runs after the
     # support columns exist so the SQLite table rebuild can copy them.
     _migrate_impact_claims_to_run_level(engine, inspect(engine))

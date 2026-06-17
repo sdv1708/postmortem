@@ -1263,6 +1263,14 @@ function HypothesisCard({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h4 className="text-sm font-semibold text-slate-900">{hypothesis.title}</h4>
+              {hypothesis.origin === "proposed" && (
+                <span
+                  className="badge bg-violet-50 text-violet-700 ring-violet-200"
+                  title="Introduced by the falsifier's bounded alternative-expansion round, then challenged and reviewed like any other hypothesis. Not a root cause."
+                >
+                  proposed alternative
+                </span>
+              )}
               {hypothesis.assumption && (
                 <span className="badge bg-amber-50 text-amber-700 ring-amber-200">assumption</span>
               )}

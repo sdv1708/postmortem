@@ -108,9 +108,15 @@ class FakeFalsifier:
         self.calls: list[HypothesisToChallenge] = []
 
     def challenge(
-        self, *, hypothesis: HypothesisToChallenge, artifacts, timeline_events
+        self,
+        *,
+        hypothesis: HypothesisToChallenge,
+        artifacts,
+        timeline_events,
+        allow_proposals: bool = True,
     ) -> HypothesisChallengeOutput:
         self.calls.append(hypothesis)
+        self.last_allow_proposals = allow_proposals
         if hypothesis.title in self._raise_for:
             raise ValueError(f"fake falsifier cannot challenge {hypothesis.title!r}")
         if self._challenge is not None:

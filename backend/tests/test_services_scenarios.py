@@ -36,8 +36,10 @@ def test_seed_and_run_drives_the_founder_demo_trust_path(fresh_session):
     assert "scenario-replay-claim-support-1" in run.verifier_version
 
     hyps = _hypotheses(fresh_session, run.id)
-    # Ambiguity is demonstrated: multiple ranked hypotheses.
-    assert [h.rank for h in hyps] == [1, 2, 3]
+    # Ambiguity is demonstrated: three ranked builder hypotheses plus one
+    # falsifier-proposed alternative from the bounded expansion round (ADR 0036).
+    assert [h.rank for h in hyps] == [1, 2, 3, 4]
+    assert [h.origin for h in hyps] == ["initial", "initial", "initial", "proposed"]
 
     top = hyps[0]
     supporting = [r for r in top.evidence_refs if r.role == "supporting"]
@@ -58,6 +60,19 @@ def test_seed_and_run_drives_the_founder_demo_trust_path(fresh_session):
     # assumption and surfaced as an unsupported Review Finding, not authoritative.
     assert hyps[2].assumption is True
     assert hyps[2].support_status == "unsupported"
+
+    # The proposed alternative (ADR 0036) flowed through the full path exactly
+    # once: persisted as origin='proposed' with resolved, verified citations, its
+    # own Hypothesis Challenge, and a semantic support verdict — never treated as a
+    # Root Cause Conclusion (PRD #30 user stories 14-15).
+    alt = hyps[3]
+    assert alt.origin == "proposed"
+    assert alt.title == "Cache-node eviction shifted read load onto the primary database"
+    assert [r for r in alt.evidence_refs if r.role == "supporting"]
+    assert all(r.verifier_status == "verified" for r in alt.evidence_refs)
+    assert alt.challenge is not None
+    assert alt.support_status in {"supported", "partial", "unsupported"}
+    assert alt.review_status == "proposed"
 
     # A structured Postmortem was drafted for the Review Surface (ADR 0012).
     postmortem = fresh_session.query(Postmortem).filter(Postmortem.run_id == run.id).one()

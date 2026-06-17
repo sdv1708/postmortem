@@ -8,7 +8,11 @@ from typing import Final, Mapping
 import yaml
 from pydantic import ValidationError
 
-from .falsification import FALSIFIER_VERSION, HypothesisChallengeOutput
+from .falsification import (
+    FALSIFIER_VERSION,
+    MAX_PROPOSED_HYPOTHESES,
+    HypothesisChallengeOutput,
+)
 from .incident_facts import INCIDENT_FACT_EXTRACTOR_VERSION, IncidentFactsOutput
 from .llm import LLMResponse
 from .rca import RcaGenerationOutput
@@ -292,12 +296,39 @@ def _load_falsification_replay(
             f"{scenario_id}: replay falsification must be a mapping of hypothesis title to challenge"
         )
 
+    # A bundled challenge for an initial hypothesis may introduce Proposed RCA
+    # Hypotheses (ADR 0036). Each proposed alternative is itself challenged once in
+    # the second pass, so the replay must also bundle a challenge keyed by the
+    # proposed title — and that challenge may not propose again (no recursion).
+    proposed_titles: list[str] = []
+    for title in hypothesis_titles:
+        challenge = falsification_replay.get(title)
+        if isinstance(challenge, Mapping):
+            for proposal in challenge.get("proposed_hypotheses") or []:
+                if isinstance(proposal, Mapping) and proposal.get("title"):
+                    proposed_titles.append(str(proposal["title"]))
+    if len(proposed_titles) > MAX_PROPOSED_HYPOTHESES:
+        raise ScenarioValidationError(
+            f"{scenario_id}: falsification proposes {len(proposed_titles)} alternatives, "
+            f"exceeding the bounded maximum of {MAX_PROPOSED_HYPOTHESES}"
+        )
+    for proposed_title in proposed_titles:
+        proposed_challenge = falsification_replay.get(proposed_title)
+        if isinstance(proposed_challenge, Mapping) and (
+            proposed_challenge.get("proposed_hypotheses")
+        ):
+            raise ScenarioValidationError(
+                f"{scenario_id}: proposed alternative {proposed_title!r} may not itself "
+                "propose further hypotheses (no recursive expansion)"
+            )
+
     covered = set(falsification_replay.keys())
-    expected = set(hypothesis_titles)
+    expected = set(hypothesis_titles) | set(proposed_titles)
     if covered != expected:
         raise ScenarioValidationError(
-            f"{scenario_id}: falsification must challenge exactly the replay hypotheses; "
-            f"missing {sorted(expected - covered)}, unexpected {sorted(covered - expected)}"
+            f"{scenario_id}: falsification must challenge exactly the replay hypotheses and "
+            f"their proposed alternatives; missing {sorted(expected - covered)}, "
+            f"unexpected {sorted(covered - expected)}"
         )
 
     _validate_replay_refs(scenario_id, falsification_replay, bodies_by_name)
@@ -500,7 +531,9 @@ class ScenarioReplayFalsifier:
         }
         self.calls = 0
 
-    def challenge(self, *, hypothesis, artifacts, timeline_events) -> HypothesisChallengeOutput:
+    def challenge(
+        self, *, hypothesis, artifacts, timeline_events, allow_proposals: bool = True
+    ) -> HypothesisChallengeOutput:
         self.calls += 1
         output = self._by_title.get(hypothesis.title)
         if output is None:

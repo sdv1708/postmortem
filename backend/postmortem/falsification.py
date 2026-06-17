@@ -7,9 +7,15 @@ from typing import Final, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .llm import LLMClient
-from .rca import RcaEvidenceRef
+from .rca import RcaEvidenceRef, RcaHypothesis
 
 logger = logging.getLogger("postmortem.falsification")
+
+# The bounded alternative-expansion cap (ADR 0036, PRD #26 / #30): across one
+# Falsification Round the falsifier may introduce at most this many Proposed RCA
+# Hypotheses total. More than this fails the Runtime Reasoning Gate rather than
+# silently truncating, so the bound is auditable.
+MAX_PROPOSED_HYPOTHESES: Final[int] = 2
 
 # Versioned prompt/role identity for the falsifier (ADR 0025 / 0034). Bump when
 # the prompt or the expected output contract changes so runs stay comparable.
@@ -67,6 +73,15 @@ class HypothesisChallengeOutput(StrictFalsificationModel):
     # (CONTEXT "Counterclaim vs Evidence Gap vs Falsification Test").
     evidence_gaps: list[str] = Field(default_factory=list)
     falsification_tests: list[str] = Field(default_factory=list)
+    # Optional Proposed RCA Hypotheses the falsifier surfaced while reviewing this
+    # hypothesis (ADR 0036, PRD #26 / #30). A proposed alternative reuses the exact
+    # RCA hypothesis shape so it can enter the normal citation, support, challenge,
+    # and review path. It is NOT trusted output here: the stage persists it as an
+    # ``origin='proposed'`` hypothesis and runs it through that path once. The
+    # falsifier may only propose while challenging an initial hypothesis; a
+    # second-round challenge of a proposed hypothesis must leave this empty (no
+    # recursive expansion), which the stage enforces.
+    proposed_hypotheses: list[RcaHypothesis] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -85,14 +100,14 @@ class HypothesisToChallenge:
     contradicting_snippets: tuple[str, ...]
 
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_HEAD = """\
 You are a skeptical incident reviewer whose only job is to FALSIFY a candidate
 root-cause hypothesis. You are not writing prose and you are not confirming the
 hypothesis; you are surfacing what would make a careful engineer doubt it.
 
 Rules:
 - Output ONLY a single JSON object. No prose, no markdown fences.
-- Challenge exactly the ONE hypothesis provided. Do not propose new hypotheses.
+- Challenge exactly the ONE hypothesis provided.
 - Search ALL of the evidence below, including lines the hypothesis did not cite,
   for counterevidence the original analysis may have overlooked.
 - A "counterclaim" is a FACTUAL statement that weakens the hypothesis. Cite it by
@@ -106,6 +121,28 @@ Rules:
   - "critical": if valid, this hypothesis cannot be the failure mechanism.
   - "material": reduces plausibility or limits it to a contributing role.
   - "minor": a qualification that does not change its causal role.
+"""
+
+# Appended when the falsifier is reviewing an INITIAL hypothesis and is therefore
+# permitted to surface a missed alternative (ADR 0036, PRD #30 user stories 14-16).
+_SYSTEM_PROMPT_PROPOSALS_ALLOWED = """\
+- You MAY surface a missed alternative explanation the original analysis
+  overlooked, in "proposed_hypotheses", using the SAME shape as an RCA hypothesis
+  (title, summary, supporting_evidence, contradicting_evidence, unknowns,
+  validation_steps, remediation_items). Propose one only if the evidence genuinely
+  points to a cause the builder ignored; leave it empty otherwise. Across the whole
+  review at most two alternatives total are accepted, and each is then verified and
+  challenged like an initial hypothesis — so propose sparingly and cite it.
+"""
+
+# Appended when challenging a PROPOSED hypothesis: the single expansion round is
+# already spent, so no further alternatives may be introduced (no recursion).
+_SYSTEM_PROMPT_PROPOSALS_FORBIDDEN = """\
+- Do NOT propose new hypotheses. "proposed_hypotheses" must be empty: this
+  hypothesis is itself a proposed alternative and the expansion round is closed.
+"""
+
+_SYSTEM_PROMPT_SHAPE = """\
 
 The JSON object must match this shape:
 {
@@ -115,9 +152,17 @@ The JSON object must match this shape:
     {"statement": "factual weakness", "evidence": [{"artifact_id": "...", "line_start": 1, "line_end": 2, "confidence_score": 0.0-1.0}]}
   ],
   "evidence_gaps": ["what is missing"],
-  "falsification_tests": ["how to confirm or refute"]
+  "falsification_tests": ["how to confirm or refute"],
+  "proposed_hypotheses": []
 }
 """
+
+
+def _system_prompt(allow_proposals: bool) -> str:
+    proposals = (
+        _SYSTEM_PROMPT_PROPOSALS_ALLOWED if allow_proposals else _SYSTEM_PROMPT_PROPOSALS_FORBIDDEN
+    )
+    return _SYSTEM_PROMPT_HEAD + proposals + _SYSTEM_PROMPT_SHAPE
 
 
 def _render_artifact(artifact_id: str, source_type: str, source_name: str, body: str) -> str:
@@ -127,13 +172,16 @@ def _render_artifact(artifact_id: str, source_type: str, source_name: str, body:
 
 
 def build_falsification_prompt(
-    hypothesis: HypothesisToChallenge, artifacts, timeline_events
+    hypothesis: HypothesisToChallenge, artifacts, timeline_events, *, allow_proposals: bool = True
 ) -> tuple[str, str]:
     """Assemble the (system, user) prompt to challenge one hypothesis.
 
     Every run Artifact is rendered with its id and 1-based line numbers so the
     falsifier can cite counterevidence from lines the builder never selected
     (Falsification Retrieval across all artifacts, PRD user story 13).
+    ``allow_proposals`` controls whether the falsifier may surface a missed
+    alternative: True while challenging an initial hypothesis, False during the
+    second-round challenge of a proposed alternative (ADR 0036).
     """
     evidence = "\n\n".join(
         _render_artifact(a.id, a.source_type, a.source_name, a.body) for a in artifacts
@@ -164,7 +212,7 @@ def build_falsification_prompt(
         "Falsify the hypothesis as the JSON object described in the system "
         "message. Look beyond the cited lines for overlooked counterevidence."
     )
-    return _SYSTEM_PROMPT, user
+    return _system_prompt(allow_proposals), user
 
 
 class Falsifier(Protocol):
@@ -179,7 +227,12 @@ class Falsifier(Protocol):
     def version(self) -> str: ...
 
     def challenge(
-        self, *, hypothesis: HypothesisToChallenge, artifacts, timeline_events
+        self,
+        *,
+        hypothesis: HypothesisToChallenge,
+        artifacts,
+        timeline_events,
+        allow_proposals: bool = True,
     ) -> HypothesisChallengeOutput: ...
 
 
@@ -202,9 +255,16 @@ class LLMFalsifier:
         self._llm = llm_client
 
     def challenge(
-        self, *, hypothesis: HypothesisToChallenge, artifacts, timeline_events
+        self,
+        *,
+        hypothesis: HypothesisToChallenge,
+        artifacts,
+        timeline_events,
+        allow_proposals: bool = True,
     ) -> HypothesisChallengeOutput:
-        system, user = build_falsification_prompt(hypothesis, artifacts, timeline_events)
+        system, user = build_falsification_prompt(
+            hypothesis, artifacts, timeline_events, allow_proposals=allow_proposals
+        )
         response = self._llm.complete(system=system, user=user)
         try:
             output = HypothesisChallengeOutput.model_validate_json(response.text)
@@ -215,8 +275,9 @@ class LLMFalsifier:
                 f"falsification output failed schema validation: {exc}"
             ) from exc
         logger.debug(
-            "hypothesis_challenged severity=%s counterclaim_count=%s",
+            "hypothesis_challenged severity=%s counterclaim_count=%s proposed=%s",
             output.severity,
             len(output.counterclaims),
+            len(output.proposed_hypotheses),
         )
         return output

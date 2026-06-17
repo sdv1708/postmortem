@@ -277,6 +277,11 @@ class HypothesisRead(BaseModel):
     id: str
     run_id: str
     rank: int
+    # Provenance within the Causal Analysis Stage (ADR 0036): 'initial' for a
+    # builder hypothesis, 'proposed' for a falsifier-introduced missed alternative.
+    # The Review Surface distinguishes the two without treating either as a
+    # conclusion (PRD #30 user story 14-15).
+    origin: Literal["initial", "proposed"]
     title: str
     summary: str
     assumption: bool

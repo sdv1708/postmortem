@@ -36,9 +36,18 @@ def test_canonical_scenario_loads_and_validates():
     # The replay shows the ambiguity: multiple competing hypotheses.
     assert len(scenario.rca_replay["hypotheses"]) >= 2
     # Every replay hypothesis has a bundled Hypothesis Challenge so the demo's
-    # mandatory stage-3 challenge coverage is complete (ADR 0034).
+    # mandatory stage-3 challenge coverage is complete (ADR 0034). The falsifier
+    # also surfaces a missed alternative; that proposed hypothesis is itself
+    # challenged once (ADR 0036), so the challenge keys are the builder titles plus
+    # the proposed alternative's title.
     titles = {h["title"] for h in scenario.rca_replay["hypotheses"]}
-    assert set(scenario.falsification_replay.keys()) == titles
+    proposed_titles = {
+        p["title"]
+        for challenge in scenario.falsification_replay.values()
+        for p in challenge.get("proposed_hypotheses", [])
+    }
+    assert proposed_titles, "the canonical demo should exercise the expansion round"
+    assert set(scenario.falsification_replay.keys()) == titles | proposed_titles
     one = next(iter(scenario.falsification_replay.values()))
     assert one["severity"] in {"critical", "material", "minor"}
 
@@ -179,4 +188,38 @@ def test_falsification_schema_violation_fails_validation(tmp_path):
     replay[title]["severity"] = "catastrophic"
     falsification_path.write_text(json.dumps(replay), encoding="utf-8")
     with pytest.raises(ScenarioValidationError, match="strict schema"):
+        load_scenario(CANONICAL, base)
+
+
+def test_more_than_two_proposed_alternatives_fails_validation(tmp_path):
+    """The bounded expansion round caps proposals at two (ADR 0036, AC #4)."""
+    base = _clone_canonical(tmp_path)
+    falsification_path = base / CANONICAL / "replay" / "falsification.json"
+    replay = json.loads(falsification_path.read_text(encoding="utf-8"))
+    title = next(iter(replay))
+    replay[title]["proposed_hypotheses"] = [
+        {"title": "Alt one"},
+        {"title": "Alt two"},
+        {"title": "Alt three"},
+    ]
+    falsification_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(ScenarioValidationError, match="exceeding the bounded maximum"):
+        load_scenario(CANONICAL, base)
+
+
+def test_recursive_proposed_alternative_fails_validation(tmp_path):
+    """A proposed alternative may not itself propose further hypotheses (AC #1)."""
+    base = _clone_canonical(tmp_path)
+    falsification_path = base / CANONICAL / "replay" / "falsification.json"
+    replay = json.loads(falsification_path.read_text(encoding="utf-8"))
+    title = next(iter(replay))
+    replay[title]["proposed_hypotheses"] = [{"title": "Recursive alt"}]
+    # The proposed alternative's own challenge tries to expand again.
+    replay["Recursive alt"] = {
+        "challenged_claim": "x",
+        "severity": "minor",
+        "proposed_hypotheses": [{"title": "Even deeper alt"}],
+    }
+    falsification_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(ScenarioValidationError, match="no recursive expansion"):
         load_scenario(CANONICAL, base)

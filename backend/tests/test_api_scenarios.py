@@ -42,13 +42,29 @@ def test_seed_scenario_populates_the_review_surface(client: TestClient, auth_hea
         f"/api/incidents/{incident_id}/analysis-runs/{run_id}/hypotheses",
         headers=auth_headers,
     ).json()
-    assert len(hypotheses) == 3
-    top = hypotheses[0]
+    # Three builder hypotheses plus one falsifier-proposed alternative from the
+    # bounded expansion round (ADR 0036, PRD #30).
+    assert len(hypotheses) == 4
+    by_origin = {h["origin"] for h in hypotheses}
+    assert by_origin == {"initial", "proposed"}
+    initial = [h for h in hypotheses if h["origin"] == "initial"]
+    proposed = [h for h in hypotheses if h["origin"] == "proposed"]
+    assert len(initial) == 3
+    assert len(proposed) == 1
+    top = initial[0]
     assert top["supporting_evidence"]
     assert top["contradicting_evidence"]
     assert all(
         ref["verifier_status"] == "verified" for ref in top["supporting_evidence"]
     )
+    # The proposed alternative travelled the full path: it has resolved, verified
+    # citations and its own Hypothesis Challenge, exactly like an initial one.
+    alt = proposed[0]
+    assert alt["title"] == "Cache-node eviction shifted read load onto the primary database"
+    assert alt["supporting_evidence"]
+    assert all(ref["verifier_status"] == "verified" for ref in alt["supporting_evidence"])
+    assert alt["challenge"] is not None
+    assert alt["support_status"] in {"supported", "partial", "unsupported"}
 
     postmortem = client.get(
         f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem",
