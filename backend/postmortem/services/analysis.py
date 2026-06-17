@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..chunking import CHUNKING_STRATEGY_VERSION
 from ..config import DEFAULT_EXPERIMENT_METADATA
 from ..drafting import PostmortemComposer
+from ..falsification import Falsifier
 from ..incident_facts import IncidentFactExtractor
 from ..llm import LLMClient
 from ..logging import log_event
@@ -85,6 +86,7 @@ class AnalysisService:
         postmortem_composer: PostmortemComposer | None = None,
         retrieval_strategy: RetrievalStrategy | None = None,
         incident_fact_extractor: IncidentFactExtractor | None = None,
+        falsifier: Falsifier | None = None,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
@@ -112,6 +114,7 @@ class AnalysisService:
                 postmortem_composer=postmortem_composer,
                 retrieval_strategy=retrieval_strategy,
                 incident_fact_extractor=incident_fact_extractor,
+                falsifier=falsifier,
             )
         )
 
@@ -521,6 +524,43 @@ def hypothesis_read(hypothesis: Hypothesis) -> dict:
         "contradicting_evidence": contradicting,
         "action_items": [_action_item_read(item) for item in hypothesis.action_items],
         "reviewer_notes": [reviewer_note_read(note) for note in hypothesis.reviewer_notes],
+        # The bounded falsifier's persisted challenge (ADR 0034), or None until a
+        # run reaches stage 3. Structured Role Handoff output only — never hidden
+        # reasoning or chat history (PRD user story 75).
+        "challenge": challenge_read(hypothesis.challenge) if hypothesis.challenge else None,
+    }
+
+
+def counterclaim_read(counterclaim) -> dict:
+    """Shape a Counterclaim (with its citations) for CounterclaimRead.
+
+    A Counterclaim is a Major Claim: its EvidenceRefs are the citation source of
+    truth (ADR 0024), and ``assumption`` marks one normalized for lack of a
+    resolvable citation (ADR 0013).
+    """
+    return {
+        "id": counterclaim.id,
+        "sequence": counterclaim.sequence,
+        "statement": counterclaim.statement,
+        "assumption": counterclaim.assumption,
+        "evidence_refs": list(counterclaim.evidence_refs),
+    }
+
+
+def challenge_read(challenge) -> dict:
+    """Shape a HypothesisChallenge for HypothesisChallengeRead (ADR 0034).
+
+    Surfaces the falsifier's structured output — challenged claim, severity, cited
+    Counterclaims, Evidence Gaps, Falsification Tests — so the Review Surface can
+    show the analysis's work without exposing hidden reasoning (PRD user story 89).
+    """
+    return {
+        "id": challenge.id,
+        "challenged_claim": challenge.challenged_claim,
+        "severity": challenge.severity,
+        "counterclaims": [counterclaim_read(c) for c in challenge.counterclaims],
+        "evidence_gaps": list(challenge.evidence_gaps),
+        "falsification_tests": list(challenge.falsification_tests),
     }
 
 

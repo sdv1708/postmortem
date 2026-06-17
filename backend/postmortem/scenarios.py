@@ -8,6 +8,7 @@ from typing import Final, Mapping
 import yaml
 from pydantic import ValidationError
 
+from .falsification import FALSIFIER_VERSION, HypothesisChallengeOutput
 from .incident_facts import INCIDENT_FACT_EXTRACTOR_VERSION, IncidentFactsOutput
 from .llm import LLMResponse
 from .rca import RcaGenerationOutput
@@ -82,6 +83,11 @@ class LoadedScenario:
     # 2, still citing by ``source_name`` until resolved to artifact ids at seed
     # time. Defaults to empty when a scenario declares no observed impact.
     incident_facts_replay: dict
+    # Falsifier replay (ADR 0034): a mapping of hypothesis title -> bundled
+    # Hypothesis Challenge, still citing by ``source_name``. Covers every replay
+    # hypothesis so the demo's stage-3 challenge coverage is complete and offline.
+    # Empty when the scenario declares no hypotheses (e.g. insufficient evidence).
+    falsification_replay: dict
     claim_support_overrides: tuple[ClaimSupportOverride, ...]
 
 
@@ -203,6 +209,16 @@ def load_scenario(scenario_id: str, base_dir: Path | None = None) -> LoadedScena
         _validate_replay_refs(scenario_id, incident_facts_replay, bodies_by_name)
         _validate_incident_facts_schema(scenario_id, incident_facts_replay, bodies_by_name.keys())
 
+    # Falsifier replay (ADR 0034). Required whenever the RCA replay declares
+    # hypotheses, because stage 3 fails without complete challenge coverage; the
+    # keys must match the hypothesis titles exactly so the demo is self-validating.
+    hypothesis_titles = [
+        str(hyp.get("title", "")) for hyp in (rca_replay.get("hypotheses") or [])
+    ]
+    falsification_replay = _load_falsification_replay(
+        scenario_id, scenario_dir, replay, hypothesis_titles, bodies_by_name
+    )
+
     overrides = tuple(
         ClaimSupportOverride(
             match=str(item["match"]),
@@ -230,8 +246,63 @@ def load_scenario(scenario_id: str, base_dir: Path | None = None) -> LoadedScena
         evidence=tuple(evidence),
         rca_replay=rca_replay,
         incident_facts_replay=incident_facts_replay,
+        falsification_replay=falsification_replay,
         claim_support_overrides=overrides,
     )
+
+
+def _load_falsification_replay(
+    scenario_id: str,
+    scenario_dir: Path,
+    replay: Mapping,
+    hypothesis_titles: list[str],
+    bodies_by_name: Mapping[str, str],
+) -> dict:
+    """Load + validate the falsifier replay, enforcing complete challenge coverage.
+
+    A scenario with hypotheses must bundle one challenge per hypothesis title
+    (ADR 0034), or the demo's stage 3 would fail its mandatory challenge-coverage
+    gate. A scenario with no hypotheses (e.g. insufficient evidence) needs none.
+    """
+    has_falsification = "falsification" in replay
+    if not hypothesis_titles:
+        if has_falsification:
+            raise ScenarioValidationError(
+                f"{scenario_id}: replay declares falsification but no hypotheses to challenge"
+            )
+        return {}
+    if not has_falsification:
+        raise ScenarioValidationError(
+            f"{scenario_id}: replay has hypotheses but no 'falsification' challenge file"
+        )
+
+    falsification_path = scenario_dir / str(replay["falsification"])
+    if not falsification_path.is_file():
+        raise ScenarioValidationError(
+            f"{scenario_id}: replay falsification references missing file {replay['falsification']!r}"
+        )
+    try:
+        falsification_replay = json.loads(falsification_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ScenarioValidationError(
+            f"{scenario_id}: replay falsification is not valid JSON: {exc}"
+        ) from exc
+    if not isinstance(falsification_replay, Mapping):
+        raise ScenarioValidationError(
+            f"{scenario_id}: replay falsification must be a mapping of hypothesis title to challenge"
+        )
+
+    covered = set(falsification_replay.keys())
+    expected = set(hypothesis_titles)
+    if covered != expected:
+        raise ScenarioValidationError(
+            f"{scenario_id}: falsification must challenge exactly the replay hypotheses; "
+            f"missing {sorted(expected - covered)}, unexpected {sorted(covered - expected)}"
+        )
+
+    _validate_replay_refs(scenario_id, falsification_replay, bodies_by_name)
+    _validate_falsification_schema(scenario_id, falsification_replay, bodies_by_name.keys())
+    return dict(falsification_replay)
 
 
 def list_scenarios(base_dir: Path | None = None) -> list[LoadedScenario]:
@@ -324,6 +395,21 @@ def _validate_incident_facts_schema(
         ) from exc
 
 
+def _validate_falsification_schema(
+    scenario_id: str, falsification_replay: Mapping, source_names: object
+) -> None:
+    """Validate each bundled challenge against the strict falsifier contract (ADR 0028 / 0034)."""
+    placeholders = {str(name): str(name) for name in source_names}
+    resolved = resolve_replay_rca(dict(falsification_replay), placeholders)
+    for title, challenge in resolved.items():
+        try:
+            HypothesisChallengeOutput.model_validate(challenge)
+        except (ScenarioValidationError, ValidationError) as exc:
+            raise ScenarioValidationError(
+                f"{scenario_id}: falsification for {title!r} violates the strict schema: {exc}"
+            ) from exc
+
+
 def resolve_replay_rca(rca_replay: object, source_name_to_id: Mapping[str, str]) -> object:
     """Rewrite a replay's ``source_name`` citations to seeded ``artifact_id``s.
 
@@ -390,6 +476,41 @@ class ScenarioReplayIncidentFactExtractor:
     def extract(self, *, artifacts, timeline_events) -> IncidentFactsOutput:
         self.calls += 1
         return self._output
+
+
+class ScenarioReplayFalsifier:
+    """Replays a scenario's bundled Hypothesis Challenges (ADR 0009 / 0034).
+
+    A swappable Falsifier so the canonical demo's stage-3 falsifier substep runs
+    deterministically and offline. Constructed with the challenge citations
+    already resolved to seeded artifact ids; the stage still resolves snippets
+    from the stored lines (ADR 0024), so the replay never supplies snippet text.
+    Keyed by hypothesis title to match the persisted hypotheses the builder
+    replay produced — the loader guarantees one challenge per hypothesis, so the
+    demo's mandatory challenge coverage is always complete.
+    """
+
+    version: Final[str] = FALSIFIER_VERSION
+
+    def __init__(self, scenario_id: str, falsification_replay: dict) -> None:
+        self._scenario_id = scenario_id
+        self._by_title = {
+            title: HypothesisChallengeOutput.model_validate(challenge)
+            for title, challenge in falsification_replay.items()
+        }
+        self.calls = 0
+
+    def challenge(self, *, hypothesis, artifacts, timeline_events) -> HypothesisChallengeOutput:
+        self.calls += 1
+        output = self._by_title.get(hypothesis.title)
+        if output is None:
+            # A self-validating fixture never reaches this; failing loudly keeps a
+            # mis-keyed challenge from silently dropping coverage (ADR 0034).
+            raise ValueError(
+                f"scenario {self._scenario_id!r} has no bundled challenge for hypothesis "
+                f"{hypothesis.title!r}"
+            )
+        return output
 
 
 class ScenarioReplayClaimSupportVerifier:

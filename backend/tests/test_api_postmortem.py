@@ -10,7 +10,11 @@ from postmortem.rca import RcaEvidenceRef
 from postmortem.services import AnalysisService
 from postmortem.verification import ClaimSupportJudgment, ClaimSupportStatus
 
-from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeFalsifier,
+    FakeIncidentFactExtractor,
+)
 
 
 def _create_incident(client: TestClient, auth_headers) -> str:
@@ -86,6 +90,7 @@ def _seed_drafted_run(app, client, auth_headers):
             llm_client=FakeLLMClient([payload], label="fake-model"),
             claim_support_verifier=FakeClaimSupportVerifier(_judge),
             incident_fact_extractor=FakeIncidentFactExtractor(impact),
+            falsifier=FakeFalsifier(),
         ).execute_run(run_id, commit_progress=True)
         assert run.status == "succeeded"
         session.commit()
@@ -126,6 +131,7 @@ def _seed_refused_run(app, client, auth_headers):
             llm_client=FakeLLMClient(['{"hypotheses": []}'], label="fake-model"),
             claim_support_verifier=FakeClaimSupportVerifier(),
             incident_fact_extractor=FakeIncidentFactExtractor(),
+            falsifier=FakeFalsifier(),
         ).execute_run(run_id, commit_progress=True)
         assert run.status == "succeeded"
         session.commit()

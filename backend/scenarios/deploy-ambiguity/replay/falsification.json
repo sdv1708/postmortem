@@ -1,0 +1,62 @@
+{
+  "Deploy v184 connection-pool refactor regressed connection handling": {
+    "challenged_claim": "The v184 connection-pool refactor caused the pool saturation and HTTP 500 spike.",
+    "severity": "material",
+    "counterclaims": [
+      {
+        "statement": "The deploy left pool max_connections unchanged at 40, so the refactor did not reduce configured capacity.",
+        "evidence": [
+          {"source_name": "deploy-notes.md", "line_start": 4, "line_end": 4, "confidence_score": 0.85}
+        ]
+      },
+      {
+        "statement": "A cache node evicted under memory pressure at 14:33, a competing cause that could have pushed read load onto the database independent of the deploy.",
+        "evidence": [
+          {"source_name": "oncall-notes.md", "line_start": 4, "line_end": 4, "confidence_score": 0.7}
+        ]
+      }
+    ],
+    "evidence_gaps": [
+      "The v183..v184 diff for the connection pool acquisition change is not in the collected evidence."
+    ],
+    "falsification_tests": [
+      "Replay v184 under a staging load test without a cache eviction and watch for pool saturation."
+    ]
+  },
+  "Primary connection pool was undersized for the offered load": {
+    "challenged_claim": "The primary pool was undersized for normal load, making capacity rather than the deploy the root cause.",
+    "severity": "material",
+    "counterclaims": [
+      {
+        "statement": "Resizing the pool to 80 cleared the 500s but does not by itself prove the original root cause was capacity.",
+        "evidence": [
+          {"source_name": "oncall-notes.md", "line_start": 5, "line_end": 5, "confidence_score": 0.75}
+        ]
+      }
+    ],
+    "evidence_gaps": [
+      "Request volume at 14:31 versus the pre-deploy baseline is not recorded, so an organic load increase cannot be ruled out."
+    ],
+    "falsification_tests": [
+      "Compare request volume and pool saturation in the windows immediately before and after 14:28."
+    ]
+  },
+  "An upstream dependency degraded during the window": {
+    "challenged_claim": "An uninspected upstream dependency degraded and drove the HTTP 500s.",
+    "severity": "critical",
+    "counterclaims": [
+      {
+        "statement": "On-call found no upstream provider incident during the window, and no artifact evidences an upstream degradation.",
+        "evidence": [
+          {"source_name": "oncall-notes.md", "line_start": 6, "line_end": 6, "confidence_score": 0.6}
+        ]
+      }
+    ],
+    "evidence_gaps": [
+      "No upstream dependency status pages or latency metrics were collected for 14:28-14:40."
+    ],
+    "falsification_tests": [
+      "Pull each upstream dependency's status and latency metrics across 14:28-14:40."
+    ]
+  }
+}

@@ -22,7 +22,11 @@ from postmortem.services import (
     hypothesis_read,
 )
 
-from tests._fakes import FakeClaimSupportVerifier, FakeIncidentFactExtractor
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeFalsifier,
+    FakeIncidentFactExtractor,
+)
 
 
 def _run_with_hypotheses(session):
@@ -71,6 +75,7 @@ def _run_with_hypotheses(session):
         llm_client=FakeLLMClient([payload], label="fake-model"),
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(impact),
+        falsifier=FakeFalsifier(),
     )
     run = service.start_run(incident.id, AnalysisRunCreate())
     session.commit()

@@ -1,0 +1,56 @@
+{
+  "Upstream payments provider degradation caused the checkout failures": {
+    "challenged_claim": "An upstream payments provider degradation was the sole cause of the checkout 502 spike.",
+    "severity": "minor",
+    "counterclaims": [
+      {
+        "statement": "Our integration has no local retry or backoff on charge.create, so our own design choices shaped how the provider degradation reached users.",
+        "evidence": [
+          {"source_name": "status-page.md", "line_start": 5, "line_end": 5, "confidence_score": 0.7}
+        ]
+      }
+    ],
+    "evidence_gaps": [
+      "The specific charge.create call pattern that may have worsened the provider timeouts is not captured."
+    ],
+    "falsification_tests": [
+      "Correlate the provider 504 timestamps against our 502 spike to confirm the provider led rather than followed."
+    ]
+  },
+  "Missing client-side retry and backoff amplified the provider blip": {
+    "challenged_claim": "Missing client-side retry and backoff was the dominant amplifier of the checkout failures.",
+    "severity": "material",
+    "counterclaims": [
+      {
+        "statement": "Checkout error rate recovered as soon as the provider recovered, suggesting provider availability, not retry policy, drove the outage duration.",
+        "evidence": [
+          {"source_name": "api-gateway.log", "line_start": 5, "line_end": 6, "confidence_score": 0.7}
+        ]
+      }
+    ],
+    "evidence_gaps": [
+      "How many 502s a bounded retry would have absorbed is unknown without a replay."
+    ],
+    "falsification_tests": [
+      "Replay the provider timeout window against a retry-enabled client in staging and measure absorbed failures."
+    ]
+  },
+  "A local checkout deploy regressed payments handling": {
+    "challenged_claim": "A local checkout deploy regressed payments handling and caused the 502s.",
+    "severity": "critical",
+    "counterclaims": [
+      {
+        "statement": "No deploy went out on the incident day, so a local code regression is unlikely.",
+        "evidence": [
+          {"source_name": "oncall-notes.md", "line_start": 5, "line_end": 5, "confidence_score": 0.6}
+        ]
+      }
+    ],
+    "evidence_gaps": [
+      "The checkout service deploy log around 09:00-09:10 has not been audited for out-of-band changes."
+    ],
+    "falsification_tests": [
+      "Audit the deploy and config-change log for the checkout service across 09:00-09:10."
+    ]
+  }
+}

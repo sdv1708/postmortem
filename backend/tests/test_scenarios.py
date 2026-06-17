@@ -35,6 +35,12 @@ def test_canonical_scenario_loads_and_validates():
     assert "ground truth" in scenario.ground_truth_postmortem.lower()
     # The replay shows the ambiguity: multiple competing hypotheses.
     assert len(scenario.rca_replay["hypotheses"]) >= 2
+    # Every replay hypothesis has a bundled Hypothesis Challenge so the demo's
+    # mandatory stage-3 challenge coverage is complete (ADR 0034).
+    titles = {h["title"] for h in scenario.rca_replay["hypotheses"]}
+    assert set(scenario.falsification_replay.keys()) == titles
+    one = next(iter(scenario.falsification_replay.values()))
+    assert one["severity"] in {"critical", "material", "minor"}
 
 
 @pytest.mark.parametrize(
@@ -55,6 +61,9 @@ def test_additional_scenario_families_load_and_validate(scenario_id, expected_fa
     assert set(scenario.expected_hypothesis_families) == expected_families
     # Each ships a multi-hypothesis replay that passes strict RCA + ref validation.
     assert len(scenario.rca_replay["hypotheses"]) == 3
+    # And a falsifier replay that challenges every replay hypothesis (ADR 0034).
+    titles = {h["title"] for h in scenario.rca_replay["hypotheses"]}
+    assert set(scenario.falsification_replay.keys()) == titles
 
 
 def test_insufficient_evidence_scenario_loads_as_refusal_stub():
@@ -146,4 +155,28 @@ def test_replay_schema_violation_fails_validation(tmp_path):
     replay["hypotheses"][1]["supporting_evidence"][0]["confidence_score"] = 1.5
     rca_path.write_text(json.dumps(replay), encoding="utf-8")
     with pytest.raises(ScenarioValidationError, match="strict RCA schema"):
+        load_scenario(CANONICAL, base)
+
+
+def test_incomplete_falsification_coverage_fails_validation(tmp_path):
+    """A scenario with hypotheses must challenge each one or fail fast (ADR 0034)."""
+    base = _clone_canonical(tmp_path)
+    falsification_path = base / CANONICAL / "replay" / "falsification.json"
+    replay = json.loads(falsification_path.read_text(encoding="utf-8"))
+    # Drop one hypothesis's challenge: coverage is now incomplete.
+    replay.pop(next(iter(replay)))
+    falsification_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(ScenarioValidationError, match="challenge exactly the replay hypotheses"):
+        load_scenario(CANONICAL, base)
+
+
+def test_falsification_schema_violation_fails_validation(tmp_path):
+    base = _clone_canonical(tmp_path)
+    falsification_path = base / CANONICAL / "replay" / "falsification.json"
+    replay = json.loads(falsification_path.read_text(encoding="utf-8"))
+    # An invalid severity violates the strict falsifier contract (ADR 0028).
+    title = next(iter(replay))
+    replay[title]["severity"] = "catastrophic"
+    falsification_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(ScenarioValidationError, match="strict schema"):
         load_scenario(CANONICAL, base)

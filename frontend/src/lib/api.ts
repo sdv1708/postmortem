@@ -173,6 +173,31 @@ export interface ReviewerNote {
   created_at: string;
 }
 
+// Challenge Severity advises causal-role suitability (ADR 0034): critical blocks
+// use as the failure mechanism, material limits the causal role, minor qualifies.
+export type ChallengeSeverity = "critical" | "material" | "minor";
+
+// A factual statement in a Hypothesis Challenge that weakens it (ADR 0034). A
+// Major Claim: cited EvidenceRefs or an explicit assumption marker.
+export interface Counterclaim {
+  id: string;
+  sequence: number;
+  statement: string;
+  assumption: boolean;
+  evidence_refs: EvidenceRef[];
+}
+
+// The bounded falsifier's challenge of one RCA Hypothesis (ADR 0034). Surfaces
+// the challenge's structured output — never hidden reasoning or chat history.
+export interface HypothesisChallenge {
+  id: string;
+  challenged_claim: string;
+  severity: ChallengeSeverity;
+  counterclaims: Counterclaim[];
+  evidence_gaps: string[];
+  falsification_tests: string[];
+}
+
 export interface Hypothesis {
   id: string;
   run_id: string;
@@ -189,6 +214,9 @@ export interface Hypothesis {
   contradicting_evidence: EvidenceRef[];
   action_items: ActionItem[];
   reviewer_notes: ReviewerNote[];
+  // The bounded falsifier's challenge, present on every hypothesis in a
+  // successful run (ADR 0034).
+  challenge: HypothesisChallenge | null;
 }
 
 export interface TimelineEvent {
