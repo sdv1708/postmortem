@@ -20,8 +20,11 @@ import {
   type HypothesisReviewStatus,
   type ImpactClaim,
   type Incident,
+  type ModelCallRecord,
   type Postmortem,
   type RankingRationale,
+  type RetrievalTrace,
+  type RunDiagnostics,
   type RunStage,
   type RunStageEvent,
   type RunStatus,
@@ -895,6 +898,9 @@ function RunStatusCard({
       {run.status === "succeeded" && (
         <RunPostmortem incidentId={incidentId} runId={run.id} />
       )}
+      {run.status === "succeeded" && (
+        <RunDiagnosticsPanel incidentId={incidentId} runId={run.id} />
+      )}
     </div>
   );
 }
@@ -1059,6 +1065,248 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
           <BulletGroup label="Open questions" items={postmortem.lessons_learned} />
         )}
       </div>
+    </div>
+  );
+}
+
+// Restricted reasoning/retrieval provenance for one run (ADR 0038). Collapsed by
+// default and lazily loaded so it never changes the normal Review Surface
+// workflow; opening it shows how the causal analysis reasoned and what evidence
+// each role saw — component versions, token usage, hashes, and ordered retrieved
+// chunk references including retrieved-but-uncited ones — without exposing any
+// prompt, raw response, or artifact text (PRD #26 user stories 69-73, 88-89).
+function RunDiagnosticsPanel({
+  incidentId,
+  runId,
+}: {
+  incidentId: string;
+  runId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const diagnosticsQuery = useQuery<RunDiagnostics>({
+    queryKey: ["run-diagnostics", incidentId, runId],
+    queryFn: () => api.getRunDiagnostics(incidentId, runId),
+    enabled: open,
+  });
+
+  const tracesById = useMemo(() => {
+    const map = new Map<string, RetrievalTrace>();
+    for (const trace of diagnosticsQuery.data?.retrieval_traces ?? []) {
+      map.set(trace.id, trace);
+    }
+    return map;
+  }, [diagnosticsQuery.data]);
+
+  return (
+    <div className="border-t border-slate-200 bg-slate-50/40">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center justify-between gap-2 px-5 py-3 text-left"
+        aria-expanded={open}
+      >
+        <span className="flex items-center gap-2">
+          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            Run diagnostics
+          </span>
+          <span
+            className="badge bg-slate-100 text-slate-600 ring-slate-200"
+            title="Restricted reasoning and retrieval provenance — versions, token usage, hashes, and retrieved evidence. No prompts, raw responses, or artifact text."
+          >
+            restricted
+          </span>
+        </span>
+        <span className="text-xs text-slate-500">{open ? "Hide" : "Show"}</span>
+      </button>
+
+      {open && (
+        <div className="space-y-4 px-5 pb-5">
+          <p className="text-xs text-slate-500">
+            How the causal analysis reasoned: one record per reasoning-role call and
+            the evidence each role retrieved. References and hashes only — no
+            prompts, raw responses, or artifact text are stored.
+          </p>
+
+          {diagnosticsQuery.isPending && (
+            <p className="text-xs text-slate-500">
+              <Spinner /> Loading diagnostics…
+            </p>
+          )}
+          {diagnosticsQuery.isError && (
+            <p className="text-xs text-rose-600">Diagnostics could not be loaded.</p>
+          )}
+
+          {diagnosticsQuery.data && (
+            <>
+              <div className="space-y-2">
+                <p className="label">
+                  Model calls · {diagnosticsQuery.data.model_call_records.length}
+                </p>
+                <ul className="space-y-2">
+                  {diagnosticsQuery.data.model_call_records.map((record) => (
+                    <li key={record.id}>
+                      <ModelCallRow
+                        record={record}
+                        trace={
+                          record.retrieval_trace_id
+                            ? tracesById.get(record.retrieval_trace_id) ?? null
+                            : null
+                        }
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="space-y-2">
+                <p className="label">
+                  Retrieval traces · {diagnosticsQuery.data.retrieval_traces.length}
+                </p>
+                <ul className="space-y-2">
+                  {diagnosticsQuery.data.retrieval_traces.map((trace) => (
+                    <li key={trace.id}>
+                      <RetrievalTraceRow trace={trace} />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ROLE_LABELS: Record<string, string> = {
+  incident_facts: "Incident facts",
+  builder: "Builder",
+  falsifier: "Falsifier",
+  support_verifier: "Support verifier",
+  ranker: "Ranker",
+};
+
+function roleLabel(role: string): string {
+  return ROLE_LABELS[role] ?? role;
+}
+
+function usageSummary(usage: Record<string, unknown> | null): string | null {
+  if (!usage) {
+    return null;
+  }
+  const total = usage["total_tokens"];
+  if (typeof total === "number") {
+    return `${total} tokens`;
+  }
+  const keys = Object.keys(usage);
+  return keys.length > 0 ? `${keys.length} usage field${keys.length === 1 ? "" : "s"}` : null;
+}
+
+function ModelCallRow({
+  record,
+  trace,
+}: {
+  record: ModelCallRecord;
+  trace: RetrievalTrace | null;
+}) {
+  const usage = usageSummary(record.usage);
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
+          {roleLabel(record.role)}
+        </span>
+        <span className="font-mono text-xs text-slate-500">{record.substep}</span>
+        <span className="text-xs text-slate-500">model: {record.model_identity}</span>
+        {usage ? (
+          <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">{usage}</span>
+        ) : (
+          <span
+            className="badge bg-slate-100 text-slate-500 ring-slate-200"
+            title="A deterministic role makes no model call, so it reports no token usage."
+          >
+            no model call
+          </span>
+        )}
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span>prompt: {record.prompt_version}</span>
+        <span>schema: {record.schema_version}</span>
+        {record.input_hash && (
+          <span title={`prompt hash ${record.input_hash}`}>
+            in#{record.input_hash.slice(0, 8)}
+          </span>
+        )}
+        {record.output_hash && (
+          <span title={`response hash ${record.output_hash}`}>
+            out#{record.output_hash.slice(0, 8)}
+          </span>
+        )}
+        {trace && (
+          <span title="Linked retrieval trace for this call">
+            retrieved {trace.cited_count}/{trace.chunk_count} chunks cited
+          </span>
+        )}
+      </div>
+      {record.structured_output && (
+        <details className="mt-1.5">
+          <summary className="cursor-pointer text-xs text-slate-500">
+            Structured outcome
+          </summary>
+          <pre className="mt-1 max-h-48 overflow-auto rounded bg-slate-50 p-2 text-[11px] leading-snug text-slate-600">
+            {JSON.stringify(record.structured_output, null, 2)}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function RetrievalTraceRow({ trace }: { trace: RetrievalTrace }) {
+  const uncited = trace.chunk_count - trace.cited_count;
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="badge bg-violet-50 text-violet-700 ring-violet-200">
+          {roleLabel(trace.role)}
+        </span>
+        <span className="font-mono text-xs text-slate-500">{trace.substep}</span>
+        <span className="text-xs text-slate-500">strategy: {trace.strategy_version}</span>
+        <span className="badge bg-slate-100 text-slate-600 ring-slate-200">
+          {trace.cited_count}/{trace.chunk_count} cited
+        </span>
+        {uncited > 0 && (
+          <span
+            className="badge bg-amber-50 text-amber-700 ring-amber-200"
+            title="These chunks were retrieved and shown to the role but cited by nothing — a model omission, distinct from evidence that was never retrieved."
+          >
+            {uncited} retrieved · uncited
+          </span>
+        )}
+      </div>
+      <p className="mt-1 text-xs text-slate-500">{trace.query}</p>
+      {trace.chunks.length > 0 && (
+        <ul className="mt-1.5 flex flex-wrap gap-1.5">
+          {trace.chunks.map((chunk) => (
+            <li
+              key={chunk.chunk_id}
+              className={`badge ${
+                chunk.cited
+                  ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                  : "bg-slate-100 text-slate-500 ring-slate-200"
+              }`}
+              title={
+                chunk.cited
+                  ? "Cited by this role"
+                  : "Retrieved but not cited by this role"
+              }
+            >
+              #{chunk.sequence} L{chunk.line_start}-{chunk.line_end}
+              {chunk.cited ? " ✓" : ""}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

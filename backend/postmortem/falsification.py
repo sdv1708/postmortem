@@ -24,6 +24,10 @@ MAX_PROPOSED_HYPOTHESES: Final[int] = 2
 # even when it is backed by the same configured model.
 FALSIFICATION_PROMPT_VERSION: Final[str] = "falsification-1"
 FALSIFIER_VERSION: Final[str] = "llm-falsifier-1"
+# Versioned identity of the falsifier's strict output schema (ADR 0028 / 0038),
+# recorded on each falsifier Model Call Record. Bump when
+# ``HypothesisChallengeOutput`` changes.
+FALSIFICATION_SCHEMA_VERSION: Final[str] = "falsification-output-1"
 
 
 # --- Strict structured model-output contract (ADR 0028) ---------------------

@@ -176,6 +176,22 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   await expect(page.getByRole("button", { name: "Export clean" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Export audit" })).toBeVisible();
 
+  // Restricted run diagnostics expose the reasoning/retrieval provenance (ADR
+  // 0038, PRD #26 user stories 69-73, 88-89): collapsed by default so the normal
+  // review workflow is unchanged, it shows one record per reasoning-role call and
+  // the evidence each role retrieved — versions and counts, never prompts or
+  // artifact text.
+  await page.getByRole("button", { name: /Run diagnostics/ }).click();
+  await expect(page.getByText(/Model calls ·/)).toBeVisible();
+  await expect(page.getByText(/Retrieval traces ·/)).toBeVisible();
+  await expect(page.getByText("Builder").first()).toBeVisible();
+  await expect(page.getByText("Falsifier").first()).toBeVisible();
+  await expect(page.getByText(/cited/).first()).toBeVisible();
+  // Each model call exposes its sanitized structured outcome (references and
+  // counts only — never artifact text) so a reviewer can inspect what each role
+  // produced (issue #32).
+  await expect(page.getByText("Structured outcome").first()).toBeVisible();
+
   // The automated draft is labeled provisional: no human Root Cause Conclusion
   // has been finalized, so it cannot be mistaken for one (ADR 0035, #29).
   await expect(

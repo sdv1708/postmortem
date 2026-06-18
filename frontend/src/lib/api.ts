@@ -347,6 +347,59 @@ export interface EvaluationRun {
   created_at: string;
 }
 
+// Reasoning/retrieval provenance for one run (ADR 0038). A restricted
+// diagnostics view: it exposes component versions, ordered retrieved chunk
+// references, token usage, hashes, and structured outcomes — never prompts, raw
+// responses, or artifact text — so causal reasoning is diagnosable without
+// opening debug logs (PRD #26 user stories 69-73, 88-89).
+export interface RetrievalTraceChunk {
+  chunk_id: string;
+  artifact_id: string;
+  sequence: number;
+  line_start: number;
+  line_end: number;
+  // Whether the role actually cited into this retrieved chunk. A retrieved-but-
+  // uncited chunk (cited=false) is the signal of a model omission, distinct from
+  // a chunk that was never retrieved at all (PRD user story 70).
+  cited: boolean;
+}
+
+export interface RetrievalTrace {
+  id: string;
+  sequence: number;
+  role: string;
+  substep: string;
+  query: string;
+  strategy_version: string;
+  chunk_count: number;
+  cited_count: number;
+  chunks: RetrievalTraceChunk[];
+}
+
+export interface ModelCallRecord {
+  id: string;
+  sequence: number;
+  role: string;
+  substep: string;
+  prompt_version: string;
+  schema_version: string;
+  // A deterministic role (e.g. the default advisory ranker) reports its own
+  // version here, with null usage/hashes.
+  model_identity: string;
+  input_hash: string | null;
+  output_hash: string | null;
+  usage: Record<string, unknown> | null;
+  structured_output: Record<string, unknown> | null;
+  retrieval_trace_id: string | null;
+  created_at: string;
+}
+
+export interface RunDiagnostics {
+  run_id: string;
+  model_call_records: ModelCallRecord[];
+  retrieval_traces: RetrievalTrace[];
+}
+
 export interface IncidentCreate {
   title: string;
   summary?: string | null;
@@ -521,6 +574,12 @@ export const api = {
     return request<ReviewerNote>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/review-notes`,
       { method: "POST", body: JSON.stringify(payload) },
+    );
+  },
+
+  getRunDiagnostics(incidentId: string, runId: string): Promise<RunDiagnostics> {
+    return request<RunDiagnostics>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/diagnostics`,
     );
   },
 
