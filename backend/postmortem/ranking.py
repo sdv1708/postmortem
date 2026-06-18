@@ -17,6 +17,11 @@ logger = logging.getLogger("postmortem.ranking")
 # ``AdvisoryRanker`` boundary.
 ADVISORY_RANKER_VERSION: Final[str] = "deterministic-advisory-ranker-1"
 
+# Versioned identity of the ranker's strict output schema (ADR 0028 / 0038),
+# recorded on the ranker Model Call Record. Bump when ``AdvisoryRankingOutput``
+# or its rationale dimensions change.
+ADVISORY_RANKING_SCHEMA_VERSION: Final[str] = "advisory-ranking-output-1"
+
 # The bounded final advisory list (ADR 0036 / 0037, Hypothesis Budget): at most
 # five initial plus two proposed hypotheses, so the advisory ranking orders at
 # most this many candidates.

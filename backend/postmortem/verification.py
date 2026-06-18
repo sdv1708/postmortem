@@ -14,6 +14,11 @@ CITATION_VERIFIER_VERSION: Final[str] = "citation-integrity-1"
 # Versioned identity for the semantic claim-support pass (ADR 0014 / 0025). Bump
 # when its prompt or output contract changes so runs stay comparable.
 CLAIM_SUPPORT_VERIFIER_VERSION: Final[str] = "claim-support-1"
+# Versioned prompt/schema identity of the semantic claim-support pass (ADR 0028 /
+# 0038), recorded on each support-verifier Model Call Record. Bump when the prompt
+# or ``ClaimSupportOutput`` changes so judgments stay comparable.
+CLAIM_SUPPORT_PROMPT_VERSION: Final[str] = "claim-support-prompt-1"
+CLAIM_SUPPORT_SCHEMA_VERSION: Final[str] = "claim-support-output-1"
 
 
 class CitationIntegrityStatus(str, Enum):

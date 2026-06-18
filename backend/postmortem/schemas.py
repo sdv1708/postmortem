@@ -376,6 +376,83 @@ class PostmortemRead(BaseModel):
     created_at: datetime
 
 
+class RetrievalTraceChunkRead(BaseModel):
+    """One ordered Chunk reference in a Retrieval Trace (ADR 0038).
+
+    A reference only — chunk id, owning artifact, source order, line span, and
+    whether the role cited it — never chunk or Artifact text, so the diagnostics
+    view never exposes duplicated Sensitive Evidence (PRD user stories 70-71).
+    """
+
+    chunk_id: str
+    artifact_id: str
+    sequence: int
+    line_start: int
+    line_end: int
+    cited: bool
+
+
+class RetrievalTraceRead(BaseModel):
+    """The evidence a Reasoning Role received for one substep (ADR 0038).
+
+    ``chunk_count`` / ``cited_count`` summarize the ordered ``chunks``;
+    retrieved-but-uncited chunks (``chunk_count - cited_count``) are what let a
+    diagnostician separate a retrieval omission from a model omission (PRD user
+    story 70).
+    """
+
+    id: str
+    sequence: int
+    role: str
+    substep: str
+    query: str
+    strategy_version: str
+    chunk_count: int
+    cited_count: int
+    chunks: list[RetrievalTraceChunkRead]
+
+
+class ModelCallRecordRead(BaseModel):
+    """Reproducibility metadata for one Reasoning Role invocation (ADR 0038).
+
+    Carries role/substep identity, prompt and schema versions, model identity,
+    token ``usage``, prompt/response hashes, the validated ``structured_output``,
+    and the linked ``retrieval_trace_id`` — never the prompt, raw response, hidden
+    reasoning, or duplicated Artifact text (PRD user stories 71, 73). A
+    deterministic role reports its own version as ``model_identity`` with null
+    usage/hashes.
+    """
+
+    id: str
+    sequence: int
+    role: str
+    substep: str
+    prompt_version: str
+    schema_version: str
+    model_identity: str
+    input_hash: str | None
+    output_hash: str | None
+    usage: dict | None
+    structured_output: dict | None
+    retrieval_trace_id: str | None
+    created_at: datetime
+
+
+class RunDiagnosticsRead(BaseModel):
+    """Restricted reasoning/retrieval provenance for one Analysis Run (ADR 0038).
+
+    The diagnostics resource backing the run-diagnostics view: every Model Call
+    Record and Retrieval Trace for the run, in execution order, so causal
+    reasoning is diagnosable without opening restricted debug logs (PRD #26 user
+    stories 57, 69-73, 88-89). It exposes no prompts, raw responses, or Artifact
+    text — provenance references and hashes only.
+    """
+
+    run_id: str
+    model_call_records: list[ModelCallRecordRead]
+    retrieval_traces: list[RetrievalTraceRead]
+
+
 class MarkdownExportCreate(BaseModel):
     """Command payload to render a Markdown export (ADR 0015 / 0022).
 

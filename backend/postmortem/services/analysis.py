@@ -19,7 +19,9 @@ from ..models import (
     Artifact,
     Hypothesis,
     ImpactClaim,
+    ModelCallRecord,
     Postmortem,
+    RetrievalTrace,
     ReviewerNote,
     RunArtifact,
     TimelineEvent,
@@ -300,6 +302,32 @@ class AnalysisService:
         return postmortem_read(
             postmortem, postmortem.run.incident, timeline, impact_claims, hypotheses
         )
+
+    def get_run_diagnostics(self, incident_id: str, run_id: str) -> dict:
+        """Restricted reasoning/retrieval provenance for a run (ADR 0038).
+
+        Validates the run belongs to the incident first so the diagnostics
+        endpoint cannot leak another incident's provenance. Returns every Model
+        Call Record and Retrieval Trace for the run in execution order — references
+        and hashes only, never prompts, raw responses, or Artifact text (PRD #26
+        user stories 69-73).
+        """
+        self.get_run(incident_id, run_id)
+        records = list(
+            self._session.scalars(
+                select(ModelCallRecord)
+                .where(ModelCallRecord.run_id == run_id)
+                .order_by(ModelCallRecord.sequence.asc())
+            )
+        )
+        traces = list(
+            self._session.scalars(
+                select(RetrievalTrace)
+                .where(RetrievalTrace.run_id == run_id)
+                .order_by(RetrievalTrace.sequence.asc())
+            )
+        )
+        return run_diagnostics_read(run_id, records, traces)
 
     def review_hypothesis(
         self, incident_id: str, run_id: str, hypothesis_id: str, decision: str
@@ -617,6 +645,77 @@ def postmortem_read(postmortem, incident, timeline_events, impact_claims, hypoth
         "impact_claims": [impact_claim_read(claim) for claim in impact_claims],
         "hypotheses": [hypothesis_read(hypothesis) for hypothesis in hypotheses],
         "created_at": postmortem.created_at,
+    }
+
+
+def retrieval_trace_read(trace: RetrievalTrace) -> dict:
+    """Shape a RetrievalTrace for RetrievalTraceRead (ADR 0038).
+
+    Summarizes the ordered chunk references with cited/total counts so the
+    diagnostics view can surface retrieved-but-uncited evidence at a glance, while
+    still listing each chunk reference. Carries no chunk or Artifact text.
+    """
+    chunk_refs = list(trace.chunk_refs or [])
+    cited_count = sum(1 for chunk in chunk_refs if chunk.get("cited"))
+    return {
+        "id": trace.id,
+        "sequence": trace.sequence,
+        "role": trace.role,
+        "substep": trace.substep,
+        "query": trace.query,
+        "strategy_version": trace.strategy_version,
+        "chunk_count": len(chunk_refs),
+        "cited_count": cited_count,
+        "chunks": [
+            {
+                "chunk_id": chunk.get("chunk_id", ""),
+                "artifact_id": chunk.get("artifact_id", ""),
+                "sequence": chunk.get("sequence", 0),
+                "line_start": chunk.get("line_start", 0),
+                "line_end": chunk.get("line_end", 0),
+                "cited": bool(chunk.get("cited")),
+            }
+            for chunk in chunk_refs
+        ],
+    }
+
+
+def model_call_record_read(record: ModelCallRecord) -> dict:
+    """Shape a ModelCallRecord for ModelCallRecordRead (ADR 0038).
+
+    Surfaces reproducibility metadata and the validated structured output, never
+    prompts, raw responses, or duplicated Artifact text (PRD user stories 71, 73).
+    """
+    created_at = record.created_at
+    if created_at is not None and created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return {
+        "id": record.id,
+        "sequence": record.sequence,
+        "role": record.role,
+        "substep": record.substep,
+        "prompt_version": record.prompt_version,
+        "schema_version": record.schema_version,
+        "model_identity": record.model_identity,
+        "input_hash": record.input_hash,
+        "output_hash": record.output_hash,
+        "usage": record.usage,
+        "structured_output": record.structured_output,
+        "retrieval_trace_id": record.retrieval_trace_id,
+        "created_at": created_at,
+    }
+
+
+def run_diagnostics_read(
+    run_id: str,
+    records: list[ModelCallRecord],
+    traces: list[RetrievalTrace],
+) -> dict:
+    """Assemble the restricted run-diagnostics read model (ADR 0038)."""
+    return {
+        "run_id": run_id,
+        "model_call_records": [model_call_record_read(record) for record in records],
+        "retrieval_traces": [retrieval_trace_read(trace) for trace in traces],
     }
 
 

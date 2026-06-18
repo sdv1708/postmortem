@@ -21,6 +21,7 @@ from ..schemas import (
     PostmortemRead,
     ReviewerNoteCreate,
     ReviewerNoteRead,
+    RunDiagnosticsRead,
     TimelineEventRead,
 )
 from ..services import (
@@ -220,6 +221,28 @@ def get_run_postmortem(
             detail="this run has not produced a postmortem yet",
         )
     return PostmortemRead.model_validate(document)
+
+
+@router.get("/{run_id}/diagnostics", response_model=RunDiagnosticsRead)
+def get_run_diagnostics(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> RunDiagnosticsRead:
+    """Restricted reasoning/retrieval provenance for a run (ADR 0038).
+
+    Authenticated through the single-user gate (router-level ``require_user``) like
+    every other run resource. Exposes Model Call Records and Retrieval Traces —
+    component versions, ordered retrieved Chunk references, token usage, hashes,
+    and structured outcomes — so causal reasoning is diagnosable without opening
+    restricted debug logs (PRD #26 user stories 69-73, 88-89). It is a separate
+    resource, so the normal Review Surface workflow is unchanged.
+    """
+    try:
+        diagnostics = AnalysisService(db).get_run_diagnostics(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    return RunDiagnosticsRead.model_validate(diagnostics)
 
 
 @router.post("/{run_id}/postmortem/export", response_model=MarkdownExportRead)

@@ -15,13 +15,20 @@ from ..drafting import (
     PostmortemComposerContext,
 )
 from ..falsification import (
+    FALSIFICATION_PROMPT_VERSION,
+    FALSIFICATION_SCHEMA_VERSION,
     MAX_PROPOSED_HYPOTHESES,
     Falsifier,
     HypothesisChallengeOutput,
     HypothesisToChallenge,
     LLMFalsifier,
 )
-from ..incident_facts import IncidentFactExtractor, LLMIncidentFactExtractor
+from ..incident_facts import (
+    INCIDENT_FACTS_PROMPT_VERSION,
+    INCIDENT_FACTS_SCHEMA_VERSION,
+    IncidentFactExtractor,
+    LLMIncidentFactExtractor,
+)
 from ..llm import LLMClient, OfflineLLMClient
 from ..logging import log_event
 from ..models import (
@@ -35,19 +42,47 @@ from ..models import (
     HypothesisChallenge,
     ImpactClaim,
     Incident,
+    ModelCallRecord,
     Postmortem,
+    RetrievalTrace,
     TimelineEvent,
     RunArtifact,
 )
+from ..provenance import (
+    FALSIFICATION_RETRIEVAL_STRATEGY,
+    ROLE_BUILDER,
+    ROLE_FALSIFIER,
+    ROLE_INCIDENT_FACTS,
+    ROLE_RANKER,
+    ROLE_SUPPORT_VERIFIER,
+    STAGE2_ROLES,
+    STAGE3_ROLES,
+    SUPPORT_INPUT_STRATEGY,
+    RecordingLLMClient,
+)
 from ..ranking import (
+    ADVISORY_RANKING_SCHEMA_VERSION,
     AdvisoryRanker,
     DeterministicAdvisoryRanker,
     RankingCandidate,
 )
-from ..rca import MAX_INITIAL_HYPOTHESES, RcaEvidenceRef, RcaGenerationOutput, build_rca_prompt
-from ..retrieval import DeterministicChunkArtifactRetrievalStrategy, RetrievalStrategy
+from ..rca import (
+    MAX_INITIAL_HYPOTHESES,
+    PROMPT_VERSION,
+    RCA_SCHEMA_VERSION,
+    RcaEvidenceRef,
+    RcaGenerationOutput,
+    build_rca_prompt,
+)
+from ..retrieval import (
+    DeterministicChunkArtifactRetrievalStrategy,
+    RetrievalStrategy,
+    RetrievedChunk,
+)
 from ..timestamps import parse_timestamp
 from ..verification import (
+    CLAIM_SUPPORT_PROMPT_VERSION,
+    CLAIM_SUPPORT_SCHEMA_VERSION,
     CitationIntegrityStatus,
     CitationTarget,
     CitationVerifier,
@@ -106,8 +141,19 @@ class PipelineStageRunner:
         self._chunker = chunker or SourceAwareLineWindowChunker()
         # Default to the offline client so deterministic stages still complete a
         # run when no provider is configured; real runs inject a configured
-        # client (ADR 0011).
-        self._llm = llm_client or OfflineLLMClient()
+        # client (ADR 0011). The client is wrapped in a RecordingLLMClient so every
+        # Reasoning Role that talks to a model funnels through it transparently and
+        # each completion's reproducibility metadata (hashes + usage, never prompt
+        # or response text) is captured for Model Call Records (ADR 0038). The
+        # default roles below are constructed with this wrapped client, so builder,
+        # falsifier, and support-verifier calls are all captured.
+        self._llm_recorder = RecordingLLMClient(llm_client or OfflineLLMClient())
+        self._llm = self._llm_recorder
+        # Monotonic provenance sequence per run so the diagnostics view can order
+        # Model Call Records and Retrieval Traces in execution order. Keyed by run
+        # id to stay correct if one runner instance serves more than one run.
+        self._prov_seq: dict[str, int] = {}
+        self._chunk_refs_cache: dict[str, list[RetrievedChunk]] = {}
         # The incident-facts extractor is a swappable Reasoning-Role boundary
         # (ADR 0033): stage 2 produces run-level Impact Claims through it before
         # any causal interpretation. The default uses the configured LLM; the
@@ -221,6 +267,9 @@ class PipelineStageRunner:
         retry never duplicates them or collides on sequence numbers.
         """
         self._clear_timeline(run)
+        # Idempotent across the single stage retry (ADR 0029): clear stage-2
+        # provenance before the extractor regenerates it.
+        self._clear_provenance(run, STAGE2_ROLES)
         artifacts = self._run_artifacts(run)
         candidates: list[_Candidate] = []
         for artifact in artifacts:
@@ -302,6 +351,18 @@ class PipelineStageRunner:
             )
         )
         output = self._fact_extractor.extract(artifacts=artifacts, timeline_events=timeline)
+        # Record the extractor's Model Call Record (ADR 0038). This also drains the
+        # recording buffer at the stage-2 boundary so a stage-3 builder call is
+        # never mis-attributed the extractor's capture.
+        self._record_model_call(
+            run,
+            role=ROLE_INCIDENT_FACTS,
+            substep="extract",
+            prompt_version=INCIDENT_FACTS_PROMPT_VERSION,
+            schema_version=INCIDENT_FACTS_SCHEMA_VERSION,
+            fallback_identity=self._fact_extractor.version,
+            structured_output=_sanitized_facts_output(output),
+        )
         by_id = {artifact.id: artifact for artifact in artifacts}
         warning_codes: list[str] = []
         for sequence, impact in enumerate(output.impact_claims, start=1):
@@ -348,6 +409,12 @@ class PipelineStageRunner:
         untouched, so a failed-then-retried RCA never duplicates or corrupts state.
         """
         self._clear_hypotheses(run)
+        # Idempotent across the single stage retry (ADR 0029): clear stage-3
+        # provenance (builder, falsifier, support verifier, ranker) before the
+        # substeps regenerate it. Also drop any undrained capture so a builder
+        # Model Call Record is never attributed a stale completion.
+        self._clear_provenance(run, STAGE3_ROLES)
+        self._llm_recorder.drain()
         artifacts = self._run_artifacts(run)
         if not artifacts:
             return None
@@ -394,6 +461,30 @@ class PipelineStageRunner:
                 f"builder generated {len(output.hypotheses)} initial hypotheses, exceeding the "
                 f"bounded maximum of {MAX_INITIAL_HYPOTHESES}"
             )
+
+        # Provenance for the builder substep (ADR 0038): a Retrieval Trace over the
+        # chunks the strategy selected — flagging which the model actually cited so
+        # retrieved-but-ignored evidence is visible (PRD user story 70) — and a
+        # Model Call Record linking the builder call to that trace.
+        builder_trace = self._record_retrieval(
+            run,
+            role=ROLE_BUILDER,
+            substep="generate",
+            chunks=retrieval.chunks,
+            query=retrieval.query or "RCA candidate retrieval",
+            strategy_version=self._retrieval.version,
+            cited_ranges=self._builder_cited_ranges(output),
+        )
+        self._record_model_call(
+            run,
+            role=ROLE_BUILDER,
+            substep="generate",
+            prompt_version=PROMPT_VERSION,
+            schema_version=RCA_SCHEMA_VERSION,
+            fallback_identity=self._llm.label,
+            structured_output=_sanitized_builder_output(output),
+            retrieval_trace=builder_trace,
+        )
 
         by_id = {artifact.id: artifact for artifact in retrieval.artifacts}
         warning_codes: list[str] = []
@@ -588,6 +679,35 @@ class PipelineStageRunner:
             timeline_events=timeline,
             allow_proposals=allow_proposals,
         )
+        # Provenance for this falsifier substep (ADR 0038). Falsification Retrieval
+        # spans ALL run artifacts (PRD user story 13), so the Retrieval Trace
+        # records the whole ordered chunk set and flags which the counterclaims
+        # cited — retrieved-but-uncited chunks stay visible (PRD user story 70). The
+        # Model Call Record links the challenge call to that trace.
+        substep = f"challenge:{hypothesis.origin or 'initial'}:{hypothesis.id}"
+        falsifier_trace = self._record_retrieval(
+            run,
+            role=ROLE_FALSIFIER,
+            substep=substep,
+            chunks=self._run_chunk_refs(run),
+            query=f"Falsification retrieval across all run artifacts for: {hypothesis.title}",
+            strategy_version=FALSIFICATION_RETRIEVAL_STRATEGY,
+            cited_ranges=[
+                (ref.artifact_id, ref.line_start, ref.line_end)
+                for counter in result.counterclaims
+                for ref in counter.evidence
+            ],
+        )
+        self._record_model_call(
+            run,
+            role=ROLE_FALSIFIER,
+            substep=substep,
+            prompt_version=FALSIFICATION_PROMPT_VERSION,
+            schema_version=FALSIFICATION_SCHEMA_VERSION,
+            fallback_identity=self._falsifier.version,
+            structured_output=_sanitized_falsifier_output(result),
+            retrieval_trace=falsifier_trace,
+        )
         challenge = HypothesisChallenge(
             run_id=run.id,
             hypothesis_id=hypothesis.id,
@@ -707,12 +827,33 @@ class PipelineStageRunner:
         self._incremental_citation_check(run, hypotheses)
 
         # Provisional semantic support, judged off verified citations only. Warnings
-        # belong to the stage-6 final audit, so discard them here.
+        # belong to the stage-6 final audit, so discard them here. A Model Call
+        # Record is persisted for each hypothesis whose support the verifier was
+        # actually consulted on (ADR 0038); a deterministic short-circuit — no
+        # verified citation to judge — makes no model call and records none, so the
+        # provenance honestly reflects which judgments invoked a model.
         provisional_warnings: list[str] = []
         for hypothesis in hypotheses:
-            self._classify_claim(
+            consulted = self._classify_claim(
                 hypothesis, f"{hypothesis.title}: {hypothesis.summary}", provisional_warnings
             )
+            if consulted:
+                # Trace the verified citations the support judgment actually saw
+                # (its Role Handoff), so an input omission is distinguishable from a
+                # reasoning outcome (PRD user story 69). The structured output keeps
+                # only the support status — the rationale is model free text that
+                # could quote Artifact text and already lives on the claim row.
+                support_trace = self._record_support_trace(run, hypothesis)
+                self._record_model_call(
+                    run,
+                    role=ROLE_SUPPORT_VERIFIER,
+                    substep=f"support:{hypothesis.id}",
+                    prompt_version=CLAIM_SUPPORT_PROMPT_VERSION,
+                    schema_version=CLAIM_SUPPORT_SCHEMA_VERSION,
+                    fallback_identity=self._claim_support.version,
+                    structured_output={"status": hypothesis.support_status},
+                    retrieval_trace=support_trace,
+                )
 
         candidates = [self._ranking_candidate(hypothesis) for hypothesis in hypotheses]
         output = self._ranker.rank(candidates)
@@ -737,6 +878,19 @@ class PipelineStageRunner:
             hypothesis.advisory_rank = position
             hypothesis.ranking_rationale = entry.rationale.model_dump()
         self._session.flush()
+        # The ranker's Model Call Record (ADR 0038). The MVP ranker is deterministic
+        # and makes no model call, so this records the role's own version as model
+        # identity with null usage/hashes — the record documents that the ranking
+        # substep ran and with which contract, even without a model.
+        self._record_model_call(
+            run,
+            role=ROLE_RANKER,
+            substep="rank",
+            prompt_version=self._ranker.version,
+            schema_version=ADVISORY_RANKING_SCHEMA_VERSION,
+            fallback_identity=self._ranker.version,
+            structured_output=_sanitized_ranker_output(output),
+        )
         log_event(
             logger,
             logging.INFO,
@@ -1120,13 +1274,18 @@ class PipelineStageRunner:
         elif support_status == ClaimSupportStatus.PARTIAL.value:
             warning_codes.append("partial_claim_support")
 
-    def _classify_claim(self, claim, claim_text: str, warning_codes: list[str]) -> None:
+    def _classify_claim(self, claim, claim_text: str, warning_codes: list[str]) -> bool:
         """Stamp one Major Claim's support status + rationale (ADR 0014).
 
         Contradicting evidence is excluded — support is judged on the supporting
         citations only. Snippets come from the stored EvidenceRefs, which are the
         citation source of truth (ADR 0024), so the verifier never sees
         model-invented text.
+
+        Returns whether the semantic support verifier was actually consulted: an
+        uncited or broken-citation claim is judged UNSUPPORTED deterministically
+        with no model call, so the caller records no support Model Call Record for
+        it (ADR 0038). It returns True only when a model judgment was made.
         """
         supporting = [ref for ref in claim.evidence_refs if ref.role != "contradicting"]
         verified_supporting = [
@@ -1141,7 +1300,7 @@ class PipelineStageRunner:
                 "rather than an evidence-backed claim."
             )
             warning_codes.append("unsupported_claim")
-            return
+            return False
         if not verified_supporting:
             # Semantic support cannot rescue a broken citation. Citation integrity
             # is the deterministic trust floor (ADR 0014), so claims with only
@@ -1152,7 +1311,7 @@ class PipelineStageRunner:
                 "unsupported until the cited evidence resolves to immutable artifact lines."
             )
             warning_codes.append("unsupported_claim")
-            return
+            return False
         judgment = self._claim_support.verify(
             ClaimToVerify(
                 claim_text=claim_text,
@@ -1165,6 +1324,7 @@ class PipelineStageRunner:
             warning_codes.append("unsupported_claim")
         elif judgment.status is ClaimSupportStatus.PARTIAL:
             warning_codes.append("partial_claim_support")
+        return True
 
     def _run_artifacts(self, run: AnalysisRun) -> list[Artifact]:
         # The included-artifact set is immutable once a run starts, so both
@@ -1183,6 +1343,216 @@ class PipelineStageRunner:
         artifacts = list(self._session.scalars(stmt))
         self._artifacts_cache[run.id] = artifacts
         return artifacts
+
+    # --- Reasoning/retrieval provenance (ADR 0038) --------------------------
+    #
+    # Persist a Model Call Record per Reasoning Role invocation and a Retrieval
+    # Trace per role retrieval so the causal analysis is diagnosable without
+    # duplicating Sensitive Evidence (PRD #26 user stories 57, 69-73). The
+    # recording client buffers each completion's hashes + usage; these helpers
+    # drain that buffer at the role boundary and attach the role/substep identity,
+    # versions, and validated structured output — never prompt or response text.
+
+    def _next_provenance_sequence(self, run: AnalysisRun) -> int:
+        value = self._prov_seq.get(run.id, 0) + 1
+        self._prov_seq[run.id] = value
+        return value
+
+    def _run_chunk_refs(self, run: AnalysisRun) -> list[RetrievedChunk]:
+        """Ordered references to every persisted chunk in the run (ADR 0038).
+
+        The falsifier's Falsification Retrieval spans all immutable run artifacts
+        (PRD user story 13), so its Retrieval Trace records the whole ordered chunk
+        set — references only, never chunk text.
+        """
+        cached = self._chunk_refs_cache.get(run.id)
+        if cached is not None:
+            return cached
+        refs = [
+            RetrievedChunk(
+                chunk_id=chunk.id,
+                artifact_id=chunk.artifact_id,
+                sequence=chunk.sequence,
+                line_start=chunk.line_start,
+                line_end=chunk.line_end,
+            )
+            for chunk in self._session.scalars(
+                select(EvidenceChunk)
+                .where(EvidenceChunk.run_id == run.id)
+                .order_by(EvidenceChunk.sequence.asc())
+            )
+        ]
+        self._chunk_refs_cache[run.id] = refs
+        return refs
+
+    def _builder_cited_ranges(
+        self, output: RcaGenerationOutput
+    ) -> list[tuple[str, int, int]]:
+        """The (artifact, line_start, line_end) ranges the builder cited (ADR 0038).
+
+        Drawn from the model's own structured output — supporting, contradicting,
+        and remediation citations across every hypothesis — so the builder's
+        Retrieval Trace can mark which retrieved chunks were actually cited.
+        """
+        ranges: list[tuple[str, int, int]] = []
+        for hyp in output.hypotheses:
+            refs = list(hyp.supporting_evidence) + list(hyp.contradicting_evidence)
+            for remediation in hyp.remediation_items:
+                refs.extend(remediation.evidence)
+            for ref in refs:
+                ranges.append((ref.artifact_id, ref.line_start, ref.line_end))
+        return ranges
+
+    def _record_retrieval(
+        self,
+        run: AnalysisRun,
+        *,
+        role: str,
+        substep: str,
+        chunks: list[RetrievedChunk] | tuple[RetrievedChunk, ...],
+        query: str,
+        strategy_version: str,
+        cited_ranges: list[tuple[str, int, int]],
+    ) -> RetrievalTrace:
+        """Persist a Retrieval Trace, flagging retrieved-but-uncited chunks (ADR 0038).
+
+        ``cited_ranges`` are the (artifact, line_start, line_end) ranges the role
+        actually cited; a chunk is ``cited`` if any cited range overlaps it.
+        Recording the uncited remainder is what lets a diagnostician separate a
+        retrieval omission (a relevant chunk never retrieved) from a model omission
+        (a chunk retrieved but ignored) — PRD user story 70.
+        """
+        cited_by_artifact: dict[str, list[tuple[int, int]]] = {}
+        for artifact_id, line_start, line_end in cited_ranges:
+            cited_by_artifact.setdefault(artifact_id, []).append((line_start, line_end))
+        chunk_refs: list[dict] = []
+        for chunk in chunks:
+            ranges = cited_by_artifact.get(chunk.artifact_id, [])
+            cited = any(
+                not (end < chunk.line_start or start > chunk.line_end)
+                for (start, end) in ranges
+            )
+            chunk_refs.append(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "artifact_id": chunk.artifact_id,
+                    "sequence": chunk.sequence,
+                    "line_start": chunk.line_start,
+                    "line_end": chunk.line_end,
+                    "cited": cited,
+                }
+            )
+        trace = RetrievalTrace(
+            run_id=run.id,
+            sequence=self._next_provenance_sequence(run),
+            role=role,
+            substep=substep,
+            query=query,
+            strategy_version=strategy_version,
+            chunk_refs=chunk_refs,
+        )
+        self._session.add(trace)
+        self._session.flush()
+        return trace
+
+    def _record_support_trace(self, run: AnalysisRun, hypothesis: Hypothesis) -> RetrievalTrace:
+        """Trace the verified citations a support judgment received (ADR 0038).
+
+        The support verifier is a synthesis role, not a retrieval role: it judges
+        the hypothesis's *verified supporting* citations handed to it. Recording the
+        chunks those citations resolve to makes its input visible — a support
+        record with an empty trace means no evidence reached it (input omission),
+        distinct from one that saw evidence and judged it unsupported (PRD user
+        story 69). The chunks are references only, never snippet text.
+        """
+        ranges = [
+            (ref.artifact_id, ref.line_start, ref.line_end)
+            for ref in hypothesis.evidence_refs
+            if ref.role != "contradicting"
+            and ref.verifier_status == CitationIntegrityStatus.VERIFIED.value
+        ]
+        overlapping = [
+            chunk
+            for chunk in self._run_chunk_refs(run)
+            if any(
+                artifact_id == chunk.artifact_id
+                and not (end < chunk.line_start or start > chunk.line_end)
+                for (artifact_id, start, end) in ranges
+            )
+        ]
+        return self._record_retrieval(
+            run,
+            role=ROLE_SUPPORT_VERIFIER,
+            substep=f"support:{hypothesis.id}",
+            chunks=overlapping,
+            query=f"Verified supporting citations judged for: {hypothesis.title}",
+            strategy_version=SUPPORT_INPUT_STRATEGY,
+            cited_ranges=ranges,
+        )
+
+    def _record_model_call(
+        self,
+        run: AnalysisRun,
+        *,
+        role: str,
+        substep: str,
+        prompt_version: str,
+        schema_version: str,
+        fallback_identity: str,
+        structured_output: dict | None,
+        retrieval_trace: RetrievalTrace | None = None,
+    ) -> ModelCallRecord:
+        """Persist one Reasoning Role invocation's reproducibility metadata (ADR 0038).
+
+        Drains the recording client's buffer for the just-finished role call: a
+        model-backed role contributes one capture (prompt/response hashes + token
+        usage, never text), while a deterministic role (the default ranker) or an
+        injected fake contributes none, so the record falls back to the role's own
+        version as model identity with null usage/hashes. ``structured_output`` is
+        the role's validated Role Handoff — its own assertions and line-range
+        citations, never Artifact text — and ``retrieval_trace`` links the call to
+        the evidence it received so a retrieval failure is distinguishable from a
+        reasoning failure (PRD user story 69).
+        """
+        captures = self._llm_recorder.drain()
+        capture = captures[-1] if captures else None
+        record = ModelCallRecord(
+            run_id=run.id,
+            sequence=self._next_provenance_sequence(run),
+            role=role,
+            substep=substep,
+            prompt_version=prompt_version,
+            schema_version=schema_version,
+            model_identity=capture.model_identity if capture else fallback_identity,
+            input_hash=capture.input_hash if capture else None,
+            output_hash=capture.output_hash if capture else None,
+            usage=capture.usage if capture else None,
+            structured_output=structured_output,
+            retrieval_trace_id=retrieval_trace.id if retrieval_trace is not None else None,
+        )
+        self._session.add(record)
+        self._session.flush()
+        return record
+
+    def _clear_provenance(self, run: AnalysisRun, roles: frozenset[str]) -> None:
+        """Remove a stage's prior provenance before it regenerates (ADR 0029).
+
+        Idempotent across the single stage retry: a retried claim-generating stage
+        clears only its own roles' Model Call Records and Retrieval Traces, so a
+        failed-then-retried attempt never leaves duplicate provenance. Records are
+        deleted before traces because a record references its trace.
+        """
+        for record in self._session.scalars(
+            select(ModelCallRecord)
+            .where(ModelCallRecord.run_id == run.id, ModelCallRecord.role.in_(roles))
+        ):
+            self._session.delete(record)
+        for trace in self._session.scalars(
+            select(RetrievalTrace)
+            .where(RetrievalTrace.run_id == run.id, RetrievalTrace.role.in_(roles))
+        ):
+            self._session.delete(trace)
+        self._session.flush()
 
     def _clear_timeline(self, run: AnalysisRun) -> None:
         existing = self._session.scalars(
@@ -1265,6 +1635,79 @@ def _order_candidates(candidates: list[_Candidate]) -> list[_Candidate]:
     undated = [c for c in candidates if c.normalized_ts is None]
     dated.sort(key=lambda c: c.normalized_ts)
     return dated + undated
+
+
+# --- Sanitized structured-output shaping for provenance (ADR 0038) ----------
+#
+# A Model Call Record persists the role's *validated structured output*, but it
+# must not duplicate Artifact text (PRD #26 user stories 71, 73). A model can quote
+# an artifact line verbatim into a free-text field (a hypothesis summary, a
+# counterclaim statement, a support rationale), so the recorder never stores those
+# free-text fields. Instead it stores the validated output's diagnostic skeleton:
+# citations as *references* (artifact id + line range, never snippet text), plus
+# counts, severities, statuses, and ranking order. The full free text already
+# lives in the product tables (hypotheses, counterclaims, ranking rationale) that
+# the normal Review Surface renders; provenance keeps only what reproducibility
+# diagnosis needs.
+
+
+def _citation_ref(ref) -> dict:
+    """A citation as a reference only (artifact id + line range), never text."""
+    return {
+        "artifact_id": ref.artifact_id,
+        "line_start": ref.line_start,
+        "line_end": ref.line_end,
+        "confidence_score": ref.confidence_score,
+    }
+
+
+def _sanitized_builder_output(output) -> dict:
+    return {
+        "hypothesis_count": len(output.hypotheses),
+        "hypotheses": [
+            {
+                "supporting_citations": [_citation_ref(r) for r in hyp.supporting_evidence],
+                "contradicting_citations": [_citation_ref(r) for r in hyp.contradicting_evidence],
+                "unknown_count": len(hyp.unknowns),
+                "validation_step_count": len(hyp.validation_steps),
+                "remediation_count": len(hyp.remediation_items),
+                "remediation_citations": [
+                    _citation_ref(ref)
+                    for remediation in hyp.remediation_items
+                    for ref in remediation.evidence
+                ],
+            }
+            for hyp in output.hypotheses
+        ],
+    }
+
+
+def _sanitized_facts_output(output) -> dict:
+    return {
+        "impact_claim_count": len(output.impact_claims),
+        "impact_citations": [
+            _citation_ref(ref) for claim in output.impact_claims for ref in claim.evidence
+        ],
+    }
+
+
+def _sanitized_falsifier_output(output) -> dict:
+    return {
+        "severity": output.severity,
+        "counterclaim_count": len(output.counterclaims),
+        "counterclaim_citations": [
+            _citation_ref(ref) for counter in output.counterclaims for ref in counter.evidence
+        ],
+        "evidence_gap_count": len(output.evidence_gaps),
+        "falsification_test_count": len(output.falsification_tests),
+        "proposed_hypothesis_count": len(output.proposed_hypotheses),
+    }
+
+
+def _sanitized_ranker_output(output) -> dict:
+    # Ordered candidate ids are the ranking outcome; the per-dimension rationale is
+    # model free text already persisted on Hypothesis.ranking_rationale.
+    return {"rankings": [{"hypothesis_id": entry.hypothesis_id} for entry in output.rankings]}
 
 
 def _dedupe(values: list[str]) -> list[str]:

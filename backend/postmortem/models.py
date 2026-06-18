@@ -126,6 +126,16 @@ class AnalysisRun(Base):
     impact_claims: Mapped[list["ImpactClaim"]] = relationship(
         back_populates="run", cascade="all, delete-orphan", order_by="ImpactClaim.sequence"
     )
+    # Reasoning/retrieval provenance for the causal-analysis substeps (ADR 0038):
+    # one Model Call Record per Reasoning Role invocation and one Retrieval Trace
+    # per role retrieval, so a run is diagnosable without duplicating Sensitive
+    # Evidence (PRD #26 user stories 69-73).
+    model_call_records: Mapped[list["ModelCallRecord"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="ModelCallRecord.sequence"
+    )
+    retrieval_traces: Mapped[list["RetrievalTrace"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="RetrievalTrace.sequence"
+    )
 
 
 class RunArtifact(Base):
@@ -221,6 +231,89 @@ class EvidenceChunk(Base):
 
     run: Mapped[AnalysisRun] = relationship()
     artifact: Mapped[Artifact] = relationship()
+
+
+class RetrievalTrace(Base):
+    """The evidence a Reasoning Role received for one substep (ADR 0038).
+
+    A Retrieval Trace explains *what evidence a role saw* — distinct from an
+    EvidenceRef, which identifies the exact lines a claim cited (CONTEXT
+    "Retrieval Trace vs EvidenceRef"). It records the role/substep identity, the
+    retrieval ``query``, the strategy ``version``, and the ordered Chunk
+    references the role received, **including retrieved chunks that were not
+    cited** (PRD user story 70). That uncited-but-retrieved set is what lets a
+    diagnostician tell a retrieval omission (a relevant chunk never retrieved)
+    apart from a model omission (a chunk retrieved but ignored).
+
+    ``chunk_refs`` is an ordered JSON list of ``{chunk_id, artifact_id, sequence,
+    line_start, line_end, cited}``. It stores chunk *references*, never chunk or
+    Artifact text, so Sensitive Evidence is not duplicated into provenance
+    (PRD user stories 71, 73).
+    """
+
+    __tablename__ = "retrieval_traces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Monotonic order of provenance within the run so the diagnostics view can
+    # present substeps in execution order without relying on timestamps.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    substep: Mapped[str] = mapped_column(String(128), nullable=False)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunk_refs: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="retrieval_traces")
+
+
+class ModelCallRecord(Base):
+    """Reproducibility metadata for one Reasoning Role invocation (ADR 0038).
+
+    Persisted per builder, falsifier, support-verifier, and ranker call (and the
+    stage-2 incident-fact extractor) so causal reasoning is diagnosable and
+    experiments are comparable (PRD #26 user stories 57, 69-73). It records the
+    role/substep identity, prompt and schema versions, model identity, token
+    ``usage``, prompt/response ``input_hash`` / ``output_hash``, and the validated
+    ``structured_output`` — but never the prompt, the raw response, hidden
+    chain-of-thought, or duplicated Artifact text (PRD user stories 71, 73;
+    CONTEXT "Model Call Record vs Debug Log"). A deterministic role (e.g. the
+    default advisory ranker) makes no model call, so its ``model_identity`` is the
+    role's own version and ``usage`` / hashes are null. ``retrieval_trace_id``
+    links to the Retrieval Trace for the same substep when the role retrieved, so
+    a retrieval failure can be distinguished from a reasoning failure (PRD user
+    story 69).
+    """
+
+    __tablename__ = "model_call_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    substep: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_identity: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Null for a deterministic role and for a model that reports no usage.
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # The validated structured output the role returned (a Role Handoff): the
+    # model's own assertions and line-range citations, never Artifact text.
+    structured_output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    retrieval_trace_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("retrieval_traces.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship(back_populates="model_call_records")
+    retrieval_trace: Mapped["RetrievalTrace | None"] = relationship()
 
 
 class TimelineEvent(Base):

@@ -8,6 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # the prompt or the expected output contract changes so runs stay comparable.
 PROMPT_VERSION: Final[str] = "rca-1"
 
+# Versioned identity of the builder's strict output schema (ADR 0028 / 0038),
+# recorded on each builder Model Call Record. Bump when ``RcaGenerationOutput``
+# changes so a run records which contract validated its hypotheses.
+RCA_SCHEMA_VERSION: Final[str] = "rca-output-1"
+
 # The bounded builder cardinality (ADR 0036, PRD #26 / #30 user story 65, Hypothesis
 # Budget): the builder may generate at most this many initial RCA Hypotheses. More
 # than this fails the Runtime Reasoning Gate rather than persisting an unbounded

@@ -16,6 +16,9 @@ logger = logging.getLogger("postmortem.incident_facts")
 # Reasoning Role with its own prompt and schema (PRD #26).
 INCIDENT_FACTS_PROMPT_VERSION: Final[str] = "incident-facts-1"
 INCIDENT_FACT_EXTRACTOR_VERSION: Final[str] = "llm-incident-facts-1"
+# Versioned identity of the extractor's strict output schema (ADR 0028 / 0038),
+# recorded on its Model Call Record. Bump when ``IncidentFactsOutput`` changes.
+INCIDENT_FACTS_SCHEMA_VERSION: Final[str] = "incident-facts-output-1"
 
 
 # --- Strict structured model-output contract (ADR 0028) ---------------------
