@@ -1,0 +1,424 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from postmortem.auth import Principal
+from postmortem.incident_facts import FactsImpactClaim
+from postmortem.llm import FakeLLMClient
+from postmortem.rca import RcaEvidenceRef
+from postmortem.schemas import (
+    AnalysisRunCreate,
+    ArtifactCreate,
+    CausalFactorCreate,
+    IncidentCreate,
+    RootCauseConclusionCreate,
+)
+from postmortem.services import (
+    AnalysisService,
+    ConclusionAlreadyFinalizedError,
+    ConclusionNotFoundError,
+    ConclusionNotReadyError,
+    ConclusionService,
+    HypothesisNotFoundError,
+    IncidentService,
+    ArtifactService,
+    conclusion_read,
+)
+from postmortem.services.conclusions import ConclusionValidationError
+from postmortem.verification import ClaimSupportJudgment, ClaimSupportStatus
+
+from tests._fakes import (
+    FakeClaimSupportVerifier,
+    FakeFalsifier,
+    FakeIncidentFactExtractor,
+)
+
+
+PRINCIPAL = Principal(id="reviewer-1", display="Reviewer One")
+
+
+def _succeeded_run(session, *, titles=("Primary cause", "Alternative cause"), verifier=None):
+    """Seed a succeeded run with the given hypotheses (each line-cited)."""
+    incident = IncidentService(session).create(IncidentCreate(title="Ambiguous"))
+    artifact = ArtifactService(session).create(
+        incident.id,
+        ArtifactCreate(
+            source_type="logs",
+            source_name="api.log",
+            body="line one\nline two\nline three\nline four\nline five",
+        ),
+    )
+    session.commit()
+    hypotheses_payload = [
+        {
+            "title": title,
+            "summary": f"{title} explanation.",
+            "supporting_evidence": [
+                {"artifact_id": artifact.id, "line_start": index + 1, "line_end": index + 1}
+            ],
+        }
+        for index, title in enumerate(titles)
+    ]
+    payload = json.dumps({"hypotheses": hypotheses_payload})
+    impact = [
+        FactsImpactClaim(
+            description="Customers saw errors",
+            evidence=[RcaEvidenceRef(artifact_id=artifact.id, line_start=1, line_end=1)],
+        )
+    ]
+    service = AnalysisService(
+        session,
+        llm_client=FakeLLMClient([payload], label="fake-model"),
+        claim_support_verifier=verifier or FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(impact),
+        falsifier=FakeFalsifier(),
+    )
+    run = service.start_run(incident.id, AnalysisRunCreate())
+    session.commit()
+    assert run.status == "succeeded"
+    return service, incident, run
+
+
+def _by_title(service, incident, run):
+    return {h.title: h for h in service.list_hypotheses(incident.id, run.id)}
+
+
+def _accept(service, incident, run, *hypotheses):
+    for hypothesis in hypotheses:
+        service.review_hypothesis(incident.id, run.id, hypothesis.id, "accepted")
+
+
+def test_finalize_records_conclusion_with_provenance(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, hyps["Primary cause"])
+    fresh_session.commit()
+
+    conclusion = ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="The deploy regressed connection handling.",
+            factors=[
+                CausalFactorCreate(
+                    hypothesis_id=hyps["Primary cause"].id, role="failure_mechanism"
+                )
+            ],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    assert conclusion.finalized_by_principal == "reviewer-1"
+    assert conclusion.finalized_by_display == "Reviewer One"
+    assert conclusion.finalized_at is not None
+
+    shaped = conclusion_read(conclusion)
+    assert shaped["incident_id"] == incident.id
+    assert shaped["failure_mechanism"]["title"] == "Primary cause"
+    assert shaped["failure_mechanism"]["support_status"] == "supported"
+    assert shaped["failure_mechanism"]["supporting_evidence"]  # navigable to evidence
+    assert shaped["triggers"] == []
+    assert shaped["amplifying_conditions"] == []
+
+    # The automated provisional draft becomes finalized once the human concludes.
+    document = service.get_postmortem_document(incident.id, run.id)
+    assert document["conclusion_status"] == "finalized"
+    assert document["conclusion"]["id"] == conclusion.id
+
+
+def test_finalize_supports_optional_repeatable_roles(fresh_session):
+    service, incident, run = _succeeded_run(
+        fresh_session, titles=("Mechanism", "Trigger one", "Amp one", "Amp two")
+    )
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, *hyps.values())
+    fresh_session.commit()
+
+    conclusion = ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="Multi-factor incident.",
+            factors=[
+                CausalFactorCreate(hypothesis_id=hyps["Mechanism"].id, role="failure_mechanism"),
+                CausalFactorCreate(hypothesis_id=hyps["Trigger one"].id, role="trigger"),
+                CausalFactorCreate(hypothesis_id=hyps["Amp one"].id, role="amplifying_condition"),
+                CausalFactorCreate(hypothesis_id=hyps["Amp two"].id, role="amplifying_condition"),
+            ],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    shaped = conclusion_read(conclusion)
+    assert shaped["failure_mechanism"]["title"] == "Mechanism"
+    assert [t["title"] for t in shaped["triggers"]] == ["Trigger one"]
+    assert {a["title"] for a in shaped["amplifying_conditions"]} == {"Amp one", "Amp two"}
+
+
+def test_finalize_requires_exactly_one_failure_mechanism(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, *hyps.values())
+    fresh_session.commit()
+    svc = ConclusionService(fresh_session)
+
+    # Zero failure mechanisms.
+    with pytest.raises(ConclusionValidationError):
+        svc.finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[
+                    CausalFactorCreate(hypothesis_id=hyps["Primary cause"].id, role="trigger")
+                ],
+            ),
+            PRINCIPAL,
+        )
+    fresh_session.rollback()
+
+    # Two failure mechanisms.
+    with pytest.raises(ConclusionValidationError):
+        svc.finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[
+                    CausalFactorCreate(
+                        hypothesis_id=hyps["Primary cause"].id, role="failure_mechanism"
+                    ),
+                    CausalFactorCreate(
+                        hypothesis_id=hyps["Alternative cause"].id, role="failure_mechanism"
+                    ),
+                ],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_rejects_unaccepted_hypothesis(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)  # left "proposed"
+    fresh_session.commit()
+    with pytest.raises(ConclusionValidationError, match="accepted"):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[
+                    CausalFactorCreate(
+                        hypothesis_id=hyps["Primary cause"].id, role="failure_mechanism"
+                    )
+                ],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_rejects_unsupported_hypothesis(fresh_session):
+    def judge(claim):
+        if claim.claim_text.startswith("Primary cause"):
+            return ClaimSupportJudgment(ClaimSupportStatus.UNSUPPORTED, "Not established.")
+        return ClaimSupportJudgment(ClaimSupportStatus.SUPPORTED, "ok")
+
+    service, incident, run = _succeeded_run(
+        fresh_session, verifier=FakeClaimSupportVerifier(judge)
+    )
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, hyps["Primary cause"])
+    fresh_session.commit()
+    with pytest.raises(ConclusionValidationError, match="not supported"):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[
+                    CausalFactorCreate(
+                        hypothesis_id=hyps["Primary cause"].id, role="failure_mechanism"
+                    )
+                ],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_rejects_unverified_citation(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    # Simulate a citation that did not pass deterministic integrity.
+    for ref in target.evidence_refs:
+        ref.verifier_status = "snippet_mismatch"
+    fresh_session.flush()
+    fresh_session.commit()
+    with pytest.raises(ConclusionValidationError, match="verified"):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism")],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_rejects_cross_run_hypothesis(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    _other_service, other_incident, other_run = _succeeded_run(fresh_session)
+    other = _by_title(_other_service, other_incident, other_run)["Primary cause"]
+    fresh_session.commit()
+    with pytest.raises(HypothesisNotFoundError):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[CausalFactorCreate(hypothesis_id=other.id, role="failure_mechanism")],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_rejects_duplicate_hypothesis_roles(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+    with pytest.raises(ConclusionValidationError, match="more than one causal role"):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[
+                    CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism"),
+                    CausalFactorCreate(hypothesis_id=target.id, role="trigger"),
+                ],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_is_immutable_second_attempt_conflicts(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+    create = RootCauseConclusionCreate(
+        summary="first",
+        factors=[CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism")],
+    )
+    ConclusionService(fresh_session).finalize(incident.id, run.id, create, PRINCIPAL)
+    fresh_session.commit()
+    with pytest.raises(ConclusionAlreadyFinalizedError):
+        ConclusionService(fresh_session).finalize(incident.id, run.id, create, PRINCIPAL)
+
+
+def test_finalize_rejects_failed_run_even_with_postmortem(fresh_session):
+    # Drafting (stage 5) runs before the final audit (stage 6), so a later stage
+    # failure can leave a failed run with a Postmortem present. Finalization must
+    # still refuse it: the run has not cleared its final trust checkpoint (#26/#33).
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    run.status = "failed"
+    fresh_session.flush()
+    fresh_session.commit()
+    with pytest.raises(ConclusionNotReadyError):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism")],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_run_id_is_unique_so_concurrent_finalization_cannot_double(fresh_session):
+    # Backstop for the check-then-insert race: even bypassing the service's
+    # existence pre-check, the DB rejects a second conclusion for the same run, so
+    # two immutable conclusions can never exist for one run (ADR 0039).
+    from sqlalchemy.exc import IntegrityError
+
+    from postmortem.models import RootCauseConclusion
+
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+    ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="first",
+            factors=[CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism")],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    fresh_session.add(
+        RootCauseConclusion(
+            run_id=run.id,
+            summary="racing duplicate",
+            finalized_by_principal="reviewer-2",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        fresh_session.flush()
+    fresh_session.rollback()
+
+
+def test_finalize_requires_a_drafted_postmortem(fresh_session):
+    incident = IncidentService(fresh_session).create(IncidentCreate(title="Bare"))
+    ArtifactService(fresh_session).create(
+        incident.id, ArtifactCreate(source_type="logs", source_name="a.log", body="x")
+    )
+    fresh_session.commit()
+    # A queued run that never executed has no Postmortem to finalize against.
+    from postmortem.models import AnalysisRun
+
+    run = AnalysisRun(
+        incident_id=incident.id,
+        status="queued",
+        pipeline_version="mvp-0",
+        prompt_version="none-0",
+        model_provider="none",
+        retrieval_strategy="d-0",
+        chunking_strategy="c-0",
+        verifier_version="v-0",
+    )
+    fresh_session.add(run)
+    fresh_session.commit()
+    with pytest.raises(ConclusionNotReadyError):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[CausalFactorCreate(hypothesis_id="nope", role="failure_mechanism")],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_get_conclusion_raises_before_finalization(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    fresh_session.commit()
+    with pytest.raises(ConclusionNotFoundError):
+        ConclusionService(fresh_session).get_conclusion(incident.id, run.id)

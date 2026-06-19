@@ -1,8 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from fastapi import Depends, Header, HTTPException, status
 
 from .config import Settings
+
+
+@dataclass(frozen=True)
+class Principal:
+    """The authenticated actor behind a request (ADR 0017 / 0039).
+
+    The MVP single-user gate authorizes one principal; ``id`` is the stable
+    authenticated identifier recorded as Conclusion Provenance, and ``display`` is
+    the human-readable name when configured (PRD #26 story 42).
+    """
+
+    id: str
+    display: str | None = None
 
 
 class _SettingsHolder:
@@ -53,3 +68,17 @@ def require_user(
             detail="invalid bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def require_principal(
+    _: None = Depends(require_user),
+    settings: Settings = Depends(get_settings),
+) -> Principal:
+    """Resolve the authenticated Principal after the single-user gate passes.
+
+    Reuses ``require_user`` for the auth check, then returns the configured
+    single-user identity so command endpoints (e.g. Root Cause Conclusion
+    finalization, ADR 0039) can record Conclusion Provenance without introducing
+    roles or multi-user authorization (PRD #26 story 42, out-of-scope RBAC).
+    """
+    return Principal(id=settings.principal_id, display=settings.principal_display)

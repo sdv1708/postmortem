@@ -3,11 +3,25 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import (
     Base,
+    CAUSAL_FACTOR_ROLE_CHECK,
     EVIDENCE_REF_OWNER_CHECK,
     EVIDENCE_REF_ROLE_CHECK,
     HYPOTHESIS_CHALLENGE_SEVERITY_CHECK,
@@ -661,6 +675,118 @@ class Postmortem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     run: Mapped[AnalysisRun] = relationship()
+
+
+class RootCauseConclusion(Base):
+    """A reviewer's finalized, evidence-governed causal account (ADR 0039).
+
+    The system never declares a root cause: it generates RCA Hypotheses and an
+    Advisory Hypothesis Ranking, and only a human creates a Root Cause Conclusion
+    by finalizing one or more accepted hypotheses (CONTEXT "RCA Hypothesis vs Root
+    Cause Conclusion", PRD #26 stories 30-31). A conclusion is composed of
+    ``CausalFactor`` rows — exactly one Failure Mechanism plus optional repeatable
+    Triggers and Amplifying Conditions — so a multi-factor incident is represented
+    honestly rather than collapsed onto one apparent winner.
+
+    Conclusion Provenance is recorded (PRD story 42): the authenticated
+    ``finalized_by_principal``, the ``finalized_by_display`` name when available,
+    the ``finalized_at`` time, and the source ``run_id``. Conclusions are immutable
+    (PRD story 43): there is no service or API mutation path, and the database
+    blocks UPDATE/DELETE where supported (``_ensure_append_only_immutability``).
+    Later disagreement is recorded through append-only Conclusion Discrepancies and
+    Superseding Conclusions in subsequent slices, never by editing this row.
+    """
+
+    __tablename__ = "root_cause_conclusions"
+    __table_args__ = (
+        # Exactly one conclusion per run in this slice, enforced at the database
+        # boundary so a check-then-insert race cannot create two immutable
+        # conclusions for one Analysis Run (PRD #26/#33 single-conclusion contract).
+        # The Superseding-Conclusion slice will relax this to a partial uniqueness
+        # keyed off a supersedes link; for now plain uniqueness is the invariant.
+        Index("ux_root_cause_conclusions_run_id", "run_id", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # The unique index in __table_args__ already covers run lookups.
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    # The reviewer's structured causal narrative. Not a generated Major Claim — the
+    # evidence trust floor lives on the linked hypotheses' citations — so it carries
+    # no EvidenceRefs of its own.
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    # Conclusion Provenance (PRD story 42): who made the human judgment and when.
+    # ``principal`` is the authenticated identifier from the single-user gate;
+    # ``display`` is the human-readable name when configured (ADR 0017).
+    finalized_by_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    finalized_by_display: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    finalized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    run: Mapped[AnalysisRun] = relationship()
+    factors: Mapped[list["CausalFactor"]] = relationship(
+        back_populates="conclusion",
+        cascade="all, delete-orphan",
+        order_by="(CausalFactor.role, CausalFactor.sequence)",
+    )
+
+
+class CausalFactor(Base):
+    """An accepted RCA Hypothesis included in a Root Cause Conclusion (ADR 0039).
+
+    A Causal Factor references an accepted hypothesis with verified citations and
+    ``supported`` or ``partial`` semantic support (PRD stories 36-37), so human
+    finalization cannot bypass the trust floor or invent complexity. Its ``role``
+    is the causal part it plays: every conclusion has exactly one
+    ``failure_mechanism`` and zero or more ``trigger`` / ``amplifying_condition``
+    factors (CONTEXT "Failure Mechanism vs Trigger vs Amplifying Condition"). The
+    at-most-one-Failure-Mechanism invariant is enforced by a partial unique index
+    where supported; the service enforces the at-least-one half.
+    """
+
+    __tablename__ = "causal_factors"
+    __table_args__ = (
+        CheckConstraint(CAUSAL_FACTOR_ROLE_CHECK, name="ck_causal_factors_role"),
+        # A hypothesis plays at most one causal role in a given conclusion.
+        UniqueConstraint(
+            "conclusion_id", "hypothesis_id", name="uq_causal_factors_unique_hypothesis"
+        ),
+        # Exactly one Failure Mechanism per conclusion: a partial unique index gives
+        # at-most-one on both SQLite and PostgreSQL; the service enforces at-least-one.
+        Index(
+            "uq_causal_factors_one_failure_mechanism",
+            "conclusion_id",
+            unique=True,
+            sqlite_where=text("role = 'failure_mechanism'"),
+            postgresql_where=text("role = 'failure_mechanism'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conclusion_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("root_cause_conclusions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # References the accepted hypothesis so the conclusion preserves generated
+    # provenance (PRD story 36). RESTRICT so a hypothesis cited by a finalized
+    # conclusion cannot be orphaned out from under it.
+    hypothesis_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("hypotheses.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    # failure_mechanism | trigger | amplifying_condition (enforced by the CHECK).
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Display/sort order within a role so repeatable Triggers / Amplifying
+    # Conditions render in the order the reviewer chose them.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    conclusion: Mapped[RootCauseConclusion] = relationship(back_populates="factors")
+    hypothesis: Mapped["Hypothesis"] = relationship()
 
 
 class EvaluationRun(Base):
