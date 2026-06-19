@@ -732,6 +732,15 @@ class RootCauseConclusion(Base):
         cascade="all, delete-orphan",
         order_by="(CausalFactor.role, CausalFactor.sequence)",
     )
+    # Append-only Conclusion Discrepancies (ADR 0040). A finalized conclusion is
+    # never edited; later disagreement is recorded by appending a discrepancy. An
+    # open discrepancy makes this a Disputed Conclusion, derived from this list
+    # being non-empty rather than from a mutable status flag on the immutable row.
+    discrepancies: Mapped[list["ConclusionDiscrepancy"]] = relationship(
+        back_populates="conclusion",
+        cascade="all, delete-orphan",
+        order_by="ConclusionDiscrepancy.created_at",
+    )
 
 
 class CausalFactor(Base):
@@ -787,6 +796,52 @@ class CausalFactor(Base):
 
     conclusion: Mapped[RootCauseConclusion] = relationship(back_populates="factors")
     hypothesis: Mapped["Hypothesis"] = relationship()
+
+
+class ConclusionDiscrepancy(Base):
+    """An append-only human flag that a Root Cause Conclusion has a problem (ADR 0040).
+
+    A finalized Root Cause Conclusion is immutable (ADR 0039): later disagreement is
+    never recorded by editing, replacing, or deleting it, but by appending a
+    Conclusion Discrepancy (CONTEXT "Root Cause Conclusion vs Conclusion Discrepancy",
+    PRD #26 stories 44-46). An open discrepancy makes the linked conclusion a
+    **Disputed Conclusion** — preserved for audit but not presented as authoritative —
+    and returns the incident to unresolved Postmortem Review. The disputed state is
+    derived from the existence of a discrepancy, so it never mutates the immutable
+    conclusion row.
+
+    The discrepancy records who raised it and when (mirroring Conclusion Provenance,
+    ADR 0017) and is itself append-only: there is no service or API edit/delete path,
+    and the database blocks UPDATE/DELETE where supported
+    (``_ensure_append_only_immutability``). Resolving a dispute happens in a later
+    slice by finalizing a Superseding Conclusion linked to this discrepancy, never by
+    editing this row.
+    """
+
+    __tablename__ = "conclusion_discrepancies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conclusion_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("root_cause_conclusions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Denormalized run id so a run's dispute state is queryable without joining
+    # through the conclusion, mirroring HypothesisChallenge.run_id.
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # The human-authored account of what is wrong with the conclusion. Not a
+    # generated Major Claim — it carries no EvidenceRefs.
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    # Provenance: who raised the dispute and (when configured) their display name,
+    # from the single-user gate (ADR 0017). No roles or approval chains.
+    raised_by_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    raised_by_display: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    conclusion: Mapped[RootCauseConclusion] = relationship(back_populates="discrepancies")
 
 
 class EvaluationRun(Base):

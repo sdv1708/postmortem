@@ -25,11 +25,16 @@ CAUSAL_FACTOR_ROLE_CHECK = (
     "role IN ('failure_mechanism', 'trigger', 'amplifying_condition')"
 )
 
-# Tables that are append-only human judgments (ADR 0039): a finalized Root Cause
-# Conclusion and its Causal Factors are never edited, replaced in place, or
-# deleted. The immutability is enforced in the service and API layers and, where
-# the database supports it, by triggers that abort any UPDATE or DELETE.
-_IMMUTABLE_APPEND_ONLY_TABLES = ("root_cause_conclusions", "causal_factors")
+# Tables that are append-only human judgments (ADR 0039 / 0040): a finalized Root
+# Cause Conclusion and its Causal Factors are never edited, replaced in place, or
+# deleted, and the Conclusion Discrepancies that dispute a conclusion are likewise
+# append-only flags. The immutability is enforced in the service and API layers
+# and, where the database supports it, by triggers that abort any UPDATE or DELETE.
+_IMMUTABLE_APPEND_ONLY_TABLES = (
+    "root_cause_conclusions",
+    "causal_factors",
+    "conclusion_discrepancies",
+)
 
 
 class Base(DeclarativeBase):

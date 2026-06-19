@@ -650,6 +650,15 @@ def postmortem_read(
     # run/hypothesis errors, while this read helper only needs the shaping function.
     from .conclusions import conclusion_read
 
+    # A Disputed Conclusion is derived from an open Conclusion Discrepancy, not a
+    # mutation of the immutable conclusion row (ADR 0040). When disputed, the draft
+    # is no longer authoritative and the incident has returned to unresolved review,
+    # so the read model reports "disputed" regardless of the stored lifecycle value.
+    disputed = conclusion is not None and len(conclusion.discrepancies) > 0
+    conclusion_status = (
+        "disputed" if disputed else (postmortem.conclusion_status or "provisional")
+    )
+
     return {
         "id": postmortem.id,
         "run_id": postmortem.run_id,
@@ -660,7 +669,7 @@ def postmortem_read(
         "evidence_sufficiency": postmortem.evidence_sufficiency or "sufficient",
         "evidence_gaps": list(postmortem.evidence_gaps or []),
         "next_validation_steps": list(postmortem.next_validation_steps or []),
-        "conclusion_status": postmortem.conclusion_status or "provisional",
+        "conclusion_status": conclusion_status,
         "composer_version": postmortem.composer_version,
         "timeline": [timeline_event_read(event) for event in timeline_events],
         "impact_claims": [impact_claim_read(claim) for claim in impact_claims],

@@ -271,10 +271,11 @@ export interface Postmortem {
   evidence_sufficiency: "sufficient" | "insufficient";
   evidence_gaps: string[];
   next_validation_steps: string[];
-  // Lifecycle state (ADR 0035, PRD #26): an automated run is always "provisional"
-  // until a human finalizes a Root Cause Conclusion. The Review Surface labels a
-  // provisional draft "Draft: Root cause not finalized".
-  conclusion_status: "provisional" | "finalized";
+  // Lifecycle state (ADR 0035 / 0039 / 0040, PRD #26): an automated run is
+  // "provisional" until a human finalizes a Root Cause Conclusion, then
+  // "finalized". "disputed" is derived: a finalized conclusion carrying an open
+  // Conclusion Discrepancy is no longer authoritative and review is unresolved.
+  conclusion_status: "provisional" | "finalized" | "disputed";
   composer_version: string;
   timeline: TimelineEvent[];
   impact_claims: ImpactClaim[];
@@ -304,9 +305,23 @@ export interface CausalFactor {
   supporting_evidence: EvidenceRef[];
 }
 
+// An append-only flag disputing a Root Cause Conclusion (ADR 0040). An open
+// discrepancy makes the conclusion a Disputed Conclusion — preserved for audit,
+// but no longer authoritative, with review returned to unresolved.
+export interface ConclusionDiscrepancy {
+  id: string;
+  conclusion_id: string;
+  run_id: string;
+  explanation: string;
+  raised_by: string;
+  raised_by_display: string | null;
+  created_at: string;
+}
+
 // The finalized human Root Cause Conclusion (ADR 0039). Distinct from the
 // Advisory Hypothesis Ranking: a ranking recommends candidates, this is the
-// human's decision. Immutable, with Conclusion Provenance.
+// human's decision. Immutable, with Conclusion Provenance. `disputed` is true
+// once an append-only Conclusion Discrepancy has been raised against it (ADR 0040).
 export interface RootCauseConclusion {
   id: string;
   run_id: string;
@@ -318,6 +333,8 @@ export interface RootCauseConclusion {
   failure_mechanism: CausalFactor;
   triggers: CausalFactor[];
   amplifying_conditions: CausalFactor[];
+  disputed: boolean;
+  discrepancies: ConclusionDiscrepancy[];
   created_at: string;
 }
 
@@ -650,6 +667,17 @@ export const api = {
   ): Promise<RootCauseConclusion> {
     return request<RootCauseConclusion>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  },
+
+  raiseConclusionDiscrepancy(
+    incidentId: string,
+    runId: string,
+    payload: { explanation: string },
+  ): Promise<ConclusionDiscrepancy> {
+    return request<ConclusionDiscrepancy>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion/discrepancies`,
       { method: "POST", body: JSON.stringify(payload) },
     );
   },

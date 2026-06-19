@@ -23,6 +23,7 @@ from .conclusions import (
     ConclusionValidationError,
     causal_factor_read,
     conclusion_read,
+    discrepancy_read,
 )
 from .stages import PipelineStageRunner
 from ..retrieval import (
@@ -65,6 +66,7 @@ __all__ = [
     "analysis_run_read",
     "causal_factor_read",
     "conclusion_read",
+    "discrepancy_read",
     "hypothesis_read",
     "impact_claim_read",
     "model_call_record_read",

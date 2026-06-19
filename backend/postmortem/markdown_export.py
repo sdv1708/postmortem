@@ -51,6 +51,10 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
 
     insufficient = postmortem.evidence_sufficiency == "insufficient"
     provisional = postmortem.conclusion_status == "provisional"
+    # A Disputed Conclusion is no longer authoritative (ADR 0040): the incident has
+    # returned to unresolved review. Distinct from provisional (a conclusion *was*
+    # finalized, then disputed), so it carries its own prominent banner.
+    disputed = postmortem.conclusion_status == "disputed"
 
     title = f"# Postmortem — {postmortem.incident_title}"
     if provisional:
@@ -64,6 +68,15 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
             "postmortem. It presents hypotheses and uncertainty for review; no "
             "root cause has been established. Only a human reviewer finalizes a "
             "Root Cause Conclusion."
+        )
+        lines.append("")
+    if disputed:
+        # Prominent, audit-safe: the conclusion is preserved but not authoritative.
+        lines.append(
+            "> **Disputed conclusion.** A reviewer has raised an open discrepancy "
+            "against the finalized Root Cause Conclusion. It is no longer "
+            "authoritative and the incident has returned to unresolved review. The "
+            "conclusion and the discrepancies are retained for audit below."
         )
         lines.append("")
     lines.append(f"- **Severity:** {postmortem.incident_severity or '—'}")
@@ -107,7 +120,7 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
 
     _impact_section(lines, postmortem.impact_claims, mode)
     if postmortem.conclusion is not None:
-        _conclusion_section(lines, postmortem.conclusion)
+        _conclusion_section(lines, postmortem.conclusion, mode, disputed=disputed)
     _hypotheses_section(lines, authoritative, mode)
     if mode is ExportMode.AUDIT and review_findings:
         _review_findings_section(lines, review_findings)
@@ -182,23 +195,47 @@ def _impact_line(claim: ImpactClaimRead, mode: ExportMode) -> str:
     return f"- {claim.description}{annotation}{suffix}"
 
 
-def _conclusion_section(lines: list[str], conclusion: RootCauseConclusionRead) -> None:
-    """Render the finalized human Root Cause Conclusion (ADR 0039).
+def _conclusion_section(
+    lines: list[str],
+    conclusion: RootCauseConclusionRead,
+    mode: ExportMode,
+    *,
+    disputed: bool,
+) -> None:
+    """Render the finalized human Root Cause Conclusion (ADR 0039 / 0040).
 
     Distinct from the Advisory Hypothesis Ranking below: a ranking recommends
     plausible candidates, this is the human's decision (PRD #26 stories 30, 90).
     Shows the single Failure Mechanism, optional repeatable Triggers and Amplifying
     Conditions, and Conclusion Provenance.
+
+    A Disputed Conclusion is not authoritative (ADR 0040, PRD #26 stories 44-46): a
+    **clean** export withholds the disputed causal account so it cannot read as
+    current fact, while an **audit** export preserves the full conclusion and the
+    recorded discrepancies for the historical record.
     """
     lines.append("## Root Cause Conclusion")
     lines.append("")
+    if disputed and mode is ExportMode.CLEAN:
+        lines.append(
+            "_This conclusion has an open discrepancy and has returned to unresolved "
+            "review, so it is withheld from this clean export. See the audit export "
+            "for the disputed conclusion and the recorded discrepancies._"
+        )
+        lines.append("")
+        return
     who = conclusion.finalized_by_display or conclusion.finalized_by
     when = conclusion.finalized_at.isoformat().replace("+00:00", "Z")
-    lines.append(
+    finalized_note = (
         f"_Finalized by {who} on {when}. This is the human reviewer's conclusion, "
         "not an automated ranking; the hypotheses below are the advisory candidates "
         "it was drawn from._"
     )
+    if disputed:
+        finalized_note = (
+            f"_Disputed — retained for audit, not authoritative. {finalized_note[1:]}"
+        )
+    lines.append(finalized_note)
     lines.append("")
     lines.append(conclusion.summary)
     lines.append("")
@@ -214,6 +251,16 @@ def _conclusion_section(lines: list[str], conclusion: RootCauseConclusionRead) -
         lines.extend(
             _causal_factor_line(factor) for factor in conclusion.amplifying_conditions
         )
+    if conclusion.discrepancies:
+        # Audit-only: preserve the recorded disagreement alongside the conclusion.
+        lines.append("")
+        lines.append("**Recorded discrepancies:**")
+        for discrepancy in conclusion.discrepancies:
+            raised_by = discrepancy.raised_by_display or discrepancy.raised_by
+            raised_at = discrepancy.created_at.isoformat().replace("+00:00", "Z")
+            lines.append(
+                f"- {discrepancy.explanation} _(raised by {raised_by} on {raised_at})_"
+            )
     lines.append("")
 
 

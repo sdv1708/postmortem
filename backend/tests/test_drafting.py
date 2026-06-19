@@ -9,11 +9,14 @@ from postmortem.drafting import (
 )
 from postmortem.markdown_export import ExportMode, render_markdown
 from postmortem.schemas import (
+    CausalFactorRead,
+    ConclusionDiscrepancyRead,
     EvidenceRefRead,
     HypothesisRead,
     ImpactClaimRead,
     ActionItemRead,
     PostmortemRead,
+    RootCauseConclusionRead,
     TimelineEventRead,
 )
 
@@ -325,6 +328,97 @@ def test_refusal_export_remains_provisional():
     markdown = render_markdown(refused, ExportMode.CLEAN)
     assert "Draft: Root cause not finalized" in markdown
     assert "**Evidence sufficiency:** insufficient" in markdown
+
+
+def _conclusion(*, disputed: bool) -> RootCauseConclusionRead:
+    failure_mechanism = CausalFactorRead(
+        id="cf-1",
+        role="failure_mechanism",
+        hypothesis_id="hyp-1",
+        title="Deploy v184 regressed the pool",
+        summary="The v184 deploy regressed connection handling.",
+        support_status="supported",
+        advisory_rank=1,
+        supporting_evidence=[_ref("deploy v184 rolled out")],
+    )
+    discrepancies = (
+        [
+            ConclusionDiscrepancyRead(
+                id="disc-1",
+                conclusion_id="conc-1",
+                run_id="run-1",
+                explanation="The cited deploy postdates the error spike.",
+                raised_by="reviewer-2",
+                raised_by_display="Reviewer Two",
+                created_at=datetime.now(timezone.utc),
+            )
+        ]
+        if disputed
+        else []
+    )
+    return RootCauseConclusionRead(
+        id="conc-1",
+        run_id="run-1",
+        incident_id="inc-1",
+        summary="The v184 connection-pool refactor regressed connection handling.",
+        finalized_by="reviewer-1",
+        finalized_by_display="Reviewer One",
+        finalized_at=datetime.now(timezone.utc),
+        failure_mechanism=failure_mechanism,
+        triggers=[],
+        amplifying_conditions=[],
+        disputed=disputed,
+        discrepancies=discrepancies,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def _disputed_postmortem() -> PostmortemRead:
+    # A finalized-then-disputed conclusion: the read model reports "disputed" and
+    # carries the conclusion plus its recorded discrepancies (ADR 0040).
+    return _postmortem().model_copy(
+        update={"conclusion_status": "disputed", "conclusion": _conclusion(disputed=True)}
+    )
+
+
+def test_clean_export_withholds_disputed_conclusion():
+    # A clean export must not present a disputed conclusion as current fact: the
+    # causal account is withheld and the disputed state is prominent (ADR 0040, AC #4).
+    markdown = render_markdown(_disputed_postmortem(), ExportMode.CLEAN)
+    assert "**Status:** disputed" in markdown
+    assert "Disputed conclusion." in markdown
+    assert "## Root Cause Conclusion" in markdown
+    assert "withheld from this clean export" in markdown
+    # The finalized causal summary and discrepancy detail are not in the clean export.
+    assert "regressed connection handling" not in markdown
+    assert "The cited deploy postdates the error spike." not in markdown
+    # The provisional "Draft" label is not used — a conclusion was finalized, then disputed.
+    assert "Draft: Root cause not finalized" not in markdown
+
+
+def test_audit_export_preserves_disputed_conclusion_and_discrepancy():
+    # An audit export preserves the conclusion and the discrepancy for the record.
+    markdown = render_markdown(_disputed_postmortem(), ExportMode.AUDIT)
+    assert "## Root Cause Conclusion" in markdown
+    assert "Disputed — retained for audit, not authoritative." in markdown
+    assert "The v184 connection-pool refactor regressed connection handling." in markdown
+    assert "**Failure mechanism:**" in markdown
+    assert "**Recorded discrepancies:**" in markdown
+    assert "The cited deploy postdates the error spike." in markdown
+    assert "raised by Reviewer Two" in markdown
+
+
+def test_finalized_conclusion_clean_export_still_authoritative():
+    # A non-disputed finalized conclusion renders normally in a clean export.
+    finalized = _postmortem().model_copy(
+        update={"conclusion_status": "finalized", "conclusion": _conclusion(disputed=False)}
+    )
+    markdown = render_markdown(finalized, ExportMode.CLEAN)
+    assert "**Status:** finalized" in markdown
+    assert "## Root Cause Conclusion" in markdown
+    assert "The v184 connection-pool refactor regressed connection handling." in markdown
+    assert "Disputed conclusion." not in markdown
+    assert "withheld from this clean export" not in markdown
 
 
 def test_markdown_is_derived_only_from_structured_data():

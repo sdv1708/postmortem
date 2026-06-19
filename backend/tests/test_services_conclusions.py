@@ -12,10 +12,12 @@ from postmortem.schemas import (
     AnalysisRunCreate,
     ArtifactCreate,
     CausalFactorCreate,
+    ConclusionDiscrepancyCreate,
     IncidentCreate,
     RootCauseConclusionCreate,
 )
 from postmortem.services import (
+    AnalysisRunNotFoundError,
     AnalysisService,
     ConclusionAlreadyFinalizedError,
     ConclusionNotFoundError,
@@ -422,3 +424,144 @@ def test_get_conclusion_raises_before_finalization(fresh_session):
     fresh_session.commit()
     with pytest.raises(ConclusionNotFoundError):
         ConclusionService(fresh_session).get_conclusion(incident.id, run.id)
+
+
+def _finalize(session, incident, run, hypothesis):
+    """Finalize a single-factor conclusion against an accepted, supported hypothesis."""
+    return ConclusionService(session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="The deploy regressed connection handling.",
+            factors=[CausalFactorCreate(hypothesis_id=hypothesis.id, role="failure_mechanism")],
+        ),
+        PRINCIPAL,
+    )
+
+
+def _finalized_conclusion(session):
+    """Seed a run with one finalized, immutable Root Cause Conclusion."""
+    service, incident, run = _succeeded_run(session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    session.commit()
+    conclusion = _finalize(session, incident, run, target)
+    session.commit()
+    return service, incident, run, conclusion
+
+
+def test_raise_discrepancy_disputes_without_editing_conclusion(fresh_session):
+    # Flagging appends an immutable discrepancy and never edits the conclusion: the
+    # conclusion's own fields are untouched and it becomes disputed by derivation
+    # (ADR 0040, PRD #26 stories 44-45).
+    service, incident, run, conclusion = _finalized_conclusion(fresh_session)
+    original_summary = conclusion.summary
+
+    discrepancy = ConclusionService(fresh_session).raise_discrepancy(
+        incident.id,
+        run.id,
+        ConclusionDiscrepancyCreate(explanation="The cited deploy postdates the spike."),
+        Principal(id="reviewer-2", display="Reviewer Two"),
+    )
+    fresh_session.commit()
+
+    assert discrepancy.explanation == "The cited deploy postdates the spike."
+    assert discrepancy.raised_by_principal == "reviewer-2"
+    assert discrepancy.raised_by_display == "Reviewer Two"
+
+    # The conclusion row is unchanged; disputed state is derived, not stored on it.
+    fresh_session.refresh(conclusion)
+    assert conclusion.summary == original_summary
+    shaped = conclusion_read(conclusion)
+    assert shaped["disputed"] is True
+    assert shaped["discrepancies"][0]["explanation"] == discrepancy.explanation
+
+
+def test_disputed_conclusion_returns_review_to_unresolved(fresh_session):
+    # A disputed conclusion returns the run to unresolved review: the postmortem
+    # read model reports "disputed", no longer "finalized" (PRD #26 story 46).
+    service, incident, run, _conclusion = _finalized_conclusion(fresh_session)
+    assert service.get_postmortem_document(incident.id, run.id)["conclusion_status"] == "finalized"
+
+    ConclusionService(fresh_session).raise_discrepancy(
+        incident.id,
+        run.id,
+        ConclusionDiscrepancyCreate(explanation="Evidence contradicts the mechanism."),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    document = service.get_postmortem_document(incident.id, run.id)
+    assert document["conclusion_status"] == "disputed"
+    assert document["conclusion"]["disputed"] is True
+
+
+def test_discrepancies_are_append_only_and_accumulate(fresh_session):
+    # Append-only history: flagging an already-disputed conclusion adds another
+    # discrepancy rather than replacing the first (ADR 0040).
+    service, incident, run, conclusion = _finalized_conclusion(fresh_session)
+    svc = ConclusionService(fresh_session)
+    svc.raise_discrepancy(
+        incident.id, run.id, ConclusionDiscrepancyCreate(explanation="First problem."), PRINCIPAL
+    )
+    fresh_session.commit()
+    svc.raise_discrepancy(
+        incident.id, run.id, ConclusionDiscrepancyCreate(explanation="Second problem."), PRINCIPAL
+    )
+    fresh_session.commit()
+
+    fresh_session.refresh(conclusion)
+    explanations = [d["explanation"] for d in conclusion_read(conclusion)["discrepancies"]]
+    assert explanations == ["First problem.", "Second problem."]
+
+
+def test_raise_discrepancy_is_idempotent_for_identical_explanation(fresh_session):
+    # Append-only + DB-irreversible: a lost-response retry that re-sends the same
+    # explanation must not append a permanent duplicate (ADR 0040 retry-safety).
+    service, incident, run, conclusion = _finalized_conclusion(fresh_session)
+    svc = ConclusionService(fresh_session)
+    payload = ConclusionDiscrepancyCreate(explanation="The cited deploy postdates the spike.")
+
+    first = svc.raise_discrepancy(incident.id, run.id, payload, PRINCIPAL)
+    fresh_session.commit()
+    # A normal retry of the identical command (trailing whitespace differences are
+    # normalized away) returns the same row rather than recording a second dispute.
+    retry = svc.raise_discrepancy(
+        incident.id,
+        run.id,
+        ConclusionDiscrepancyCreate(explanation="The cited deploy postdates the spike.  "),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    assert retry.id == first.id
+    fresh_session.refresh(conclusion)
+    assert len(conclusion_read(conclusion)["discrepancies"]) == 1
+
+
+def test_raise_discrepancy_requires_a_finalized_conclusion(fresh_session):
+    service, incident, run = _succeeded_run(fresh_session)
+    fresh_session.commit()
+    with pytest.raises(ConclusionNotFoundError):
+        ConclusionService(fresh_session).raise_discrepancy(
+            incident.id,
+            run.id,
+            ConclusionDiscrepancyCreate(explanation="Nothing to dispute yet."),
+            PRINCIPAL,
+        )
+
+
+def test_raise_discrepancy_rejects_cross_incident_run(fresh_session):
+    # The conclusion belongs to its own run/incident; another incident cannot flag
+    # it (cross-incident rejection, AC).
+    _service, _incident, _run, _conclusion = _finalized_conclusion(fresh_session)
+    other_incident = IncidentService(fresh_session).create(IncidentCreate(title="Other"))
+    fresh_session.commit()
+    with pytest.raises(AnalysisRunNotFoundError):
+        ConclusionService(fresh_session).raise_discrepancy(
+            other_incident.id,
+            _run.id,
+            ConclusionDiscrepancyCreate(explanation="Wrong incident."),
+            PRINCIPAL,
+        )

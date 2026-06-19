@@ -605,6 +605,50 @@ def test_conclusion_tables_and_immutability_triggers_are_created(tmp_path):
     } <= triggers
 
 
+def test_conclusion_discrepancy_table_and_immutability_triggers_are_created(tmp_path):
+    engine = _fresh_compat_engine(tmp_path)
+    assert "conclusion_discrepancies" in set(inspect(engine).get_table_names())
+    with engine.connect() as connection:
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            )
+        }
+    # Conclusion Discrepancies are append-only flags: UPDATE/DELETE blocked (ADR 0040).
+    assert {
+        "ck_conclusion_discrepancies_no_update",
+        "ck_conclusion_discrepancies_no_delete",
+    } <= triggers
+
+
+def test_conclusion_discrepancy_row_rejects_update_and_delete(tmp_path):
+    engine = _fresh_compat_engine(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO conclusion_discrepancies
+                    (id, conclusion_id, run_id, explanation, raised_by_principal, created_at)
+                VALUES ('d1', 'c1', 'r1', 'original', 'reviewer-1', '2026-06-19 00:00:00')
+                """
+            )
+        )
+    with pytest.raises(DBAPIError):
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE conclusion_discrepancies SET explanation = 'edited' WHERE id = 'd1'")
+            )
+    with pytest.raises(DBAPIError):
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM conclusion_discrepancies WHERE id = 'd1'"))
+    with engine.connect() as connection:
+        explanation = connection.scalar(
+            text("SELECT explanation FROM conclusion_discrepancies WHERE id = 'd1'")
+        )
+    assert explanation == "original"
+
+
 def test_finalized_conclusion_row_rejects_update_and_delete(tmp_path):
     engine = _fresh_compat_engine(tmp_path)
     # Foreign keys are not enforced by default on SQLite, so a bare row is enough

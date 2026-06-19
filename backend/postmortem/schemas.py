@@ -381,6 +381,33 @@ class CausalFactorRead(BaseModel):
     supporting_evidence: list[EvidenceRefRead]
 
 
+class ConclusionDiscrepancyCreate(BaseModel):
+    """Command payload to flag a finalized conclusion as disputed (ADR 0040 / 0022).
+
+    A reviewer supplies the ``explanation`` of what is wrong with the immutable Root
+    Cause Conclusion. Creating it never edits the conclusion (PRD #26 stories 44-46).
+    """
+
+    explanation: str = Field(min_length=1, max_length=4000)
+
+
+class ConclusionDiscrepancyRead(BaseModel):
+    """An append-only flag disputing a Root Cause Conclusion (ADR 0040).
+
+    Records the reviewer's ``explanation`` plus who raised it and when. An open
+    discrepancy makes its conclusion a Disputed Conclusion, withheld from
+    authoritative presentation while preserved for audit.
+    """
+
+    id: str
+    conclusion_id: str
+    run_id: str
+    explanation: str
+    raised_by: str
+    raised_by_display: str | None
+    created_at: datetime
+
+
 class RootCauseConclusionRead(BaseModel):
     """A finalized human Root Cause Conclusion for the Review Surface (ADR 0039).
 
@@ -389,6 +416,10 @@ class RootCauseConclusionRead(BaseModel):
     conclusion has exactly one ``failure_mechanism`` plus optional repeatable
     ``triggers`` and ``amplifying_conditions``. Conclusion Provenance records who
     finalized it, when, and from which run; the conclusion is immutable.
+
+    ``disputed`` is true when at least one append-only Conclusion Discrepancy has been
+    raised against it (ADR 0040): the conclusion is then preserved for audit but is no
+    longer authoritative, and the incident has returned to unresolved review.
     """
 
     id: str
@@ -401,6 +432,8 @@ class RootCauseConclusionRead(BaseModel):
     failure_mechanism: CausalFactorRead
     triggers: list[CausalFactorRead]
     amplifying_conditions: list[CausalFactorRead]
+    disputed: bool
+    discrepancies: list[ConclusionDiscrepancyRead]
     created_at: datetime
 
 
@@ -431,11 +464,13 @@ class PostmortemRead(BaseModel):
     evidence_sufficiency: Literal["sufficient", "insufficient"]
     evidence_gaps: list[str]
     next_validation_steps: list[str]
-    # Lifecycle state of the automated draft (ADR 0035, PRD #26). 'provisional'
-    # means no human Root Cause Conclusion exists yet, so the Review Surface and
-    # exports must label it "Draft: Root cause not finalized". 'finalized' is
-    # reserved for a future human-finalization slice; automated runs never set it.
-    conclusion_status: Literal["provisional", "finalized"]
+    # Lifecycle state of the automated draft (ADR 0035 / 0039 / 0040, PRD #26).
+    # 'provisional' means no human Root Cause Conclusion exists yet, so the Review
+    # Surface and exports label it "Draft: Root cause not finalized". 'finalized'
+    # means a human finalized one. 'disputed' is derived (ADR 0040): a finalized
+    # conclusion carrying an open Conclusion Discrepancy is no longer authoritative
+    # and the incident has returned to unresolved review.
+    conclusion_status: Literal["provisional", "finalized", "disputed"]
     composer_version: str
     timeline: list[TimelineEventRead]
     impact_claims: list[ImpactClaimRead]
