@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session, sessionmaker
 
-from ..auth import require_user
+from ..auth import Principal, require_principal, require_user
 from ..config import Settings
 from ..llm import build_llm_client
 from ..logging import log_event
@@ -21,6 +21,8 @@ from ..schemas import (
     PostmortemRead,
     ReviewerNoteCreate,
     ReviewerNoteRead,
+    RootCauseConclusionCreate,
+    RootCauseConclusionRead,
     RunDiagnosticsRead,
     TimelineEventRead,
 )
@@ -28,11 +30,17 @@ from ..services import (
     AnalysisRunNotFoundError,
     AnalysisService,
     ArtifactNotFoundError,
+    ConclusionAlreadyFinalizedError,
+    ConclusionNotFoundError,
+    ConclusionNotReadyError,
+    ConclusionService,
+    ConclusionValidationError,
     HypothesisNotFoundError,
     IncidentNotFoundError,
     NoArtifactsError,
     PostmortemNotFoundError,
     analysis_run_read,
+    conclusion_read,
     hypothesis_read,
     impact_claim_read,
     reviewer_note_read,
@@ -321,3 +329,69 @@ def add_run_reviewer_note(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     return ReviewerNoteRead.model_validate(reviewer_note_read(note))
+
+
+@router.post(
+    "/{run_id}/conclusion",
+    response_model=RootCauseConclusionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def finalize_run_conclusion(
+    incident_id: str,
+    run_id: str,
+    payload: RootCauseConclusionCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> RootCauseConclusionRead:
+    """Finalize a human Root Cause Conclusion (ADR 0039 / 0022).
+
+    Distinct from accepting a hypothesis: only this deliberate human action creates
+    a Root Cause Conclusion (PRD #26 stories 29-30). Requires exactly one Failure
+    Mechanism plus optional Triggers/Amplifying Conditions, each an accepted
+    hypothesis with verified citations and supported/partial support. Records
+    Conclusion Provenance and is immutable: a second finalization is a conflict.
+    """
+    try:
+        conclusion = ConclusionService(db).finalize(incident_id, run_id, payload, principal)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except HypothesisNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hypothesis not found")
+    except ConclusionNotReadyError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="this run has not completed successfully, so it cannot be finalized",
+        )
+    except ConclusionAlreadyFinalizedError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="a root cause conclusion is already finalized for this run and is immutable",
+        )
+    except ConclusionValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return RootCauseConclusionRead.model_validate(conclusion_read(conclusion))
+
+
+@router.get("/{run_id}/conclusion", response_model=RootCauseConclusionRead)
+def get_run_conclusion(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> RootCauseConclusionRead:
+    """The finalized human Root Cause Conclusion for a run (ADR 0039).
+
+    404 until a reviewer finalizes one — the run's Provisional Postmortem stands
+    until then. Rendered distinctly from the Advisory Hypothesis Ranking.
+    """
+    try:
+        conclusion = ConclusionService(db).get_conclusion(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except ConclusionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="this run has no finalized root cause conclusion yet",
+        )
+    return RootCauseConclusionRead.model_validate(conclusion_read(conclusion))

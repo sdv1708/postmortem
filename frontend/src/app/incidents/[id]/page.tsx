@@ -11,6 +11,9 @@ import {
   type AnalysisRun,
   type Artifact,
   type ArtifactSourceType,
+  type CausalFactor,
+  type CausalFactorInput,
+  type CausalRole,
   type ChallengeSeverity,
   type ClaimSupportStatus,
   type EvidenceRef,
@@ -24,6 +27,7 @@ import {
   type Postmortem,
   type RankingRationale,
   type RetrievalTrace,
+  type RootCauseConclusion,
   type RunDiagnostics,
   type RunStage,
   type RunStageEvent,
@@ -896,6 +900,9 @@ function RunStatusCard({
         <RunHypotheses incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
       )}
       {run.status === "succeeded" && (
+        <RunConclusion incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+      )}
+      {run.status === "succeeded" && (
         <RunPostmortem incidentId={incidentId} runId={run.id} />
       )}
       {run.status === "succeeded" && (
@@ -1667,6 +1674,297 @@ function HypothesisCard({
             </button>
           </form>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// The human Root Cause Conclusion (ADR 0039). The system never declares a root
+// cause — it ranks hypotheses; only a human finalizes a conclusion (PRD #26
+// stories 30, 90). This panel renders the finalized conclusion when one exists,
+// distinct from the advisory ranking above, or a finalization form over the
+// accepted, evidence-backed hypotheses otherwise. Acceptance and finalization are
+// deliberately separate actions.
+const CAUSAL_ROLE_OPTIONS: Array<{ value: CausalRole | "none"; label: string }> = [
+  { value: "none", label: "Not a cause" },
+  { value: "failure_mechanism", label: "Failure mechanism" },
+  { value: "trigger", label: "Trigger" },
+  { value: "amplifying_condition", label: "Amplifying condition" },
+];
+
+function hypothesisIsFinalizable(hypothesis: Hypothesis): boolean {
+  // The trust floor mirrors the backend: an accepted hypothesis with supported or
+  // partial claim support and at least one verified supporting citation.
+  return (
+    hypothesis.review_status === "accepted" &&
+    (hypothesis.support_status === "supported" ||
+      hypothesis.support_status === "partial") &&
+    hypothesis.supporting_evidence.some((ref) => ref.verifier_status === "verified")
+  );
+}
+
+function RunConclusion({
+  incidentId,
+  runId,
+  onFocusEvidence,
+}: {
+  incidentId: string;
+  runId: string;
+  onFocusEvidence: (ref: EvidenceRef) => void;
+}) {
+  const queryClient = useQueryClient();
+  const conclusionQuery = useQuery<RootCauseConclusion | null>({
+    queryKey: ["run-conclusion", incidentId, runId],
+    // A 404 means "not finalized yet", not an error — surface the form instead.
+    queryFn: async () => {
+      try {
+        return await api.getRunConclusion(incidentId, runId);
+      } catch {
+        return null;
+      }
+    },
+  });
+  const hypothesesQuery = useQuery<Hypothesis[]>({
+    queryKey: ["run-hypotheses", incidentId, runId],
+    queryFn: () => api.listRunHypotheses(incidentId, runId),
+  });
+
+  if (conclusionQuery.isPending) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        <Spinner /> Loading root cause conclusion…
+      </div>
+    );
+  }
+
+  const conclusion = conclusionQuery.data ?? null;
+  if (conclusion) {
+    return <ConclusionPanel conclusion={conclusion} onFocusEvidence={onFocusEvidence} />;
+  }
+
+  return (
+    <ConclusionForm
+      incidentId={incidentId}
+      runId={runId}
+      hypotheses={hypothesesQuery.data ?? []}
+      onFinalized={() => {
+        void queryClient.invalidateQueries({ queryKey: ["run-conclusion", incidentId, runId] });
+        void queryClient.invalidateQueries({ queryKey: ["run-postmortem", incidentId, runId] });
+      }}
+    />
+  );
+}
+
+function ConclusionPanel({
+  conclusion,
+  onFocusEvidence,
+}: {
+  conclusion: RootCauseConclusion;
+  onFocusEvidence: (ref: EvidenceRef) => void;
+}) {
+  const who = conclusion.finalized_by_display || conclusion.finalized_by;
+  return (
+    <div className="border-t border-slate-200 bg-emerald-50/30">
+      <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
+        <p className="text-xs font-medium uppercase tracking-wide text-emerald-700">
+          Root Cause Conclusion
+        </p>
+        <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">
+          finalized by human
+        </span>
+      </div>
+      <p className="px-5 pt-1 text-xs text-slate-500">
+        The human reviewer&apos;s decision — distinct from the advisory ranking above,
+        which only recommends plausible candidates. Finalized by {who} on{" "}
+        {new Date(conclusion.finalized_at).toLocaleString()}.
+      </p>
+      <div className="space-y-4 p-5">
+        <p className="text-sm leading-relaxed text-slate-700">{conclusion.summary}</p>
+        <CausalFactorGroup
+          label="Failure mechanism"
+          factors={[conclusion.failure_mechanism]}
+          onFocusEvidence={onFocusEvidence}
+        />
+        {conclusion.triggers.length > 0 && (
+          <CausalFactorGroup
+            label="Triggers"
+            factors={conclusion.triggers}
+            onFocusEvidence={onFocusEvidence}
+          />
+        )}
+        {conclusion.amplifying_conditions.length > 0 && (
+          <CausalFactorGroup
+            label="Amplifying conditions"
+            factors={conclusion.amplifying_conditions}
+            onFocusEvidence={onFocusEvidence}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CausalFactorGroup({
+  label,
+  factors,
+  onFocusEvidence,
+}: {
+  label: string;
+  factors: CausalFactor[];
+  onFocusEvidence: (ref: EvidenceRef) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <p className="label">{label}</p>
+      <ul className="space-y-2">
+        {factors.map((factor) => (
+          <li key={factor.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium text-slate-900">{factor.title}</span>
+              <ClaimSupportBadge status={factor.support_status} />
+              {factor.advisory_rank !== null && (
+                <span className="badge bg-slate-100 text-slate-600 ring-slate-200">
+                  advisory rank {factor.advisory_rank}
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-sm leading-relaxed text-slate-700">{factor.summary}</p>
+            {factor.supporting_evidence.length > 0 && (
+              <EvidenceRefList
+                refs={factor.supporting_evidence}
+                onFocusEvidence={onFocusEvidence}
+              />
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ConclusionForm({
+  incidentId,
+  runId,
+  hypotheses,
+  onFinalized,
+}: {
+  incidentId: string;
+  runId: string;
+  hypotheses: Hypothesis[];
+  onFinalized: () => void;
+}) {
+  const [roles, setRoles] = useState<Record<string, CausalRole | "none">>({});
+  const [summary, setSummary] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const eligible = hypotheses.filter(hypothesisIsFinalizable);
+  const factors: CausalFactorInput[] = Object.entries(roles)
+    .filter(([, role]) => role !== "none")
+    .map(([hypothesis_id, role]) => ({ hypothesis_id, role: role as CausalRole }));
+  const failureMechanismCount = factors.filter(
+    (factor) => factor.role === "failure_mechanism",
+  ).length;
+  const canFinalize = failureMechanismCount === 1 && summary.trim().length > 0;
+
+  const finalizeMutation = useMutation({
+    mutationFn: () =>
+      api.finalizeRunConclusion(incidentId, runId, { summary: summary.trim(), factors }),
+    onMutate: () => setError(null),
+    onSuccess: () => onFinalized(),
+    onError: (err) =>
+      setError(err instanceof Error ? err.message : "Conclusion could not be finalized."),
+  });
+
+  return (
+    <div className="border-t border-slate-200 bg-slate-50/40">
+      <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+          Root Cause Conclusion
+        </p>
+        <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
+          not finalized
+        </span>
+      </div>
+      <p className="px-5 pt-1 text-xs text-slate-500">
+        Accepting a hypothesis keeps it as credible; it does not declare a root cause.
+        Finalize a conclusion from the accepted, evidence-backed hypotheses below by
+        assigning exactly one failure mechanism plus any triggers and amplifying
+        conditions. A finalized conclusion is immutable.
+      </p>
+
+      <div className="space-y-4 p-5">
+        {eligible.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-slate-300 bg-white/70 px-3 py-3 text-xs text-slate-500">
+            No hypothesis is ready to finalize yet. Accept a hypothesis that has
+            supported or partial evidence with verified citations first.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {eligible.map((hypothesis) => (
+              <li
+                key={hypothesis.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-sm font-medium text-slate-900">
+                    {hypothesis.title}
+                  </span>
+                  <ClaimSupportBadge status={hypothesis.support_status} />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <span>Role</span>
+                  <select
+                    value={roles[hypothesis.id] ?? "none"}
+                    onChange={(event) =>
+                      setRoles((current) => ({
+                        ...current,
+                        [hypothesis.id]: event.target.value as CausalRole | "none",
+                      }))
+                    }
+                    aria-label={`Causal role for ${hypothesis.title}`}
+                  >
+                    {CAUSAL_ROLE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <label className="block space-y-1.5">
+          <span className="text-sm font-medium text-slate-700">Conclusion summary</span>
+          <textarea
+            value={summary}
+            onChange={(event) => setSummary(event.target.value)}
+            rows={3}
+            placeholder="Summarize the causal account drawn from the factors above."
+            className="text-sm leading-relaxed"
+          />
+        </label>
+
+        {failureMechanismCount > 1 && (
+          <p className="text-xs text-amber-600">
+            Choose exactly one failure mechanism.
+          </p>
+        )}
+        {error && (
+          <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+            {error}
+          </p>
+        )}
+
+        <button
+          type="button"
+          onClick={() => finalizeMutation.mutate()}
+          disabled={!canFinalize || finalizeMutation.isPending}
+          className="button-primary"
+        >
+          {finalizeMutation.isPending ? "Finalizing…" : "Finalize root cause conclusion"}
+        </button>
       </div>
     </div>
   );

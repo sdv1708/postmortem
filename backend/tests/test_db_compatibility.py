@@ -575,3 +575,108 @@ def test_duplicate_object_classifier_recognizes_postgres_sqlstate():
     exc = DBAPIError("", {}, DuplicateObjectError())
 
     assert _is_duplicate_object_error(exc) is True
+
+
+def _fresh_compat_engine(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path}/conclusion.db")
+    Base.metadata.create_all(engine)
+    ensure_schema_compatibility(engine)
+    return engine
+
+
+def test_conclusion_tables_and_immutability_triggers_are_created(tmp_path):
+    engine = _fresh_compat_engine(tmp_path)
+    tables = set(inspect(engine).get_table_names())
+    assert {"root_cause_conclusions", "causal_factors"} <= tables
+
+    with engine.connect() as connection:
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            )
+        }
+    # Both append-only tables block UPDATE and DELETE at the DB layer (ADR 0039).
+    assert {
+        "ck_root_cause_conclusions_no_update",
+        "ck_root_cause_conclusions_no_delete",
+        "ck_causal_factors_no_update",
+        "ck_causal_factors_no_delete",
+    } <= triggers
+
+
+def test_finalized_conclusion_row_rejects_update_and_delete(tmp_path):
+    engine = _fresh_compat_engine(tmp_path)
+    # Foreign keys are not enforced by default on SQLite, so a bare row is enough
+    # to exercise the immutability triggers without seeding a full run.
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO root_cause_conclusions
+                    (id, run_id, summary, finalized_by_principal, finalized_at, created_at)
+                VALUES ('c1', 'r1', 'original', 'reviewer-1',
+                        '2026-06-18 00:00:00', '2026-06-18 00:00:00')
+                """
+            )
+        )
+
+    with pytest.raises(DBAPIError):
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE root_cause_conclusions SET summary = 'edited' WHERE id = 'c1'")
+            )
+
+    with pytest.raises(DBAPIError):
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM root_cause_conclusions WHERE id = 'c1'"))
+
+    # The row is preserved unchanged after the blocked mutations.
+    with engine.connect() as connection:
+        summary = connection.scalar(
+            text("SELECT summary FROM root_cause_conclusions WHERE id = 'c1'")
+        )
+    assert summary == "original"
+
+
+def test_one_conclusion_per_run_is_enforced_at_db_level(tmp_path):
+    engine = _fresh_compat_engine(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO root_cause_conclusions
+                    (id, run_id, summary, finalized_by_principal, finalized_at, created_at)
+                VALUES ('c1', 'shared-run', 'first', 'reviewer-1',
+                        '2026-06-18 00:00:00', '2026-06-18 00:00:00')
+                """
+            )
+        )
+    # A second conclusion for the same run is rejected by the unique index, so a
+    # check-then-insert race cannot create two immutable conclusions (ADR 0039).
+    with pytest.raises((IntegrityError, DBAPIError)):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO root_cause_conclusions
+                        (id, run_id, summary, finalized_by_principal, finalized_at, created_at)
+                    VALUES ('c2', 'shared-run', 'racing', 'reviewer-2',
+                            '2026-06-18 00:00:01', '2026-06-18 00:00:01')
+                    """
+                )
+            )
+
+
+def test_idempotent_compatibility_reruns_keep_immutability_triggers(tmp_path):
+    engine = _fresh_compat_engine(tmp_path)
+    # Re-running the compatibility pass drops and recreates the triggers without error.
+    ensure_schema_compatibility(engine)
+    with engine.connect() as connection:
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            )
+        }
+    assert "ck_causal_factors_no_delete" in triggers

@@ -23,6 +23,7 @@ from ..models import (
     Postmortem,
     RetrievalTrace,
     ReviewerNote,
+    RootCauseConclusion,
     RunArtifact,
     TimelineEvent,
 )
@@ -299,8 +300,19 @@ class AnalysisService:
             )
         )
         hypotheses = list(self._session.scalars(_hypotheses_in_advisory_order(run_id)))
+        # The finalized human Root Cause Conclusion, if a reviewer has finalized one
+        # (ADR 0039). Null while the draft is provisional; rendered distinctly from
+        # the Advisory Hypothesis Ranking.
+        conclusion = self._session.scalar(
+            select(RootCauseConclusion).where(RootCauseConclusion.run_id == run_id)
+        )
         return postmortem_read(
-            postmortem, postmortem.run.incident, timeline, impact_claims, hypotheses
+            postmortem,
+            postmortem.run.incident,
+            timeline,
+            impact_claims,
+            hypotheses,
+            conclusion=conclusion,
         )
 
     def get_run_diagnostics(self, incident_id: str, run_id: str) -> dict:
@@ -620,7 +632,9 @@ def challenge_read(challenge) -> dict:
     }
 
 
-def postmortem_read(postmortem, incident, timeline_events, impact_claims, hypotheses) -> dict:
+def postmortem_read(
+    postmortem, incident, timeline_events, impact_claims, hypotheses, *, conclusion=None
+) -> dict:
     """Shape a Postmortem (with its run's timeline/impact/hypotheses) for PostmortemRead.
 
     The factual sections are composed from the existing structured rows rather
@@ -628,7 +642,14 @@ def postmortem_read(postmortem, incident, timeline_events, impact_claims, hypoth
     the EvidenceRefs (ADR 0024). Impact Claims are run-level incident facts shown
     once, independent of hypothesis count (ADR 0033). ``incident`` provides the
     title/severity header.
+
+    ``conclusion`` is the finalized human Root Cause Conclusion (ADR 0039) or None
+    while the draft is provisional.
     """
+    # Lazy import avoids an import cycle: conclusions.py imports this module's
+    # run/hypothesis errors, while this read helper only needs the shaping function.
+    from .conclusions import conclusion_read
+
     return {
         "id": postmortem.id,
         "run_id": postmortem.run_id,
@@ -644,6 +665,7 @@ def postmortem_read(postmortem, incident, timeline_events, impact_claims, hypoth
         "timeline": [timeline_event_read(event) for event in timeline_events],
         "impact_claims": [impact_claim_read(claim) for claim in impact_claims],
         "hypotheses": [hypothesis_read(hypothesis) for hypothesis in hypotheses],
+        "conclusion": conclusion_read(conclusion) if conclusion is not None else None,
         "created_at": postmortem.created_at,
     }
 

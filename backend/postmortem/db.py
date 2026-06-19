@@ -18,6 +18,18 @@ EVIDENCE_REF_ROLE_CHECK = "role IN ('supporting', 'contradicting')"
 # Challenge Severity is an enumerated invariant (ADR 0034): a persisted challenge
 # must carry one of the three causal-role severities.
 HYPOTHESIS_CHALLENGE_SEVERITY_CHECK = "severity IN ('critical', 'material', 'minor')"
+# A Causal Factor plays exactly one of the three causal roles (ADR 0039): every
+# finalized conclusion has one Failure Mechanism and zero or more Triggers and
+# Amplifying Conditions.
+CAUSAL_FACTOR_ROLE_CHECK = (
+    "role IN ('failure_mechanism', 'trigger', 'amplifying_condition')"
+)
+
+# Tables that are append-only human judgments (ADR 0039): a finalized Root Cause
+# Conclusion and its Causal Factors are never edited, replaced in place, or
+# deleted. The immutability is enforced in the service and API layers and, where
+# the database supports it, by triggers that abort any UPDATE or DELETE.
+_IMMUTABLE_APPEND_ONLY_TABLES = ("root_cause_conclusions", "causal_factors")
 
 
 class Base(DeclarativeBase):
@@ -113,6 +125,77 @@ def _ensure_evidence_ref_constraints(engine: Engine) -> None:
             except DBAPIError as exc:
                 if not _is_duplicate_object_error(exc):
                     raise
+
+
+def _ensure_append_only_immutability(engine: Engine) -> None:
+    """Block UPDATE/DELETE on the append-only conclusion tables (ADR 0039).
+
+    A finalized Root Cause Conclusion is an immutable human judgment: it is never
+    edited, replaced in place, or deleted (PRD #26 stories 42-43). The service and
+    API layers expose no mutation path, and this adds the database trust floor
+    "where supported" — SQLite ABORT triggers and PostgreSQL row triggers that
+    raise on any UPDATE or DELETE. Later disagreement is recorded through separate
+    append-only Conclusion Discrepancies and Superseding Conclusions, never by
+    touching an existing row, so blocking in-place mutation does not constrain
+    those future slices.
+
+    Idempotent: triggers are dropped and recreated so a contract change supersedes
+    a stale trigger instead of being skipped.
+    """
+    if engine.dialect.name == "sqlite":
+        with engine.begin() as connection:
+            existing = {
+                row[0]
+                for row in connection.execute(
+                    text("SELECT name FROM sqlite_master WHERE type = 'table'")
+                )
+            }
+            for table in _IMMUTABLE_APPEND_ONLY_TABLES:
+                if table not in existing:
+                    continue
+                for operation in ("UPDATE", "DELETE"):
+                    trigger = f"ck_{table}_no_{operation.lower()}"
+                    connection.execute(text(f"DROP TRIGGER IF EXISTS {trigger}"))
+                    connection.execute(
+                        text(
+                            f"""
+                            CREATE TRIGGER {trigger}
+                            BEFORE {operation} ON {table}
+                            BEGIN
+                                SELECT RAISE(ABORT, '{table} are immutable (ADR 0039)');
+                            END
+                            """
+                        )
+                    )
+    elif engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE OR REPLACE FUNCTION postmortem_block_mutation()
+                    RETURNS trigger AS $$
+                    BEGIN
+                        RAISE EXCEPTION 'table % is append-only (ADR 0039)', TG_TABLE_NAME;
+                    END;
+                    $$ LANGUAGE plpgsql;
+                    """
+                )
+            )
+            existing_tables = set(inspect(engine).get_table_names())
+            for table in _IMMUTABLE_APPEND_ONLY_TABLES:
+                if table not in existing_tables:
+                    continue
+                trigger = f"ck_{table}_append_only"
+                connection.execute(text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+                connection.execute(
+                    text(
+                        f"""
+                        CREATE TRIGGER {trigger}
+                        BEFORE UPDATE OR DELETE ON {table}
+                        FOR EACH ROW EXECUTE FUNCTION postmortem_block_mutation()
+                        """
+                    )
+                )
 
 
 def _add_columns_if_missing(
@@ -360,6 +443,21 @@ def ensure_schema_compatibility(engine: Engine) -> None:
                 text(f"CREATE INDEX IF NOT EXISTS {index} ON evidence_refs ({column})")
             )
     _ensure_evidence_ref_constraints(engine)
+    # Root Cause Conclusion tables are created by create_all; make them append-only
+    # immutable at the database layer where supported (ADR 0039).
+    _ensure_append_only_immutability(engine)
+    # Backstop the single-conclusion-per-run invariant at the DB boundary so a
+    # check-then-insert race cannot persist two immutable conclusions for one run
+    # (ADR 0039). create_all builds this for fresh databases; this idempotent index
+    # upgrades a dev database whose table predates the unique constraint.
+    if "root_cause_conclusions" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_root_cause_conclusions_run_id "
+                    "ON root_cause_conclusions (run_id)"
+                )
+            )
 
 
 def session_scope(session_factory: sessionmaker[Session]) -> Iterator[Session]:

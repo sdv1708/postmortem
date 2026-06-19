@@ -210,6 +210,42 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   const exported = await streamToString(stream);
   expect(exported).toContain("Draft: Root cause not finalized");
   expect(exported).toContain("**Status:** provisional");
+
+  // Human-in-the-loop finalization (ADR 0039, #33): accepting a hypothesis is a
+  // separate decision from concluding a root cause. The reviewer accepts the
+  // leading evidence-backed hypothesis, assigns it as the failure mechanism, and
+  // finalizes a Root Cause Conclusion — rendered distinctly from the advisory
+  // ranking, with the provisional draft label gone.
+  await page.getByRole("button", { name: "Accept" }).first().click();
+  const roleSelect = page.getByLabel(/Causal role for Deploy v184/);
+  await expect(roleSelect).toBeVisible();
+  await roleSelect.selectOption("failure_mechanism");
+  await page
+    .getByPlaceholder(/Summarize the causal account/)
+    .fill("The v184 connection-pool refactor regressed connection handling.");
+  await page.getByRole("button", { name: "Finalize root cause conclusion" }).click();
+
+  await expect(page.getByText("finalized by human")).toBeVisible();
+  await expect(
+    page.getByText("The v184 connection-pool refactor regressed connection handling."),
+  ).toBeVisible();
+  // The failure mechanism is shown as the human conclusion, separate from the
+  // advisory ranking above.
+  await expect(page.getByText("Failure mechanism").first()).toBeVisible();
+  // The provisional draft banner drops once a human conclusion exists.
+  await expect(
+    page.getByRole("heading", { name: "Draft: Root cause not finalized" }),
+  ).toBeHidden();
+
+  // Finalization is immutable: the export now reflects the finalized conclusion.
+  const finalizedDownload = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export clean" }).click(),
+  ]).then(([d]) => d);
+  const finalizedMarkdown = await streamToString(await finalizedDownload.createReadStream());
+  expect(finalizedMarkdown).toContain("## Root Cause Conclusion");
+  expect(finalizedMarkdown).toContain("**Status:** finalized");
+  expect(finalizedMarkdown).not.toContain("Draft: Root cause not finalized");
 });
 
 test("run the evaluation suite and review the deterministic dashboard", async ({ page }) => {

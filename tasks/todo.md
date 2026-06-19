@@ -1,111 +1,51 @@
-# Issue #28 — Challenge every initial RCA hypothesis
+# Issue #33 — Finalize a supported human Root Cause Conclusion
 
-Branch: `feature/28-challenge-rca-hypotheses` (parent epic #26, blocked-by #27 done)
+Vertical slice across the whole stack. PRD #26 user stories 29-37, 42-43, 90.
+Branch: feature/33-finalize-root-cause-conclusion (from main).
 
-## Goal
-Add a bounded **falsifier** Reasoning Role to the Causal Analysis Stage (stage 3).
-Every initial RCA Hypothesis receives exactly one persisted **Hypothesis Challenge**
-(severity `critical`/`material`/`minor`, cited **Counterclaims** or assumption marker,
-**Evidence Gaps**, **Falsification Tests**). Missing or invalid challenge coverage fails
-stage 3 after its existing retry, preserves prior outputs, and never looks successful.
-The hypotheses resource + Review Surface expose challenge content with exact citation nav.
+## Backend
+- [ ] db.py: CAUSAL_FACTOR_ROLE_CHECK; append-only immutability triggers for
+      root_cause_conclusions + causal_factors (SQLite + Postgres); wire into
+      ensure_schema_compatibility.
+- [ ] models.py: RootCauseConclusion (provenance + run link, immutable) and
+      CausalFactor (role, hypothesis link, exactly-one-failure-mechanism index,
+      unique hypothesis per conclusion).
+- [ ] config.py + auth.py: single-user Principal (id + display) and
+      require_principal dependency for Conclusion Provenance.
+- [ ] schemas.py: CausalFactorCreate, RootCauseConclusionCreate,
+      CausalFactorRead, RootCauseConclusionRead; add conclusion to PostmortemRead.
+- [ ] services/conclusions.py: ConclusionService.finalize/get + read shaping
+      + errors. Trust floor: accepted + supported/partial + verified citations;
+      cross-run rejection; exactly one failure mechanism.
+- [ ] services/analysis.py: include conclusion in get_postmortem_document.
+- [ ] services/__init__.py: exports.
+- [ ] api/analysis_runs.py: POST finalize (201/409/422/404) + GET conclusion.
+- [ ] markdown_export.py: render finalized human conclusion section, distinct
+      from advisory ranking; drop provisional banner when finalized.
 
-Covers PRD user stories 3-13, 24, 57-58, 74-79, 88-89.
+## Frontend
+- [ ] lib/api.ts: types + getRunConclusion / finalizeRunConclusion.
+- [ ] incidents/[id]/page.tsx: RunConclusion panel.
 
-## Key design decisions
-- New Reasoning Role `Falsifier` behind a swappable interface (own strict schema, prompt,
-  version) — mirrors `IncidentFactExtractor`. One model call per hypothesis returning one
-  `HypothesisChallengeOutput`; same configured model may back all roles (honest metadata).
-- `Counterclaim` is a Major Claim: cited EvidenceRefs resolved from stored lines, else
-  `assumption=True` (ADR 0013). Evidence Gaps / Falsification Tests are procedural string
-  lists (no citations). Counterclaim refs are a new 5th EvidenceRef owner, audited by stage 4.
-- Falsifier sees ALL run artifacts (Falsification Retrieval across all artifacts, US13).
-- Complete-coverage runtime gate: if any hypothesis lacks a valid challenge after the single
-  retry, stage 3 fails (no degrade to builder-only, no provisional draft) — US61/62.
-- Scenario seed/demo path injects a `ScenarioReplayFalsifier` + bundled `replay/falsification.json`.
+## Docs
+- [ ] ADR 0039-human-root-cause-conclusion-finalization.md.
 
-## Plan (checkable)
-### Backend — contracts & model
-- [ ] `falsification.py`: `HypothesisChallengeOutput` strict schema, `FalsificationCounterclaim`,
-      prompt builder, `Falsifier` protocol, `LLMFalsifier`, versions.
-- [ ] `models.py`: `HypothesisChallenge` (1:1 hypothesis, severity check), `Counterclaim`,
-      `EvidenceRef.counterclaim_id`, update owner-check constant to 5 owners.
-- [ ] `db.py`: owner-check constant + counterclaim_id column add + recreate owner triggers
-      (SQLite) / drop+re-add owner CHECK (PG); validation tolerant of NULL new owner.
+## Tests
+- [ ] test_services_conclusions.py (deep module).
+- [ ] test_api_conclusions.py.
+- [ ] postmortem + markdown finalized rendering.
+- [ ] test_db_compatibility.py: new tables + immutability triggers.
+- [ ] e2e: finalize a conclusion, separate from ranking.
+- [ ] Backend regression + frontend typecheck.
 
-### Backend — pipeline
-- [ ] `stages.py`: stage 3 — after persisting hypotheses, challenge each via the falsifier;
-      persist challenge + counterclaims (resolve refs / assumption); complete-coverage gate raises.
-- [ ] `stages.py`: `_run_evidence_refs` includes counterclaim refs (stage-4 audit).
-- [ ] `_clear_hypotheses` cascade covers challenges (FK ondelete cascade).
+## Review (done)
+All backend + frontend done and green.
+- Backend full suite: exit 0, 0 failures (added test_services_conclusions, test_api_conclusions, db-compat immutability tests).
+- Frontend: tsc --noEmit clean.
+- App builds; GET+POST /conclusion routes register; OpenAPI builds.
+- e2e finalization steps added to the deploy-scenario spec (run with live servers via `npm run e2e`).
 
-### Backend — read models / API / services
-- [ ] `schemas.py`: `CounterclaimRead`, `HypothesisChallengeRead`, `HypothesisRead.challenge`.
-- [ ] `services/analysis.py`: `hypothesis_read` includes challenge serialization.
-- [ ] inject `falsifier` through `AnalysisService` + `PipelineStageRunner`.
-
-### Scenarios
-- [ ] `scenarios.py`: `ScenarioReplayFalsifier` + load+validate `replay/falsification.json`.
-- [ ] `services/scenarios.py`: inject replay falsifier in `seed_and_run`.
-- [ ] Author `replay/falsification.json` for deploy-ambiguity, dependency-failure, config-drift.
-
-### Frontend
-- [ ] `lib/api.ts`: `Counterclaim`, `HypothesisChallenge`, `Hypothesis.challenge` types.
-- [ ] `incidents/[id]/page.tsx`: render challenge (severity, challenged claim, counterclaims w/
-      citation nav, evidence gaps, falsification tests) in `HypothesisCard`.
-
-### ADR + tests
-- [ ] ADR 0034: bounded falsifier as a persisted stage-3 substep / new Reasoning Role.
-- [ ] `_fakes.py`: `FakeFalsifier`; update existing hypothesis-producing tests to inject it.
-- [ ] New tests: falsification stage (coverage, counterclaim cite/assumption, severity),
-      coverage-failure (stage fails after retry, prior outputs preserved), API challenge surfacing,
-      db-compat (counterclaim_id column + 5-owner constraint).
-- [ ] e2e: assert challenge content on the demo Review Surface.
-- [ ] full backend pytest + frontend typecheck/build.
-
-## Review
-
-Implemented as a vertical slice across the whole stack. All plan items done; full
-backend suite green (231 passed, +10 new) and frontend typecheck clean.
-
-**Backend**
-- New `falsification.py`: strict `HypothesisChallengeOutput` / `FalsificationCounterclaim`
-  contracts, `build_falsification_prompt`, `Falsifier` protocol + `LLMFalsifier` (one model
-  call per hypothesis), `HypothesisToChallenge` Role Handoff, versions.
-- Models: `HypothesisChallenge` (1:1 hypothesis, severity CHECK), `Counterclaim`,
-  `EvidenceRef.counterclaim_id` (5th owner). Owner-check constant grown to 5 owners.
-- Stage 3 (`_generate_rca`) now runs the falsifier substep after the builder: challenges every
-  hypothesis, persists challenge + counterclaims (cited-or-assumption), mandatory complete-coverage
-  gate. The falsifier sees ALL run artifacts (Falsification Retrieval, US13). Counterclaim refs
-  audited by stage 4. `_clear_hypotheses` cascade keeps the substep idempotent across the retry.
-- `db.py`: idempotent `counterclaim_id` column + index; owner triggers recreated (SQLite) /
-  owner CHECK dropped+re-added (PG) for the new condition. Verified clean + idempotent against a
-  copy of the real dev DB (no FK violations).
-- Read models / services: `CounterclaimRead`, `HypothesisChallengeRead`, `HypothesisRead.challenge`;
-  `hypothesis_read` serializes the challenge. Falsifier injected through `AnalysisService` and
-  `PipelineStageRunner`.
-
-**Scenarios**: `ScenarioReplayFalsifier` + per-hypothesis `replay/falsification.json` for the three
-hypothesis scenarios; loader validates refs, strict schema, and complete title coverage; seed path
-injects the replay falsifier. Demo verified end-to-end: 3 challenges, verified counterclaim citations.
-
-**Frontend**: `Counterclaim`/`HypothesisChallenge`/`ChallengeSeverity` types; `ChallengePanel` +
-`ChallengeSeverityBadge` render severity, challenged claim, cited counterclaims (navigable to exact
-evidence), evidence gaps, and falsification tests in each hypothesis card.
-
-**ADR**: 0034 (bounded falsifier as a persisted stage-3 substep / new Reasoning Role).
-
-**Tests**: `FakeFalsifier` added; existing hypothesis-producing tests inject it (same pattern as the
-incident-facts / claim-support roles). New: `test_stages_falsification.py` (coverage, cited vs
-assumption counterclaim, all-artifacts retrieval, coverage-failure fails stage after retry + no draft
-+ prior outputs preserved, offline-no-challenge, retry idempotency), API challenge-surfacing test,
-db-compat counterclaim-owner test, scenario falsification loader tests, e2e demo challenge assertions.
-
-**Deliberate scope boundaries (deferred to later #26 slices)**: Proposed RCA Hypotheses
-(alternative expansion), Advisory Ranking, Reasoning Budgets / Targeted Repair beyond the existing
-stage retry, Model Call Records, semantic claim-support for counterclaims, and Markdown rendering of
-challenges. Counterclaims here satisfy "verified EvidenceRefs" via the deterministic stage-4 audit.
-
-**Note for reviewer**: e2e is written but not executed here (needs the running web + api servers).
-Backend integration was verified through the real app via TestClient (seed → hypotheses endpoint
-surfaces challenges with verified citations).
+Scope notes: Partial-Support Acknowledgment, Critical-Challenge Override, Human
+Assumptions, Discrepancies, Superseding, Remediation Proposals are later #26
+slices (not #33). Immutability enforced via service (409 on re-finalize), no
+PUT/DELETE endpoints, and SQLite/Postgres append-only triggers.

@@ -279,7 +279,52 @@ export interface Postmortem {
   timeline: TimelineEvent[];
   impact_claims: ImpactClaim[];
   hypotheses: Hypothesis[];
+  // The finalized human Root Cause Conclusion (ADR 0039), present only once a
+  // reviewer finalizes one; null while the draft is provisional.
+  conclusion: RootCauseConclusion | null;
   created_at: string;
+}
+
+// The causal role a Causal Factor plays in a finalized Root Cause Conclusion
+// (ADR 0039). Exactly one failure_mechanism; triggers/amplifying are optional and
+// repeatable.
+export type CausalRole = "failure_mechanism" | "trigger" | "amplifying_condition";
+
+// A Causal Factor: an accepted hypothesis the reviewer assigned a causal role
+// (ADR 0039). Carries the hypothesis provenance and its verified supporting
+// citations so the conclusion is navigable to exact evidence.
+export interface CausalFactor {
+  id: string;
+  role: CausalRole;
+  hypothesis_id: string;
+  title: string;
+  summary: string;
+  support_status: ClaimSupportStatus;
+  advisory_rank: number | null;
+  supporting_evidence: EvidenceRef[];
+}
+
+// The finalized human Root Cause Conclusion (ADR 0039). Distinct from the
+// Advisory Hypothesis Ranking: a ranking recommends candidates, this is the
+// human's decision. Immutable, with Conclusion Provenance.
+export interface RootCauseConclusion {
+  id: string;
+  run_id: string;
+  incident_id: string;
+  summary: string;
+  finalized_by: string;
+  finalized_by_display: string | null;
+  finalized_at: string;
+  failure_mechanism: CausalFactor;
+  triggers: CausalFactor[];
+  amplifying_conditions: CausalFactor[];
+  created_at: string;
+}
+
+// One factor the reviewer assigns when finalizing (ADR 0039).
+export interface CausalFactorInput {
+  hypothesis_id: string;
+  role: CausalRole;
 }
 
 // How a Markdown export treats unsupported/assumption claims (ADR 0015): a clean
@@ -586,6 +631,26 @@ export const api = {
   getRunPostmortem(incidentId: string, runId: string): Promise<Postmortem> {
     return request<Postmortem>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/postmortem`,
+    );
+  },
+
+  getRunConclusion(
+    incidentId: string,
+    runId: string,
+  ): Promise<RootCauseConclusion> {
+    return request<RootCauseConclusion>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion`,
+    );
+  },
+
+  finalizeRunConclusion(
+    incidentId: string,
+    runId: string,
+    payload: { summary: string; factors: CausalFactorInput[] },
+  ): Promise<RootCauseConclusion> {
+    return request<RootCauseConclusion>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion`,
+      { method: "POST", body: JSON.stringify(payload) },
     );
   },
 

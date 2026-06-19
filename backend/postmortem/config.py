@@ -35,6 +35,12 @@ class Settings:
     llm_api_key: str | None = None
     llm_model: str = "gpt-4o-mini"
     log_level: str = "INFO"
+    # Identity recorded as Conclusion Provenance for the single authorized user
+    # (ADR 0017 / 0039). The MVP single-user gate has one principal; ``principal_id``
+    # is the stable authenticated identifier and ``principal_display`` is the
+    # human-readable name when configured.
+    principal_id: str = "single-user"
+    principal_display: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -55,6 +61,8 @@ class Settings:
             llm_api_key=os.environ.get("POSTMORTEM_LLM_API_KEY") or None,
             llm_model=os.environ.get("POSTMORTEM_LLM_MODEL", "gpt-4o-mini"),
             log_level=os.environ.get("POSTMORTEM_LOG_LEVEL", "INFO"),
+            principal_id=os.environ.get("POSTMORTEM_PRINCIPAL_ID") or "single-user",
+            principal_display=os.environ.get("POSTMORTEM_PRINCIPAL_DISPLAY") or None,
         )
 
 

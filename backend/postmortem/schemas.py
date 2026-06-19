@@ -337,6 +337,73 @@ class ReviewerNoteCreate(BaseModel):
     hypothesis_id: str | None = None
 
 
+# The causal role a Causal Factor plays in a Root Cause Conclusion (ADR 0039).
+# Every conclusion has exactly one failure_mechanism; triggers and amplifying
+# conditions are optional and repeatable.
+CausalRole = Literal["failure_mechanism", "trigger", "amplifying_condition"]
+
+
+class CausalFactorCreate(BaseModel):
+    """One accepted hypothesis the reviewer assigns a causal role (ADR 0039)."""
+
+    hypothesis_id: str
+    role: CausalRole
+
+
+class RootCauseConclusionCreate(BaseModel):
+    """Command payload to finalize a human Root Cause Conclusion (ADR 0039 / 0022).
+
+    The reviewer supplies a structured causal ``summary`` and one or more
+    ``factors`` drawn from accepted RCA Hypotheses. The service enforces the trust
+    floor: exactly one Failure Mechanism, each factor an accepted hypothesis with
+    verified citations and supported/partial claim support (PRD #26 stories 31-37).
+    """
+
+    summary: str = Field(min_length=1, max_length=4000)
+    factors: list[CausalFactorCreate] = Field(min_length=1)
+
+
+class CausalFactorRead(BaseModel):
+    """A Causal Factor in a finalized conclusion, with its hypothesis provenance.
+
+    Carries the linked hypothesis's title/summary, semantic support, advisory rank,
+    and verified supporting citations so the conclusion is navigable to exact
+    evidence and visibly preserves generated provenance (PRD #26 stories 36-37).
+    """
+
+    id: str
+    role: CausalRole
+    hypothesis_id: str
+    title: str
+    summary: str
+    support_status: ClaimSupportStatus
+    advisory_rank: int | None
+    supporting_evidence: list[EvidenceRefRead]
+
+
+class RootCauseConclusionRead(BaseModel):
+    """A finalized human Root Cause Conclusion for the Review Surface (ADR 0039).
+
+    Distinct from the Advisory Hypothesis Ranking: a ranking recommends plausible
+    candidates, while this is the human's decision (PRD #26 stories 30, 90). Every
+    conclusion has exactly one ``failure_mechanism`` plus optional repeatable
+    ``triggers`` and ``amplifying_conditions``. Conclusion Provenance records who
+    finalized it, when, and from which run; the conclusion is immutable.
+    """
+
+    id: str
+    run_id: str
+    incident_id: str
+    summary: str
+    finalized_by: str
+    finalized_by_display: str | None
+    finalized_at: datetime
+    failure_mechanism: CausalFactorRead
+    triggers: list[CausalFactorRead]
+    amplifying_conditions: list[CausalFactorRead]
+    created_at: datetime
+
+
 # How a Markdown export treats unsupported/assumption claims (ADR 0015).
 ExportMode = Literal["clean", "audit"]
 
@@ -373,6 +440,10 @@ class PostmortemRead(BaseModel):
     timeline: list[TimelineEventRead]
     impact_claims: list[ImpactClaimRead]
     hypotheses: list[HypothesisRead]
+    # The finalized human Root Cause Conclusion (ADR 0039), present only once a
+    # reviewer finalizes one (``conclusion_status == "finalized"``); null while the
+    # draft is provisional. Rendered distinctly from the Advisory Hypothesis Ranking.
+    conclusion: RootCauseConclusionRead | None = None
     created_at: datetime
 
 

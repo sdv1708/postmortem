@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from enum import Enum
 
-from .schemas import EvidenceRefRead, HypothesisRead, ImpactClaimRead, PostmortemRead, TimelineEventRead
+from .schemas import (
+    CausalFactorRead,
+    EvidenceRefRead,
+    HypothesisRead,
+    ImpactClaimRead,
+    PostmortemRead,
+    RootCauseConclusionRead,
+    TimelineEventRead,
+)
 
 
 class ExportMode(str, Enum):
@@ -98,6 +106,8 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
     lines.append("")
 
     _impact_section(lines, postmortem.impact_claims, mode)
+    if postmortem.conclusion is not None:
+        _conclusion_section(lines, postmortem.conclusion)
     _hypotheses_section(lines, authoritative, mode)
     if mode is ExportMode.AUDIT and review_findings:
         _review_findings_section(lines, review_findings)
@@ -170,6 +180,47 @@ def _impact_line(claim: ImpactClaimRead, mode: ExportMode) -> str:
     suffix = f" ({refs})" if refs else ""
     annotation = _support_annotation(claim.support_status) if mode is ExportMode.AUDIT else ""
     return f"- {claim.description}{annotation}{suffix}"
+
+
+def _conclusion_section(lines: list[str], conclusion: RootCauseConclusionRead) -> None:
+    """Render the finalized human Root Cause Conclusion (ADR 0039).
+
+    Distinct from the Advisory Hypothesis Ranking below: a ranking recommends
+    plausible candidates, this is the human's decision (PRD #26 stories 30, 90).
+    Shows the single Failure Mechanism, optional repeatable Triggers and Amplifying
+    Conditions, and Conclusion Provenance.
+    """
+    lines.append("## Root Cause Conclusion")
+    lines.append("")
+    who = conclusion.finalized_by_display or conclusion.finalized_by
+    when = conclusion.finalized_at.isoformat().replace("+00:00", "Z")
+    lines.append(
+        f"_Finalized by {who} on {when}. This is the human reviewer's conclusion, "
+        "not an automated ranking; the hypotheses below are the advisory candidates "
+        "it was drawn from._"
+    )
+    lines.append("")
+    lines.append(conclusion.summary)
+    lines.append("")
+    lines.append("**Failure mechanism:**")
+    lines.append(_causal_factor_line(conclusion.failure_mechanism))
+    if conclusion.triggers:
+        lines.append("")
+        lines.append("**Triggers:**")
+        lines.extend(_causal_factor_line(factor) for factor in conclusion.triggers)
+    if conclusion.amplifying_conditions:
+        lines.append("")
+        lines.append("**Amplifying conditions:**")
+        lines.extend(
+            _causal_factor_line(factor) for factor in conclusion.amplifying_conditions
+        )
+    lines.append("")
+
+
+def _causal_factor_line(factor: CausalFactorRead) -> str:
+    refs = _refs(factor.supporting_evidence)
+    suffix = f" ({refs})" if refs else ""
+    return f"- {factor.title}{suffix}"
 
 
 def _hypotheses_section(

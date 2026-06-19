@@ -15,6 +15,15 @@ from .analysis import (
     run_diagnostics_read,
     timeline_event_read,
 )
+from .conclusions import (
+    ConclusionAlreadyFinalizedError,
+    ConclusionNotFoundError,
+    ConclusionNotReadyError,
+    ConclusionService,
+    ConclusionValidationError,
+    causal_factor_read,
+    conclusion_read,
+)
 from .stages import PipelineStageRunner
 from ..retrieval import (
     DeterministicChunkArtifactRetrievalStrategy,
@@ -45,10 +54,17 @@ from .workspaces import ensure_default_workspace
 __all__ = [
     "AnalysisRunNotFoundError",
     "AnalysisService",
+    "ConclusionAlreadyFinalizedError",
+    "ConclusionNotFoundError",
+    "ConclusionNotReadyError",
+    "ConclusionService",
+    "ConclusionValidationError",
     "HypothesisNotFoundError",
     "NoArtifactsError",
     "PostmortemNotFoundError",
     "analysis_run_read",
+    "causal_factor_read",
+    "conclusion_read",
     "hypothesis_read",
     "impact_claim_read",
     "model_call_record_read",
