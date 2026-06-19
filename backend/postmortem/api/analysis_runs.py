@@ -13,6 +13,8 @@ from ..markdown_export import ExportMode, render_markdown
 from ..schemas import (
     AnalysisRunCreate,
     AnalysisRunRead,
+    ConclusionDiscrepancyCreate,
+    ConclusionDiscrepancyRead,
     HypothesisRead,
     HypothesisReviewCreate,
     ImpactClaimRead,
@@ -41,6 +43,7 @@ from ..services import (
     PostmortemNotFoundError,
     analysis_run_read,
     conclusion_read,
+    discrepancy_read,
     hypothesis_read,
     impact_claim_read,
     reviewer_note_read,
@@ -395,3 +398,40 @@ def get_run_conclusion(
             detail="this run has no finalized root cause conclusion yet",
         )
     return RootCauseConclusionRead.model_validate(conclusion_read(conclusion))
+
+
+@router.post(
+    "/{run_id}/conclusion/discrepancies",
+    response_model=ConclusionDiscrepancyRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def raise_run_conclusion_discrepancy(
+    incident_id: str,
+    run_id: str,
+    payload: ConclusionDiscrepancyCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> ConclusionDiscrepancyRead:
+    """Flag a finalized Root Cause Conclusion as disputed (ADR 0040 / 0022).
+
+    Appends an immutable Conclusion Discrepancy without editing the conclusion (PRD
+    #26 stories 44-46). An open discrepancy makes the conclusion a Disputed
+    Conclusion — withheld from authoritative presentation, the incident returned to
+    unresolved review — while the conclusion itself is preserved for audit.
+    """
+    try:
+        discrepancy = ConclusionService(db).raise_discrepancy(
+            incident_id, run_id, payload, principal
+        )
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except ConclusionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="this run has no finalized root cause conclusion to dispute",
+        )
+    except ConclusionValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return ConclusionDiscrepancyRead.model_validate(discrepancy_read(discrepancy))

@@ -246,6 +246,52 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   expect(finalizedMarkdown).toContain("## Root Cause Conclusion");
   expect(finalizedMarkdown).toContain("**Status:** finalized");
   expect(finalizedMarkdown).not.toContain("Draft: Root cause not finalized");
+
+  // Flagging an immutable conclusion as disputed (ADR 0040, #34): a reviewer records
+  // an append-only Conclusion Discrepancy without editing the conclusion. The
+  // conclusion is preserved but returns to unresolved, no longer authoritative.
+  await page
+    .getByPlaceholder(/Explain what is wrong with this conclusion/)
+    .fill("The cited deploy postdates the error spike by several minutes.");
+  await page.getByRole("button", { name: "Flag discrepancy" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Disputed — returned to unresolved review" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("The cited deploy postdates the error spike by several minutes."),
+  ).toBeVisible();
+  // The immutable conclusion's causal account is still preserved for audit.
+  await expect(
+    page.getByText("The v184 connection-pool refactor regressed connection handling."),
+  ).toBeVisible();
+
+  // A clean export withholds the disputed conclusion as current fact; an audit
+  // export preserves the conclusion and the discrepancy (AC #4).
+  const disputedClean = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export clean" }).click(),
+  ]).then(([d]) => d);
+  const disputedCleanMarkdown = await streamToString(await disputedClean.createReadStream());
+  expect(disputedCleanMarkdown).toContain("**Status:** disputed");
+  expect(disputedCleanMarkdown).toContain("Disputed conclusion.");
+  expect(disputedCleanMarkdown).toContain("withheld from this clean export");
+  expect(disputedCleanMarkdown).not.toContain(
+    "The v184 connection-pool refactor regressed connection handling.",
+  );
+
+  const disputedAudit = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export audit" }).click(),
+  ]).then(([d]) => d);
+  const disputedAuditMarkdown = await streamToString(await disputedAudit.createReadStream());
+  expect(disputedAuditMarkdown).toContain("**Recorded discrepancies:**");
+  expect(disputedAuditMarkdown).toContain(
+    "The cited deploy postdates the error spike by several minutes.",
+  );
+  expect(disputedAuditMarkdown).toContain(
+    "The v184 connection-pool refactor regressed connection handling.",
+  );
 });
 
 test("run the evaluation suite and review the deterministic dashboard", async ({ page }) => {

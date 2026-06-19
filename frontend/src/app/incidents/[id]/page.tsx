@@ -15,6 +15,7 @@ import {
   type CausalFactorInput,
   type CausalRole,
   type ChallengeSeverity,
+  type ConclusionDiscrepancy,
   type ClaimSupportStatus,
   type EvidenceRef,
   type ExportMode,
@@ -964,6 +965,7 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
   const postmortem = postmortemQuery.data;
   const insufficient = postmortem.evidence_sufficiency === "insufficient";
   const provisional = postmortem.conclusion_status === "provisional";
+  const disputed = postmortem.conclusion_status === "disputed";
 
   return (
     <div className="border-t border-slate-200 bg-slate-50/40">
@@ -973,6 +975,11 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
           {provisional && (
             <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
               Draft: Root cause not finalized
+            </span>
+          )}
+          {disputed && (
+            <span className="badge bg-rose-50 text-rose-700 ring-rose-200">
+              Disputed — not authoritative
             </span>
           )}
           {insufficient && (
@@ -1739,7 +1746,22 @@ function RunConclusion({
 
   const conclusion = conclusionQuery.data ?? null;
   if (conclusion) {
-    return <ConclusionPanel conclusion={conclusion} onFocusEvidence={onFocusEvidence} />;
+    return (
+      <ConclusionPanel
+        incidentId={incidentId}
+        runId={runId}
+        conclusion={conclusion}
+        onFocusEvidence={onFocusEvidence}
+        onDisputed={() => {
+          void queryClient.invalidateQueries({
+            queryKey: ["run-conclusion", incidentId, runId],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["run-postmortem", incidentId, runId],
+          });
+        }}
+      />
+    );
   }
 
   return (
@@ -1756,28 +1778,71 @@ function RunConclusion({
 }
 
 function ConclusionPanel({
+  incidentId,
+  runId,
   conclusion,
   onFocusEvidence,
+  onDisputed,
 }: {
+  incidentId: string;
+  runId: string;
   conclusion: RootCauseConclusion;
   onFocusEvidence: (ref: EvidenceRef) => void;
+  onDisputed: () => void;
 }) {
   const who = conclusion.finalized_by_display || conclusion.finalized_by;
+  const disputed = conclusion.disputed;
   return (
-    <div className="border-t border-slate-200 bg-emerald-50/30">
+    <div
+      className={`border-t border-slate-200 ${disputed ? "bg-rose-50/30" : "bg-emerald-50/30"}`}
+    >
       <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
-        <p className="text-xs font-medium uppercase tracking-wide text-emerald-700">
+        <p
+          className={`text-xs font-medium uppercase tracking-wide ${
+            disputed ? "text-rose-700" : "text-emerald-700"
+          }`}
+        >
           Root Cause Conclusion
         </p>
-        <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">
-          finalized by human
-        </span>
+        {disputed ? (
+          <span className="badge bg-rose-50 text-rose-700 ring-rose-200">disputed</span>
+        ) : (
+          <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">
+            finalized by human
+          </span>
+        )}
       </div>
       <p className="px-5 pt-1 text-xs text-slate-500">
         The human reviewer&apos;s decision — distinct from the advisory ranking above,
         which only recommends plausible candidates. Finalized by {who} on{" "}
         {new Date(conclusion.finalized_at).toLocaleString()}.
       </p>
+
+      {disputed && (
+        <div className="mx-5 mt-3 flex items-start gap-2 rounded-lg border border-rose-300 bg-rose-50/80 p-4">
+          <svg
+            className="mt-0.5 shrink-0 text-rose-600"
+            width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+          >
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+            <path d="M12 9v4" />
+            <path d="M12 17h.01" />
+          </svg>
+          <div>
+            <h4 className="text-sm font-semibold text-rose-900">
+              Disputed — returned to unresolved review
+            </h4>
+            <p className="mt-0.5 text-xs leading-relaxed text-rose-800">
+              A reviewer raised an open discrepancy against this conclusion. It is
+              preserved below for audit but is no longer authoritative. The immutable
+              conclusion is never edited — disagreement is recorded as an append-only
+              discrepancy.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="space-y-4 p-5">
         <p className="text-sm leading-relaxed text-slate-700">{conclusion.summary}</p>
         <CausalFactorGroup
@@ -1799,8 +1864,105 @@ function ConclusionPanel({
             onFocusEvidence={onFocusEvidence}
           />
         )}
+
+        {conclusion.discrepancies.length > 0 && (
+          <div className="space-y-2 border-t border-rose-100 pt-3">
+            <p className="label text-rose-700">Discrepancies · {conclusion.discrepancies.length}</p>
+            <ul className="space-y-2">
+              {conclusion.discrepancies.map((discrepancy) => (
+                <li
+                  key={discrepancy.id}
+                  className="rounded-lg border border-rose-200 bg-rose-50/60 px-3 py-2"
+                >
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed text-rose-900">
+                    {discrepancy.explanation}
+                  </p>
+                  <p className="mt-1 text-xs text-rose-500">
+                    Raised by {discrepancy.raised_by_display || discrepancy.raised_by} on{" "}
+                    {new Date(discrepancy.created_at).toLocaleString()}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <DiscrepancyForm
+          incidentId={incidentId}
+          runId={runId}
+          disputed={disputed}
+          onRaised={onDisputed}
+        />
       </div>
     </div>
+  );
+}
+
+// Flag an immutable conclusion as disputed (ADR 0040). Raising a discrepancy never
+// edits the conclusion — it appends an audit-preserved flag that returns review to
+// unresolved (PRD #26 stories 44-46). Always available because discrepancies are
+// append-only; a reviewer may record more than one concern.
+function DiscrepancyForm({
+  incidentId,
+  runId,
+  disputed,
+  onRaised,
+}: {
+  incidentId: string;
+  runId: string;
+  disputed: boolean;
+  onRaised: () => void;
+}) {
+  const [explanation, setExplanation] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const raiseMutation = useMutation({
+    mutationFn: () =>
+      api.raiseConclusionDiscrepancy(incidentId, runId, { explanation: explanation.trim() }),
+    onMutate: () => setError(null),
+    onSuccess: () => {
+      setExplanation("");
+      onRaised();
+    },
+    onError: (err) =>
+      setError(err instanceof Error ? err.message : "Discrepancy could not be recorded."),
+  });
+
+  return (
+    <form
+      className="space-y-2 border-t border-slate-100 pt-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (explanation.trim()) {
+          raiseMutation.mutate();
+        }
+      }}
+    >
+      <p className="label">{disputed ? "Flag another discrepancy" : "Flag a discrepancy"}</p>
+      <p className="text-xs text-slate-500">
+        Recording a discrepancy disputes this conclusion and returns the incident to
+        unresolved review. The conclusion itself is immutable and is preserved for audit.
+      </p>
+      <textarea
+        value={explanation}
+        onChange={(event) => setExplanation(event.target.value)}
+        rows={3}
+        placeholder="Explain what is wrong with this conclusion."
+        className="text-sm leading-relaxed"
+      />
+      {error && (
+        <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </p>
+      )}
+      <button
+        type="submit"
+        disabled={raiseMutation.isPending || !explanation.trim()}
+        className="button-secondary"
+      >
+        {raiseMutation.isPending ? "Recording…" : "Flag discrepancy"}
+      </button>
+    </form>
   );
 }
 

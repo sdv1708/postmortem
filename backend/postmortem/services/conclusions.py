@@ -11,11 +11,12 @@ from ..logging import log_event
 from ..models import (
     AnalysisRun,
     CausalFactor,
+    ConclusionDiscrepancy,
     Hypothesis,
     Postmortem,
     RootCauseConclusion,
 )
-from ..schemas import RootCauseConclusionCreate
+from ..schemas import ConclusionDiscrepancyCreate, RootCauseConclusionCreate
 from .analysis import AnalysisRunNotFoundError, HypothesisNotFoundError
 from .incidents import IncidentService
 
@@ -213,6 +214,88 @@ class ConclusionService:
                 f"hypothesis {hypothesis_id} has no verified supporting citation"
             )
 
+    def raise_discrepancy(
+        self,
+        incident_id: str,
+        run_id: str,
+        payload: ConclusionDiscrepancyCreate,
+        principal: Principal,
+    ) -> ConclusionDiscrepancy:
+        """Flag a finalized Root Cause Conclusion as disputed (ADR 0040).
+
+        Appends an immutable Conclusion Discrepancy without editing, replacing, or
+        deleting the conclusion (PRD #26 stories 44-46). An open discrepancy makes
+        the conclusion a Disputed Conclusion: it is preserved for audit but is no
+        longer authoritative, and the incident returns to unresolved Postmortem
+        Review. The disputed state is derived from the discrepancy's existence, so no
+        mutation touches the immutable conclusion row.
+
+        Requires a finalized conclusion to dispute (cross-incident/cross-run requests
+        are rejected as not-found by ``_get_run``). Discrepancies are append-only:
+        flagging an already-disputed conclusion appends another, building the audit
+        trail rather than replacing earlier disagreement.
+        """
+        self._get_run(incident_id, run_id)
+        conclusion = self._session.scalar(
+            select(RootCauseConclusion).where(RootCauseConclusion.run_id == run_id)
+        )
+        if conclusion is None:
+            raise ConclusionNotFoundError(run_id)
+
+        explanation = payload.explanation.strip()
+        if not explanation:
+            raise ConclusionValidationError("discrepancy explanation cannot be blank")
+
+        # Retry-safety for an append-only, DB-irreversible record. A discrepancy can
+        # never be edited or deleted (ADR 0040), so a lost-response retry that
+        # re-POSTs the identical explanation must not append a permanent duplicate
+        # that overstates how many independent concerns were raised. An exact-text
+        # match on this conclusion is treated as the same dispute and returned
+        # unchanged (idempotent create); a genuinely different explanation still
+        # appends, preserving the append-only audit trail for distinct concerns.
+        # This guards the realistic single-user sequential-retry case (ADR 0017); it
+        # is not a cross-request lock, which the MVP single-user gate does not need.
+        existing = next(
+            (d for d in conclusion.discrepancies if d.explanation == explanation),
+            None,
+        )
+        if existing is not None:
+            log_event(
+                logger,
+                logging.INFO,
+                "conclusion_discrepancy_retry_ignored",
+                run_id=run_id,
+                incident_id=incident_id,
+                conclusion_id=conclusion.id,
+                discrepancy_id=existing.id,
+            )
+            return existing
+
+        # Attach via the relationship (not a bare FK) so the conclusion's in-memory
+        # ``discrepancies`` collection stays consistent within the session and the
+        # derived disputed state is correct even before the next request reloads it.
+        discrepancy = ConclusionDiscrepancy(
+            conclusion=conclusion,
+            run_id=run_id,
+            explanation=explanation,
+            raised_by_principal=principal.id,
+            raised_by_display=principal.display,
+        )
+        self._session.add(discrepancy)
+        self._session.flush()
+
+        log_event(
+            logger,
+            logging.INFO,
+            "conclusion_discrepancy_raised",
+            run_id=run_id,
+            incident_id=incident_id,
+            conclusion_id=conclusion.id,
+            discrepancy_id=discrepancy.id,
+            raised_by=principal.id,
+        )
+        return discrepancy
+
 
 def causal_factor_read(factor: CausalFactor) -> dict:
     """Shape a CausalFactor (with its hypothesis provenance) for CausalFactorRead."""
@@ -243,6 +326,9 @@ def conclusion_read(conclusion: RootCauseConclusion) -> dict:
     failure_mechanism = next(f for f in factors if f.role == FAILURE_MECHANISM)
     triggers = [f for f in factors if f.role == "trigger"]
     amplifying = [f for f in factors if f.role == "amplifying_condition"]
+    # A Disputed Conclusion is derived from the existence of an open Conclusion
+    # Discrepancy, never from mutating the immutable conclusion row (ADR 0040).
+    discrepancies = list(conclusion.discrepancies)
     return {
         "id": conclusion.id,
         "run_id": conclusion.run_id,
@@ -254,7 +340,22 @@ def conclusion_read(conclusion: RootCauseConclusion) -> dict:
         "failure_mechanism": causal_factor_read(failure_mechanism),
         "triggers": [causal_factor_read(f) for f in triggers],
         "amplifying_conditions": [causal_factor_read(f) for f in amplifying],
+        "disputed": bool(discrepancies),
+        "discrepancies": [discrepancy_read(d) for d in discrepancies],
         "created_at": _aware(conclusion.created_at),
+    }
+
+
+def discrepancy_read(discrepancy: ConclusionDiscrepancy) -> dict:
+    """Shape a ConclusionDiscrepancy for ConclusionDiscrepancyRead (ADR 0040)."""
+    return {
+        "id": discrepancy.id,
+        "conclusion_id": discrepancy.conclusion_id,
+        "run_id": discrepancy.run_id,
+        "explanation": discrepancy.explanation,
+        "raised_by": discrepancy.raised_by_principal,
+        "raised_by_display": discrepancy.raised_by_display,
+        "created_at": _aware(discrepancy.created_at),
     }
 
 

@@ -274,3 +274,180 @@ def test_finalize_requires_auth(client: TestClient):
 def test_get_conclusion_requires_auth(client: TestClient):
     resp = client.get("/api/incidents/whatever/analysis-runs/whatever/conclusion")
     assert resp.status_code == 401
+
+
+def _finalize(client, auth_headers, incident_id, run_id):
+    hyps = _hypotheses(client, auth_headers, incident_id, run_id)
+    _accept(client, auth_headers, incident_id, run_id, hyps["Primary cause"]["id"])
+    resp = client.post(
+        _conclusion_url(incident_id, run_id),
+        json={
+            "summary": "The deploy regressed connection handling.",
+            "factors": [
+                {"hypothesis_id": hyps["Primary cause"]["id"], "role": "failure_mechanism"}
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def _discrepancy_url(incident_id, run_id):
+    return f"/api/incidents/{incident_id}/analysis-runs/{run_id}/conclusion/discrepancies"
+
+
+def test_raise_discrepancy_disputes_conclusion(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    _finalize(client, auth_headers, incident_id, run_id)
+
+    resp = client.post(
+        _discrepancy_url(incident_id, run_id),
+        json={"explanation": "The cited deploy postdates the error spike."},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["explanation"] == "The cited deploy postdates the error spike."
+    assert body["run_id"] == run_id
+    # Conclusion Provenance for the dispute: the single-user gate's default principal.
+    assert body["raised_by"] == "single-user"
+
+    # The conclusion is now disputed and returns the review to unresolved: the
+    # postmortem read model reports "disputed", not "finalized" (PRD #26 stories 44-46).
+    pm = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem", headers=auth_headers
+    ).json()
+    assert pm["conclusion_status"] == "disputed"
+    assert pm["conclusion"]["disputed"] is True
+    assert pm["conclusion"]["discrepancies"][0]["explanation"] == body["explanation"]
+
+    # The GET conclusion resource exposes the same disputed state and discrepancy.
+    got = client.get(_conclusion_url(incident_id, run_id), headers=auth_headers).json()
+    assert got["disputed"] is True
+    assert len(got["discrepancies"]) == 1
+
+
+def test_raise_discrepancy_does_not_edit_immutable_conclusion(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    finalized = _finalize(client, auth_headers, incident_id, run_id)
+
+    client.post(
+        _discrepancy_url(incident_id, run_id),
+        json={"explanation": "Disagree with the mechanism."},
+        headers=auth_headers,
+    )
+    got = client.get(_conclusion_url(incident_id, run_id), headers=auth_headers).json()
+    # The immutable conclusion's own fields are untouched (ADR 0039/0040).
+    assert got["id"] == finalized["id"]
+    assert got["summary"] == finalized["summary"]
+    assert got["finalized_at"] == finalized["finalized_at"]
+    assert got["failure_mechanism"]["title"] == "Primary cause"
+
+
+def test_discrepancies_are_append_only(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    _finalize(client, auth_headers, incident_id, run_id)
+    for explanation in ("First problem.", "Second problem."):
+        resp = client.post(
+            _discrepancy_url(incident_id, run_id),
+            json={"explanation": explanation},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+
+    got = client.get(_conclusion_url(incident_id, run_id), headers=auth_headers).json()
+    assert [d["explanation"] for d in got["discrepancies"]] == ["First problem.", "Second problem."]
+
+
+def test_raise_discrepancy_retry_does_not_duplicate(app, client: TestClient, auth_headers):
+    # A lost-response retry re-POSTs the identical payload; the append-only,
+    # DB-irreversible record must not be duplicated (ADR 0040 retry-safety).
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    _finalize(client, auth_headers, incident_id, run_id)
+    body = {"explanation": "The cited deploy postdates the spike."}
+
+    first = client.post(_discrepancy_url(incident_id, run_id), json=body, headers=auth_headers)
+    assert first.status_code == 201
+    retry = client.post(_discrepancy_url(incident_id, run_id), json=body, headers=auth_headers)
+    assert retry.status_code == 201
+    assert retry.json()["id"] == first.json()["id"]
+
+    got = client.get(_conclusion_url(incident_id, run_id), headers=auth_headers).json()
+    assert len(got["discrepancies"]) == 1
+
+
+def test_raise_discrepancy_requires_finalized_conclusion(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    resp = client.post(
+        _discrepancy_url(incident_id, run_id),
+        json={"explanation": "Nothing to dispute."},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+    assert "no finalized root cause conclusion to dispute" in resp.json()["detail"]
+
+
+def test_raise_discrepancy_rejects_cross_incident(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    _finalize(client, auth_headers, incident_id, run_id)
+    other_incident_id, _other_run_id = _seed_succeeded_run(app, client, auth_headers)
+
+    # The run does not belong to the other incident → not found, never a leak.
+    resp = client.post(
+        _discrepancy_url(other_incident_id, run_id),
+        json={"explanation": "Wrong incident."},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
+def test_raise_discrepancy_rejects_blank_explanation(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    _finalize(client, auth_headers, incident_id, run_id)
+    resp = client.post(
+        _discrepancy_url(incident_id, run_id),
+        json={"explanation": "   "},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+
+def test_raise_discrepancy_requires_auth(client: TestClient):
+    resp = client.post(
+        "/api/incidents/whatever/analysis-runs/whatever/conclusion/discrepancies",
+        json={"explanation": "x"},
+    )
+    assert resp.status_code == 401
+
+
+def test_disputed_conclusion_export_behavior(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    _finalize(client, auth_headers, incident_id, run_id)
+    client.post(
+        _discrepancy_url(incident_id, run_id),
+        json={"explanation": "The cited deploy postdates the spike."},
+        headers=auth_headers,
+    )
+
+    def export(mode):
+        return client.post(
+            f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem/export",
+            json={"mode": mode},
+            headers=auth_headers,
+        ).json()["markdown"]
+
+    clean = export("clean")
+    # A clean export must not present the disputed conclusion as current fact: the
+    # causal account is withheld and the disputed state is prominent (PRD story 45).
+    assert "**Status:** disputed" in clean
+    assert "Disputed conclusion." in clean
+    assert "withheld from this clean export" in clean
+    assert "The deploy regressed connection handling." not in clean
+
+    audit = export("audit")
+    # An audit export preserves the conclusion and the discrepancy for the record.
+    assert "## Root Cause Conclusion" in audit
+    assert "The deploy regressed connection handling." in audit
+    assert "Recorded discrepancies:" in audit
+    assert "The cited deploy postdates the spike." in audit
