@@ -20,6 +20,7 @@ import {
   type ClaimSupportStatus,
   type EvidenceRef,
   type ExportMode,
+  type HumanAssumption,
   type Hypothesis,
   type RemediationDecisionInput,
   type RemediationLinkInput,
@@ -2152,6 +2153,10 @@ function ConclusionPanel({
           />
         )}
 
+        {conclusion.human_assumptions.length > 0 && (
+          <HumanAssumptionList assumptions={conclusion.human_assumptions} />
+        )}
+
         {conclusion.discrepancies.length > 0 && (
           <div className="space-y-2 border-t border-rose-100 pt-3">
             <p className="label text-rose-700">Discrepancies · {conclusion.discrepancies.length}</p>
@@ -2271,6 +2276,11 @@ function CausalFactorGroup({
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm font-medium text-slate-900">{factor.title}</span>
               <ClaimSupportBadge status={factor.support_status} />
+              {factor.challenge?.severity === "critical" && (
+                <span className="badge bg-rose-50 text-rose-700 ring-rose-200">
+                  critically challenged
+                </span>
+              )}
               {factor.advisory_rank !== null && (
                 <span className="badge bg-slate-100 text-slate-600 ring-slate-200">
                   advisory rank {factor.advisory_rank}
@@ -2278,12 +2288,71 @@ function CausalFactorGroup({
               )}
             </div>
             <p className="mt-1 text-sm leading-relaxed text-slate-700">{factor.summary}</p>
+            {/* Partial-Support Acknowledgment kept visible so the uncertainty is never
+                hidden (ADR 0042, PRD #26 stories 38-39). */}
+            {factor.partial_support_acknowledgment && (
+              <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-1.5">
+                <p className="text-xs font-medium text-amber-800">Partial support</p>
+                <p className="mt-0.5 text-xs leading-relaxed text-amber-900">
+                  {factor.partial_support_acknowledgment}
+                </p>
+              </div>
+            )}
+            {/* Preserve the actual critical challenge (challenged claim, counterclaims,
+                evidence gaps, falsification tests) so the override can be audited
+                against the concern it addresses (ADR 0042, PRD #26 story 41). */}
+            {factor.challenge?.severity === "critical" && (
+              <div className="mt-2">
+                <ChallengePanel
+                  challenge={factor.challenge}
+                  onFocusEvidence={onFocusEvidence}
+                />
+              </div>
+            )}
+            {/* Critical-Challenge Override, shown with non-definitive wording — the
+                unresolved challenge is acknowledged, not erased (stories 40-41). */}
+            {factor.critical_challenge_override && (
+              <div className="mt-2 rounded-md border border-rose-200 bg-rose-50/70 px-2.5 py-1.5">
+                <p className="text-xs font-medium text-rose-800">
+                  Critical challenge unresolved — included with override (not definitive)
+                </p>
+                <p className="mt-0.5 text-xs leading-relaxed text-rose-900">
+                  {factor.critical_challenge_override}
+                </p>
+              </div>
+            )}
             {factor.supporting_evidence.length > 0 && (
               <EvidenceRefList
                 refs={factor.supporting_evidence}
                 onFocusEvidence={onFocusEvidence}
               />
             )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// Unevidenced reviewer beliefs, rendered separately from the evidence-backed
+// factors and always labeled as assumptions so they never read as established fact
+// (ADR 0042, PRD #26 story 38).
+function HumanAssumptionList({ assumptions }: { assumptions: HumanAssumption[] }) {
+  return (
+    <div className="space-y-2">
+      <p className="label flex items-center gap-2">
+        Human assumptions
+        <span className="badge bg-amber-50 text-amber-700 ring-amber-200">
+          not evidence-backed
+        </span>
+      </p>
+      <ul className="space-y-1.5">
+        {assumptions.map((assumption) => (
+          <li
+            key={assumption.id}
+            className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2 text-sm leading-relaxed text-amber-900"
+          >
+            {assumption.statement}
           </li>
         ))}
       </ul>
@@ -2303,21 +2372,64 @@ function ConclusionForm({
   onFinalized: () => void;
 }) {
   const [roles, setRoles] = useState<Record<string, CausalRole | "none">>({});
+  const [acknowledgments, setAcknowledgments] = useState<Record<string, string>>({});
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [summary, setSummary] = useState("");
+  const [assumptionsText, setAssumptionsText] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const eligible = hypotheses.filter(hypothesisIsFinalizable);
+  const byId = new Map(eligible.map((h) => [h.id, h]));
+
+  // A partially supported factor needs a Partial-Support Acknowledgment; a
+  // critically challenged failure mechanism needs a Critical-Challenge Override
+  // (ADR 0042, PRD #26 stories 38-41). These mirror the backend trust floor so the
+  // reviewer cannot submit an unqualified conclusion.
+  const needsAcknowledgment = (h: Hypothesis) => h.support_status === "partial";
+  const needsOverride = (h: Hypothesis, role: CausalRole | "none") =>
+    role === "failure_mechanism" && h.challenge?.severity === "critical";
+
   const factors: CausalFactorInput[] = Object.entries(roles)
     .filter(([, role]) => role !== "none")
-    .map(([hypothesis_id, role]) => ({ hypothesis_id, role: role as CausalRole }));
+    .map(([hypothesis_id, role]) => {
+      const hypothesis = byId.get(hypothesis_id);
+      const input: CausalFactorInput = { hypothesis_id, role: role as CausalRole };
+      if (hypothesis && needsAcknowledgment(hypothesis)) {
+        input.partial_support_acknowledgment = (acknowledgments[hypothesis_id] ?? "").trim();
+      }
+      if (hypothesis && needsOverride(hypothesis, role)) {
+        input.critical_challenge_override = (overrides[hypothesis_id] ?? "").trim();
+      }
+      return input;
+    });
   const failureMechanismCount = factors.filter(
     (factor) => factor.role === "failure_mechanism",
   ).length;
-  const canFinalize = failureMechanismCount === 1 && summary.trim().length > 0;
+  const humanAssumptions = assumptionsText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const qualificationsComplete = factors.every((factor) => {
+    const hypothesis = byId.get(factor.hypothesis_id);
+    if (!hypothesis) return false;
+    if (needsAcknowledgment(hypothesis) && !factor.partial_support_acknowledgment) {
+      return false;
+    }
+    if (needsOverride(hypothesis, factor.role) && !factor.critical_challenge_override) {
+      return false;
+    }
+    return true;
+  });
+  const canFinalize =
+    failureMechanismCount === 1 && summary.trim().length > 0 && qualificationsComplete;
 
   const finalizeMutation = useMutation({
     mutationFn: () =>
-      api.finalizeRunConclusion(incidentId, runId, { summary: summary.trim(), factors }),
+      api.finalizeRunConclusion(incidentId, runId, {
+        summary: summary.trim(),
+        factors,
+        human_assumptions: humanAssumptions,
+      }),
     onMutate: () => setError(null),
     onSuccess: () => onFinalized(),
     onError: (err) =>
@@ -2349,38 +2461,98 @@ function ConclusionForm({
           </p>
         ) : (
           <ul className="space-y-2">
-            {eligible.map((hypothesis) => (
-              <li
-                key={hypothesis.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate text-sm font-medium text-slate-900">
-                    {hypothesis.title}
-                  </span>
-                  <ClaimSupportBadge status={hypothesis.support_status} />
-                </div>
-                <label className="flex items-center gap-2 text-xs text-slate-600">
-                  <span>Role</span>
-                  <select
-                    value={roles[hypothesis.id] ?? "none"}
-                    onChange={(event) =>
-                      setRoles((current) => ({
-                        ...current,
-                        [hypothesis.id]: event.target.value as CausalRole | "none",
-                      }))
-                    }
-                    aria-label={`Causal role for ${hypothesis.title}`}
-                  >
-                    {CAUSAL_ROLE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </li>
-            ))}
+            {eligible.map((hypothesis) => {
+              const role = roles[hypothesis.id] ?? "none";
+              const showAcknowledgment = role !== "none" && needsAcknowledgment(hypothesis);
+              const showOverride = needsOverride(hypothesis, role);
+              const isCritical = hypothesis.challenge?.severity === "critical";
+              return (
+                <li
+                  key={hypothesis.id}
+                  className="space-y-2 rounded-lg border border-slate-200 bg-white px-3 py-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="truncate text-sm font-medium text-slate-900">
+                        {hypothesis.title}
+                      </span>
+                      <ClaimSupportBadge status={hypothesis.support_status} />
+                      {isCritical && (
+                        <span className="badge bg-rose-50 text-rose-700 ring-rose-200">
+                          critically challenged
+                        </span>
+                      )}
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-600">
+                      <span>Role</span>
+                      <select
+                        value={role}
+                        onChange={(event) =>
+                          setRoles((current) => ({
+                            ...current,
+                            [hypothesis.id]: event.target.value as CausalRole | "none",
+                          }))
+                        }
+                        aria-label={`Causal role for ${hypothesis.title}`}
+                      >
+                        {CAUSAL_ROLE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  {showAcknowledgment && (
+                    <label className="block space-y-1">
+                      <span className="text-xs font-medium text-amber-700">
+                        Partial-support acknowledgment (required)
+                      </span>
+                      <textarea
+                        value={acknowledgments[hypothesis.id] ?? ""}
+                        onChange={(event) =>
+                          setAcknowledgments((current) => ({
+                            ...current,
+                            [hypothesis.id]: event.target.value,
+                          }))
+                        }
+                        rows={2}
+                        placeholder="Describe what the evidence supports and what remains uncertain."
+                        aria-label={`Partial-support acknowledgment for ${hypothesis.title}`}
+                        className="text-xs leading-relaxed"
+                      />
+                    </label>
+                  )}
+
+                  {showOverride && (
+                    <label className="block space-y-1">
+                      <span className="text-xs font-medium text-rose-700">
+                        Critical-challenge override (required)
+                      </span>
+                      <p className="text-xs text-slate-500">
+                        This hypothesis has an unresolved critical challenge. To use it as
+                        the failure mechanism, address the challenge here. The challenge is
+                        preserved and the conclusion stays non-definitive.
+                      </p>
+                      <textarea
+                        value={overrides[hypothesis.id] ?? ""}
+                        onChange={(event) =>
+                          setOverrides((current) => ({
+                            ...current,
+                            [hypothesis.id]: event.target.value,
+                          }))
+                        }
+                        rows={2}
+                        placeholder="Explain why the critical challenge does not block this as the failure mechanism."
+                        aria-label={`Critical-challenge override for ${hypothesis.title}`}
+                        className="text-xs leading-relaxed"
+                      />
+                    </label>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
 
@@ -2395,9 +2567,33 @@ function ConclusionForm({
           />
         </label>
 
+        <label className="block space-y-1.5">
+          <span className="text-sm font-medium text-slate-700">
+            Human assumptions <span className="font-normal text-slate-400">(optional)</span>
+          </span>
+          <p className="text-xs text-slate-500">
+            Unevidenced beliefs, one per line. These are recorded separately and labeled
+            as assumptions — they never render as evidence-backed causal factors.
+          </p>
+          <textarea
+            value={assumptionsText}
+            onChange={(event) => setAssumptionsText(event.target.value)}
+            rows={2}
+            placeholder="One assumption per line."
+            aria-label="Human assumptions"
+            className="text-sm leading-relaxed"
+          />
+        </label>
+
         {failureMechanismCount > 1 && (
           <p className="text-xs text-amber-600">
             Choose exactly one failure mechanism.
+          </p>
+        )}
+        {failureMechanismCount === 1 && !qualificationsComplete && (
+          <p className="text-xs text-amber-600">
+            Add the required partial-support acknowledgment or critical-challenge
+            override for the factors above before finalizing.
           </p>
         )}
         {error && (

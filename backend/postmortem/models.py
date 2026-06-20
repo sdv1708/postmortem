@@ -788,6 +788,14 @@ class RootCauseConclusion(Base):
         cascade="all, delete-orphan",
         order_by="ConclusionDiscrepancy.created_at",
     )
+    # Human Assumptions recorded with the conclusion (ADR 0042, PRD #26 story 38).
+    # Unevidenced reviewer beliefs are stored here, separate from the evidence-backed
+    # Causal Factors, so they can never render as established fact.
+    human_assumptions: Mapped[list["HumanAssumption"]] = relationship(
+        back_populates="conclusion",
+        cascade="all, delete-orphan",
+        order_by="HumanAssumption.sequence",
+    )
 
 
 class CausalFactor(Base):
@@ -839,6 +847,19 @@ class CausalFactor(Base):
     # Display/sort order within a role so repeatable Triggers / Amplifying
     # Conditions render in the order the reviewer chose them.
     sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Partial-Support Acknowledgment (ADR 0042, PRD #26 stories 38-39): a reviewer's
+    # explanation of what is supported, what remains uncertain, and why a partially
+    # supported hypothesis is still included. Required by the service for a factor
+    # whose hypothesis carries ``partial`` claim support; null for a fully supported
+    # factor. Rendered with the conclusion so the uncertainty is never hidden.
+    partial_support_acknowledgment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Critical-Challenge Override (ADR 0042, PRD #26 stories 40-41): a reviewer's
+    # evidence-based rationale for using a critically challenged hypothesis as the
+    # Failure Mechanism, addressing the unresolved critical challenge. Required by the
+    # service only for a ``failure_mechanism`` factor whose hypothesis has a critical
+    # challenge; null otherwise. The challenge is preserved and the wording stays
+    # non-definitive — the override acknowledges the concern, it does not erase it.
+    critical_challenge_override: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     conclusion: Mapped[RootCauseConclusion] = relationship(back_populates="factors")
@@ -889,6 +910,38 @@ class ConclusionDiscrepancy(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     conclusion: Mapped[RootCauseConclusion] = relationship(back_populates="discrepancies")
+
+
+class HumanAssumption(Base):
+    """A reviewer-authored, explicitly labeled belief recorded with a conclusion (ADR 0042).
+
+    When a potential Causal Factor lacks sufficient verified evidence it cannot be
+    presented as established fact (CONTEXT "Causal Factor vs Human Assumption", PRD
+    #26 story 38). Rather than smuggling the belief in as a factor, the reviewer
+    records it here: a labeled Human Assumption stored separately from the
+    evidence-backed ``CausalFactor`` rows. It carries no EvidenceRefs and never
+    renders as an established Causal Factor — the Review Surface and exports always
+    label it an assumption. Part of the immutable conclusion (it is finalized once,
+    with the conclusion, and is append-only thereafter).
+    """
+
+    __tablename__ = "human_assumptions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conclusion_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("root_cause_conclusions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Display/sort order so assumptions render in the order the reviewer entered them.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # The reviewer's belief. Not a generated Major Claim and not evidence-backed, so
+    # it carries no EvidenceRefs and is always rendered as an explicit assumption.
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    conclusion: Mapped[RootCauseConclusion] = relationship(back_populates="human_assumptions")
 
 
 class EvaluationRun(Base):

@@ -349,6 +349,24 @@ export interface CausalFactor {
   support_status: ClaimSupportStatus;
   advisory_rank: number | null;
   supporting_evidence: EvidenceRef[];
+  // Reviewer qualifications preserved wherever the factor renders (ADR 0042, PRD
+  // #26 stories 38-41). A partially supported factor carries a Partial-Support
+  // Acknowledgment; a critically challenged failure mechanism carries a
+  // Critical-Challenge Override. `challenge` is the factor hypothesis's full
+  // persisted Hypothesis Challenge so the actual critical challenge stays visible
+  // and the override can be audited against the concern it addresses (story 41).
+  partial_support_acknowledgment: string | null;
+  critical_challenge_override: string | null;
+  challenge: HypothesisChallenge | null;
+}
+
+// A labeled, unevidenced reviewer belief recorded with a conclusion (ADR 0042).
+// Stored separately from the evidence-backed Causal Factors and always rendered as
+// an explicit assumption, never as established fact (PRD #26 story 38).
+export interface HumanAssumption {
+  id: string;
+  statement: string;
+  created_at: string;
 }
 
 // An append-only flag disputing a Root Cause Conclusion (ADR 0040). An open
@@ -379,15 +397,21 @@ export interface RootCauseConclusion {
   failure_mechanism: CausalFactor;
   triggers: CausalFactor[];
   amplifying_conditions: CausalFactor[];
+  // Unevidenced reviewer beliefs, recorded separately from the factors (ADR 0042).
+  human_assumptions: HumanAssumption[];
   disputed: boolean;
   discrepancies: ConclusionDiscrepancy[];
   created_at: string;
 }
 
-// One factor the reviewer assigns when finalizing (ADR 0039).
+// One factor the reviewer assigns when finalizing (ADR 0039 / 0042). A partially
+// supported factor must carry an acknowledgment; a critically challenged failure
+// mechanism must carry an override (the backend enforces when each is required).
 export interface CausalFactorInput {
   hypothesis_id: string;
   role: CausalRole;
+  partial_support_acknowledgment?: string;
+  critical_challenge_override?: string;
 }
 
 // How a Markdown export treats unsupported/assumption claims (ADR 0015): a clean
@@ -709,7 +733,11 @@ export const api = {
   finalizeRunConclusion(
     incidentId: string,
     runId: string,
-    payload: { summary: string; factors: CausalFactorInput[] },
+    payload: {
+      summary: string;
+      factors: CausalFactorInput[];
+      human_assumptions?: string[];
+    },
   ): Promise<RootCauseConclusion> {
     return request<RootCauseConclusion>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion`,

@@ -24,6 +24,7 @@ from .conclusions import (
     causal_factor_read,
     conclusion_read,
     discrepancy_read,
+    human_assumption_read,
 )
 from .remediation import (
     RemediationLinkNotFoundError,
@@ -74,6 +75,7 @@ __all__ = [
     "causal_factor_read",
     "conclusion_read",
     "discrepancy_read",
+    "human_assumption_read",
     "RemediationLinkNotFoundError",
     "RemediationProposalNotFoundError",
     "RemediationService",
