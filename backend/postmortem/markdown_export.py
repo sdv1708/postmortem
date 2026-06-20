@@ -124,7 +124,7 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
     _hypotheses_section(lines, authoritative, mode)
     if mode is ExportMode.AUDIT and review_findings:
         _review_findings_section(lines, review_findings)
-    _remediation_section(lines, authoritative)
+    _remediation_section(lines, postmortem.hypotheses, mode)
 
     lines.append("## Open questions")
     lines.append("")
@@ -326,19 +326,74 @@ def _hypothesis_body(
     lines.append("")
 
 
-def _remediation_section(lines: list[str], authoritative: list[HypothesisRead]) -> None:
+# Human-readable labels for the four Remediation Proposal states (ADR 0041).
+_REMEDIATION_STATE_LABELS = {
+    "accepted": "Accepted",
+    "deferred": "Deferred",
+    "proposed": "Proposed (pending review)",
+    "rejected": "Rejected",
+}
+
+
+def _remediation_section(
+    lines: list[str], hypotheses: list[HypothesisRead], mode: ExportMode
+) -> None:
+    """Render Remediation Proposals by decision state (ADR 0041, PRD stories 51-53).
+
+    Generated remediation is a candidate until a human disposes of it, so the four
+    states are distinguished wherever it renders. A **clean** (shareable) export
+    presents only ``accepted`` proposals — the committed, human-owned follow-up,
+    each annotated with its Causal Factor or Evidence Gap link — and notes how many
+    remain pending without listing rejected ones as if they were work. An **audit**
+    export lists every proposal grouped by state with its link and decision
+    rationale.
+    """
     lines.append("## Remediation")
     lines.append("")
-    items = [
-        f"- {item.description}{f' ({refs})' if (refs := _refs(item.evidence_refs)) else ''}"
-        for hypothesis in authoritative
-        for item in hypothesis.action_items
-    ]
-    if items:
-        lines.extend(items)
-    else:
+    proposals = [item for hypothesis in hypotheses for item in hypothesis.action_items]
+
+    if not proposals:
         lines.append("_No remediation items were recorded._")
-    lines.append("")
+        lines.append("")
+        return
+
+    if mode is ExportMode.CLEAN:
+        accepted = [p for p in proposals if p.review_status == "accepted"]
+        if accepted:
+            lines.extend(_remediation_line(item, mode) for item in accepted)
+        else:
+            lines.append("_No accepted remediation. Generated proposals await review._")
+        pending = sum(1 for p in proposals if p.review_status in ("proposed", "deferred"))
+        if pending:
+            lines.append("")
+            lines.append(
+                f"_{pending} generated proposal(s) are still pending review and are "
+                "not yet committed work._"
+            )
+        lines.append("")
+        return
+
+    # Audit export: every proposal grouped by state with link and rationale.
+    by_state = {state: [p for p in proposals if p.review_status == state] for state in _REMEDIATION_STATE_LABELS}
+    for state, label in _REMEDIATION_STATE_LABELS.items():
+        items = by_state[state]
+        if not items:
+            continue
+        lines.append(f"**{label}:**")
+        lines.extend(_remediation_line(item, mode) for item in items)
+        lines.append("")
+
+
+def _remediation_line(item, mode: ExportMode) -> str:
+    refs = _refs(item.evidence_refs)
+    parts = [f"- {item.description}"]
+    if refs:
+        parts.append(f" ({refs})")
+    if item.link is not None:
+        parts.append(f" — _{item.link.label}_")
+    if mode is ExportMode.AUDIT and item.decision_rationale:
+        parts.append(f" — {item.decision_rationale}")
+    return "".join(parts)
 
 
 def _rank_label(hypothesis: HypothesisRead) -> str:

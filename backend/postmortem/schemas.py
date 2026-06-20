@@ -205,13 +205,81 @@ class ImpactClaimRead(BaseModel):
     evidence_refs: list[EvidenceRefRead]
 
 
+# The review lifecycle of a generated Remediation Proposal (ADR 0041): the
+# generated default 'proposed', then a human disposition. An 'accepted' proposal
+# carries a link to a Causal Factor or Evidence Gap; the others carry none.
+RemediationStatus = Literal["proposed", "accepted", "rejected", "deferred"]
+# What an accepted proposal points at (ADR 0041, PRD story 53).
+RemediationLinkKind = Literal["causal_factor", "evidence_gap"]
+
+
+class RemediationLinkRead(BaseModel):
+    """The Causal Factor or Evidence Gap an accepted proposal links to (ADR 0041).
+
+    Resolved for display: a ``causal_factor`` link carries the factor's role and
+    its hypothesis provenance; an ``evidence_gap`` link carries the
+    ``(challenge, index)`` reference and the gap text resolved from the immutable
+    challenge. ``label`` is a ready-to-render one-line summary of the target.
+    """
+
+    kind: RemediationLinkKind
+    label: str
+    causal_factor_id: str | None = None
+    causal_factor_role: str | None = None
+    hypothesis_id: str | None = None
+    hypothesis_title: str | None = None
+    evidence_gap_challenge_id: str | None = None
+    evidence_gap_index: int | None = None
+    evidence_gap_text: str | None = None
+
+
 class ActionItemRead(BaseModel):
-    """A remediation item tied to a hypothesis (PRD user story 16)."""
+    """A generated Remediation Proposal with its human decision overlay (ADR 0041).
+
+    The generated ``description`` and ``evidence_refs`` are immutable (ADR 0016);
+    ``review_status`` and the decision provenance record the human's disposition.
+    ``link`` is present only on an ``accepted`` proposal and points at why the work
+    matters (PRD story 53).
+    """
 
     id: str
     sequence: int
     description: str
     evidence_refs: list[EvidenceRefRead]
+    review_status: RemediationStatus = "proposed"
+    decision_rationale: str | None = None
+    decided_by: str | None = None
+    decided_by_display: str | None = None
+    decided_at: datetime | None = None
+    link: RemediationLinkRead | None = None
+
+
+class RemediationLinkCreate(BaseModel):
+    """The link an accepted Remediation Proposal must supply (ADR 0041).
+
+    Exactly one target: a ``causal_factor`` link sets ``causal_factor_id``; an
+    ``evidence_gap`` link sets ``evidence_gap_challenge_id`` and
+    ``evidence_gap_index``. The service validates the target belongs to the
+    reviewed incident.
+    """
+
+    kind: RemediationLinkKind
+    causal_factor_id: str | None = None
+    evidence_gap_challenge_id: str | None = None
+    evidence_gap_index: int | None = None
+
+
+class RemediationDecisionCreate(BaseModel):
+    """Command payload to accept, reject, or defer a Remediation Proposal (ADR 0041).
+
+    A decision never edits the generated remediation text (ADR 0016). ``link`` is
+    required when ``decision`` is ``accepted`` and must be omitted otherwise; the
+    service enforces the contract. ``rationale`` is optional reviewer context.
+    """
+
+    decision: RemediationStatus
+    rationale: str | None = Field(default=None, max_length=4000)
+    link: RemediationLinkCreate | None = None
 
 
 class ReviewerNoteRead(BaseModel):

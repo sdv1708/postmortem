@@ -20,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import (
+    ACTION_ITEM_LINK_CHECK,
+    ACTION_ITEM_REVIEW_STATUS_CHECK,
     Base,
     CAUSAL_FACTOR_ROLE_CHECK,
     EVIDENCE_REF_OWNER_CHECK,
@@ -602,14 +604,31 @@ class ImpactClaim(Base):
 
 
 class ActionItem(Base):
-    """A remediation item tied to a hypothesis's context (PRD user story 16).
+    """A generated Remediation Proposal with a human decision overlay (ADR 0041).
 
-    Remediation items are forward-looking actions rather than factual claims
-    about the incident, so they may cite supporting evidence but are not subject
-    to the Major-Claim citation contract.
+    Generated remediation is a forward-looking *candidate*, not committed work
+    (CONTEXT "Remediation Proposal vs Committed Action"): the drafting stage
+    produces the ``description`` (with optional supporting EvidenceRefs, but no
+    Major-Claim citation contract), and a reviewer later disposes of it through an
+    accept / reject / defer decision. The generated ``description`` is never edited
+    by a decision (ADR 0016) — only the overlay below records the human's
+    disposition.
+
+    ``review_status`` is the generated default ``proposed`` until a human decides.
+    An ``accepted`` proposal must point at exactly one of a finalized Causal Factor
+    (``causal_factor_id``) or a documented Evidence Gap
+    (``evidence_gap_challenge_id`` + ``evidence_gap_index``, an index into the
+    Hypothesis Challenge's ``evidence_gaps`` list) from the reviewed incident, so
+    its purpose is explicit (PRD story 53). Any other state carries no link. Unlike
+    a finalized conclusion this row is *mutable*: a reviewer may move a proposal
+    between states as review progresses, so it is not append-only.
     """
 
     __tablename__ = "action_items"
+    __table_args__ = (
+        CheckConstraint(ACTION_ITEM_REVIEW_STATUS_CHECK, name="ck_action_items_review_status"),
+        CheckConstraint(ACTION_ITEM_LINK_CHECK, name="ck_action_items_accepted_link"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     hypothesis_id: Mapped[str] = mapped_column(
@@ -617,6 +636,32 @@ class ActionItem(Base):
     )
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    # Decision overlay (ADR 0041). 'proposed' is the generated default; a human
+    # accept/reject/defer command records the rest. The generated description is
+    # never touched by a decision (ADR 0016).
+    review_status: Mapped[str] = mapped_column(String(16), nullable=False, default="proposed")
+    decision_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Decision provenance from the single-user gate (ADR 0017), null until decided.
+    decided_by_principal: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_by_display: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Link target for an accepted proposal (exactly one set when accepted, both
+    # null otherwise — enforced by ck_action_items_accepted_link). SET NULL on
+    # delete so a (rare, pre-success) target removal degrades gracefully rather
+    # than orphaning; post-decision the targets are immutable in practice.
+    causal_factor_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("causal_factors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    evidence_gap_challenge_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("hypothesis_challenges.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # Index into the linked challenge's evidence_gaps list (Evidence Gaps are
+    # procedural guidance, not addressable rows, ADR 0034): the (challenge, index)
+    # pair is the stable reference and the gap text is resolved at read time.
+    evidence_gap_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     hypothesis: Mapped[Hypothesis] = relationship(back_populates="action_items")
@@ -625,6 +670,8 @@ class ActionItem(Base):
         cascade="all, delete-orphan",
         order_by="EvidenceRef.line_start",
     )
+    causal_factor: Mapped["CausalFactor | None"] = relationship()
+    evidence_gap_challenge: Mapped["HypothesisChallenge | None"] = relationship()
 
 
 class Postmortem(Base):

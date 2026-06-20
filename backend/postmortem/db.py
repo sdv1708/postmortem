@@ -24,6 +24,22 @@ HYPOTHESIS_CHALLENGE_SEVERITY_CHECK = "severity IN ('critical', 'material', 'min
 CAUSAL_FACTOR_ROLE_CHECK = (
     "role IN ('failure_mechanism', 'trigger', 'amplifying_condition')"
 )
+# A Remediation Proposal carries one of four review states (ADR 0041): the
+# generated default 'proposed', or the human dispositions 'accepted', 'rejected',
+# and 'deferred'.
+ACTION_ITEM_REVIEW_STATUS_CHECK = (
+    "review_status IN ('proposed', 'accepted', 'rejected', 'deferred')"
+)
+# An accepted Remediation Proposal must point at exactly one of a finalized Causal
+# Factor or a documented Evidence Gap, so its purpose is explicit (ADR 0041, PRD
+# story 53); any other state carries no link target.
+ACTION_ITEM_LINK_CHECK = """\
+(review_status = 'accepted' AND
+ (CASE WHEN causal_factor_id IS NOT NULL THEN 1 ELSE 0 END) +
+ (CASE WHEN evidence_gap_challenge_id IS NOT NULL THEN 1 ELSE 0 END) = 1)
+OR
+(review_status <> 'accepted' AND causal_factor_id IS NULL
+ AND evidence_gap_challenge_id IS NULL)"""
 
 # Tables that are append-only human judgments (ADR 0039 / 0040): a finalized Root
 # Cause Conclusion and its Causal Factors are never edited, replaced in place, or
@@ -436,6 +452,33 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         },
     )
 
+    # Remediation Proposal decision overlay added in slice #35 (ADR 0041). Existing
+    # generated action items default to 'proposed' with no decision or link until a
+    # reviewer decides. The CHECK constraints (review-status enum, accepted-link)
+    # apply to fresh create_all tables; the service is the always-on trust floor for
+    # databases whose action_items predate them. Nullable FK ddl is valid on both
+    # SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "action_items",
+        {
+            "review_status": "VARCHAR(16) NOT NULL DEFAULT 'proposed'",
+            "decision_rationale": "TEXT",
+            "decided_by_principal": "VARCHAR(255)",
+            "decided_by_display": "VARCHAR(255)",
+            # TIMESTAMP is portable: PostgreSQL-native, and accepted by SQLite (where
+            # the model's DateTime type still governs value conversion). 'DATETIME'
+            # is a SQLite-only spelling and errors on PostgreSQL.
+            "decided_at": "TIMESTAMP",
+            "causal_factor_id": "VARCHAR(36) REFERENCES causal_factors(id) ON DELETE SET NULL",
+            "evidence_gap_challenge_id": (
+                "VARCHAR(36) REFERENCES hypothesis_challenges(id) ON DELETE SET NULL"
+            ),
+            "evidence_gap_index": "INTEGER",
+        },
+    )
+
     indexes = {
         "hypothesis_id": "ix_evidence_refs_hypothesis_id",
         "impact_claim_id": "ix_evidence_refs_impact_claim_id",
@@ -447,6 +490,16 @@ def ensure_schema_compatibility(engine: Engine) -> None:
             connection.execute(
                 text(f"CREATE INDEX IF NOT EXISTS {index} ON evidence_refs ({column})")
             )
+    # Indexes backing the Remediation Proposal link lookups (ADR 0041).
+    if "action_items" in inspect(engine).get_table_names():
+        with engine.begin() as connection:
+            for column, index in (
+                ("causal_factor_id", "ix_action_items_causal_factor_id"),
+                ("evidence_gap_challenge_id", "ix_action_items_evidence_gap_challenge_id"),
+            ):
+                connection.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS {index} ON action_items ({column})")
+                )
     _ensure_evidence_ref_constraints(engine)
     # Root Cause Conclusion tables are created by create_all; make them append-only
     # immutable at the database layer where supported (ADR 0039).

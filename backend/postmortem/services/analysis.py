@@ -530,12 +530,56 @@ def impact_claim_read(claim) -> dict:
     }
 
 
+def _remediation_link_read(item) -> dict | None:
+    """Resolve an accepted Remediation Proposal's link target for display (ADR 0041).
+
+    A ``causal_factor`` link surfaces the factor's causal role and the hypothesis it
+    came from; an ``evidence_gap`` link resolves the gap text from the immutable
+    challenge by its stored index. Returns None when the proposal carries no link
+    (it is not accepted, or the target was removed).
+    """
+    factor = item.causal_factor
+    if factor is not None:
+        title = factor.hypothesis.title if factor.hypothesis is not None else None
+        role_label = factor.role.replace("_", " ")
+        return {
+            "kind": "causal_factor",
+            "label": f"{role_label}: {title}" if title else role_label,
+            "causal_factor_id": factor.id,
+            "causal_factor_role": factor.role,
+            "hypothesis_id": factor.hypothesis_id,
+            "hypothesis_title": title,
+        }
+    challenge = item.evidence_gap_challenge
+    if challenge is not None:
+        gaps = list(challenge.evidence_gaps or [])
+        index = item.evidence_gap_index
+        text = gaps[index] if index is not None and 0 <= index < len(gaps) else None
+        return {
+            "kind": "evidence_gap",
+            "label": f"Evidence gap: {text}" if text else "Evidence gap",
+            "evidence_gap_challenge_id": challenge.id,
+            "evidence_gap_index": index,
+            "evidence_gap_text": text,
+        }
+    return None
+
+
 def _action_item_read(item) -> dict:
+    decided_at = item.decided_at
+    if decided_at is not None and decided_at.tzinfo is None:
+        decided_at = decided_at.replace(tzinfo=timezone.utc)
     return {
         "id": item.id,
         "sequence": item.sequence,
         "description": item.description,
         "evidence_refs": list(item.evidence_refs),
+        "review_status": item.review_status or "proposed",
+        "decision_rationale": item.decision_rationale,
+        "decided_by": item.decided_by_principal,
+        "decided_by_display": item.decided_by_display,
+        "decided_at": decided_at,
+        "link": _remediation_link_read(item),
     }
 
 

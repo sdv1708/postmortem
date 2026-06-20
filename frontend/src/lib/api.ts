@@ -158,11 +158,57 @@ export interface ImpactClaim {
   evidence_refs: EvidenceRef[];
 }
 
+// The review lifecycle of a generated Remediation Proposal (ADR 0041): the
+// generated default "proposed", then a human disposition. An accepted proposal
+// links to a Causal Factor or Evidence Gap; the others carry none.
+export type RemediationStatus = "proposed" | "accepted" | "rejected" | "deferred";
+
+export type RemediationLinkKind = "causal_factor" | "evidence_gap";
+
+// The Causal Factor or Evidence Gap an accepted proposal points at (ADR 0041),
+// resolved for display. `label` is a ready-to-render summary of the target.
+export interface RemediationLink {
+  kind: RemediationLinkKind;
+  label: string;
+  causal_factor_id: string | null;
+  causal_factor_role: string | null;
+  hypothesis_id: string | null;
+  hypothesis_title: string | null;
+  evidence_gap_challenge_id: string | null;
+  evidence_gap_index: number | null;
+  evidence_gap_text: string | null;
+}
+
+// A generated Remediation Proposal with its human decision overlay (ADR 0041).
+// The generated `description` and `evidence_refs` are immutable (ADR 0016); the
+// decision overlay records the human's disposition. `link` is present only on an
+// accepted proposal and points at why the work matters (PRD story 53).
 export interface ActionItem {
   id: string;
   sequence: number;
   description: string;
   evidence_refs: EvidenceRef[];
+  review_status: RemediationStatus;
+  decision_rationale: string | null;
+  decided_by: string | null;
+  decided_by_display: string | null;
+  decided_at: string | null;
+  link: RemediationLink | null;
+}
+
+// The link an accepted proposal must supply: exactly one target (ADR 0041).
+export interface RemediationLinkInput {
+  kind: RemediationLinkKind;
+  causal_factor_id?: string;
+  evidence_gap_challenge_id?: string;
+  evidence_gap_index?: number;
+}
+
+// Command payload to accept, reject, or defer a Remediation Proposal (ADR 0041).
+export interface RemediationDecisionInput {
+  decision: RemediationStatus;
+  rationale?: string;
+  link?: RemediationLinkInput;
 }
 
 export interface ReviewerNote {
@@ -678,6 +724,24 @@ export const api = {
   ): Promise<ConclusionDiscrepancy> {
     return request<ConclusionDiscrepancy>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion/discrepancies`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  },
+
+  listRunRemediation(incidentId: string, runId: string): Promise<ActionItem[]> {
+    return request<ActionItem[]>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/remediation`,
+    );
+  },
+
+  decideRunRemediation(
+    incidentId: string,
+    runId: string,
+    actionItemId: string,
+    payload: RemediationDecisionInput,
+  ): Promise<ActionItem> {
+    return request<ActionItem>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/remediation/${actionItemId}/decision`,
       { method: "POST", body: JSON.stringify(payload) },
     );
   },
