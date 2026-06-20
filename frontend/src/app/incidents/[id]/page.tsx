@@ -8,6 +8,7 @@ import {
   api,
   isTerminalRunStatus,
   RUN_STAGES,
+  type ActionItem,
   type AnalysisRun,
   type Artifact,
   type ArtifactSourceType,
@@ -20,6 +21,9 @@ import {
   type EvidenceRef,
   type ExportMode,
   type Hypothesis,
+  type RemediationDecisionInput,
+  type RemediationLinkInput,
+  type RemediationStatus,
   type HypothesisChallenge,
   type HypothesisReviewStatus,
   type ImpactClaim,
@@ -904,6 +908,9 @@ function RunStatusCard({
         <RunConclusion incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
       )}
       {run.status === "succeeded" && (
+        <RunRemediation incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+      )}
+      {run.status === "succeeded" && (
         <RunPostmortem incidentId={incidentId} runId={run.id} />
       )}
       {run.status === "succeeded" && (
@@ -1615,11 +1622,17 @@ function HypothesisCard({
 
         {hypothesis.action_items.length > 0 && (
           <div className="space-y-1.5">
-            <p className="label">Remediation</p>
+            <p className="label">Remediation proposals</p>
             <ul className="space-y-2">
               {hypothesis.action_items.map((item) => (
                 <li key={item.id} className="text-sm text-slate-700">
-                  <span>{item.description}</span>
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <span>{item.description}</span>
+                    <RemediationStatusBadge status={item.review_status} />
+                  </span>
+                  {item.link && (
+                    <p className="mt-0.5 text-xs text-slate-500">↳ {item.link.label}</p>
+                  )}
                   {item.evidence_refs.length > 0 && (
                     <EvidenceRefList
                       refs={item.evidence_refs}
@@ -1629,6 +1642,9 @@ function HypothesisCard({
                 </li>
               ))}
             </ul>
+            <p className="text-xs text-slate-400">
+              Decide each proposal in the Remediation review panel below.
+            </p>
           </div>
         )}
 
@@ -1774,6 +1790,277 @@ function RunConclusion({
         void queryClient.invalidateQueries({ queryKey: ["run-postmortem", incidentId, runId] });
       }}
     />
+  );
+}
+
+// Review of generated Remediation Proposals (ADR 0041). Generated remediation is a
+// candidate, not committed work (CONTEXT "Remediation Proposal vs Committed
+// Action"): a reviewer accepts, rejects, or defers each proposal after the run, and
+// an accepted one must link to a finalized Causal Factor or a documented Evidence
+// Gap (PRD #26 stories 51-53). This review is separate from the falsification round.
+type RemediationLinkOption = {
+  value: string;
+  label: string;
+  payload: RemediationLinkInput;
+};
+
+function RunRemediation({
+  incidentId,
+  runId,
+  onFocusEvidence,
+}: {
+  incidentId: string;
+  runId: string;
+  onFocusEvidence: (ref: EvidenceRef) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const remediationKey = ["run-remediation", incidentId, runId];
+  const proposalsQuery = useQuery<ActionItem[]>({
+    queryKey: remediationKey,
+    queryFn: () => api.listRunRemediation(incidentId, runId),
+  });
+  // The finalized conclusion (if any) supplies Causal Factor link targets; a 404
+  // means none is finalized yet, which is fine — Evidence Gaps may still be linked.
+  const conclusionQuery = useQuery<RootCauseConclusion | null>({
+    queryKey: ["run-conclusion", incidentId, runId],
+    queryFn: async () => {
+      try {
+        return await api.getRunConclusion(incidentId, runId);
+      } catch {
+        return null;
+      }
+    },
+  });
+  // Hypotheses carry the falsifier's Evidence Gaps (via their challenge), the other
+  // accepted-link target.
+  const hypothesesQuery = useQuery<Hypothesis[]>({
+    queryKey: ["run-hypotheses", incidentId, runId],
+    queryFn: () => api.listRunHypotheses(incidentId, runId),
+  });
+
+  const decideMutation = useMutation({
+    mutationFn: ({
+      actionItemId,
+      payload,
+    }: {
+      actionItemId: string;
+      payload: RemediationDecisionInput;
+    }) => api.decideRunRemediation(incidentId, runId, actionItemId, payload),
+    onMutate: () => setError(null),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<ActionItem[]>(remediationKey, (current) =>
+        current?.map((p) => (p.id === updated.id ? updated : p)),
+      );
+      // Keep the inline badges under each hypothesis and the export in sync.
+      void queryClient.invalidateQueries({ queryKey: ["run-hypotheses", incidentId, runId] });
+      void queryClient.invalidateQueries({ queryKey: ["run-postmortem", incidentId, runId] });
+    },
+    onError: (err) =>
+      setError(err instanceof Error ? err.message : "The decision could not be recorded."),
+  });
+
+  const linkOptions = useMemo<RemediationLinkOption[]>(() => {
+    const options: RemediationLinkOption[] = [];
+    const conclusion = conclusionQuery.data ?? null;
+    if (conclusion) {
+      const factors = [
+        conclusion.failure_mechanism,
+        ...conclusion.triggers,
+        ...conclusion.amplifying_conditions,
+      ];
+      for (const factor of factors) {
+        options.push({
+          value: `cf:${factor.id}`,
+          label: `Causal factor · ${factor.role.replace(/_/g, " ")}: ${factor.title}`,
+          payload: { kind: "causal_factor", causal_factor_id: factor.id },
+        });
+      }
+    }
+    for (const hypothesis of hypothesesQuery.data ?? []) {
+      const challenge = hypothesis.challenge;
+      if (!challenge) {
+        continue;
+      }
+      challenge.evidence_gaps.forEach((gap, index) => {
+        options.push({
+          value: `eg:${challenge.id}:${index}`,
+          label: `Evidence gap · ${gap}`,
+          payload: {
+            kind: "evidence_gap",
+            evidence_gap_challenge_id: challenge.id,
+            evidence_gap_index: index,
+          },
+        });
+      });
+    }
+    return options;
+  }, [conclusionQuery.data, hypothesesQuery.data]);
+
+  if (proposalsQuery.isPending) {
+    return (
+      <div className="border-t border-slate-200 px-5 py-3 text-xs text-slate-500">
+        <Spinner /> Loading remediation proposals…
+      </div>
+    );
+  }
+
+  const proposals = proposalsQuery.data ?? [];
+
+  return (
+    <div className="border-t border-slate-200">
+      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+        Remediation review · {proposals.length}
+      </p>
+      <p className="px-5 pt-1 text-xs text-slate-500">
+        Generated remediation is a proposal, not committed work. Accept, reject, or
+        defer each one; accepting requires linking it to a finalized causal factor or
+        a documented evidence gap.
+      </p>
+      {error && (
+        <p className="mx-5 mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </p>
+      )}
+      {proposals.length === 0 ? (
+        <p className="px-5 py-3 text-xs text-slate-500">
+          No remediation was generated for this run.
+        </p>
+      ) : (
+        <ul className="space-y-3 p-5">
+          {proposals.map((proposal) => (
+            <li key={proposal.id}>
+              <RemediationProposalRow
+                proposal={proposal}
+                linkOptions={linkOptions}
+                isDeciding={
+                  decideMutation.isPending &&
+                  decideMutation.variables?.actionItemId === proposal.id
+                }
+                onDecide={(payload) =>
+                  decideMutation.mutate({ actionItemId: proposal.id, payload })
+                }
+                onFocusEvidence={onFocusEvidence}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function RemediationProposalRow({
+  proposal,
+  linkOptions,
+  isDeciding,
+  onDecide,
+  onFocusEvidence,
+}: {
+  proposal: ActionItem;
+  linkOptions: RemediationLinkOption[];
+  isDeciding: boolean;
+  onDecide: (payload: RemediationDecisionInput) => void;
+  onFocusEvidence: (ref: EvidenceRef) => void;
+}) {
+  const [linkValue, setLinkValue] = useState("");
+  const [rationale, setRationale] = useState(proposal.decision_rationale ?? "");
+
+  function accept() {
+    const option = linkOptions.find((o) => o.value === linkValue);
+    if (!option) {
+      return;
+    }
+    onDecide({
+      decision: "accepted",
+      link: option.payload,
+      rationale: rationale.trim() || undefined,
+    });
+  }
+
+  function decideWithout(decision: RemediationStatus) {
+    onDecide({ decision, rationale: rationale.trim() || undefined });
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <span className="inline-flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-slate-800">{proposal.description}</span>
+            <RemediationStatusBadge status={proposal.review_status} />
+          </span>
+          {proposal.link && (
+            <p className="mt-0.5 text-xs text-slate-500">↳ {proposal.link.label}</p>
+          )}
+          {proposal.decided_by && (
+            <p className="mt-0.5 text-xs text-slate-400">
+              Decided by {proposal.decided_by_display || proposal.decided_by}
+              {proposal.decided_at
+                ? ` on ${new Date(proposal.decided_at).toLocaleString()}`
+                : ""}
+            </p>
+          )}
+          {proposal.evidence_refs.length > 0 && (
+            <EvidenceRefList refs={proposal.evidence_refs} onFocusEvidence={onFocusEvidence} />
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            aria-label={`Accept link target for ${proposal.description}`}
+            value={linkValue}
+            onChange={(event) => setLinkValue(event.target.value)}
+            className="min-w-0 flex-1 rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+          >
+            <option value="">Link to a causal factor or evidence gap…</option>
+            {linkOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={accept}
+            disabled={isDeciding || !linkValue}
+            className="button-secondary"
+            title={
+              linkOptions.length === 0
+                ? "Finalize a conclusion or note an evidence gap first to link an accepted proposal."
+                : undefined
+            }
+          >
+            Accept proposal
+          </button>
+          <button
+            type="button"
+            onClick={() => decideWithout("rejected")}
+            disabled={isDeciding || proposal.review_status === "rejected"}
+            className="button-secondary"
+          >
+            Reject proposal
+          </button>
+          <button
+            type="button"
+            onClick={() => decideWithout("deferred")}
+            disabled={isDeciding || proposal.review_status === "deferred"}
+            className="button-secondary"
+          >
+            Defer proposal
+          </button>
+        </div>
+        <input
+          type="text"
+          value={rationale}
+          onChange={(event) => setRationale(event.target.value)}
+          placeholder="Optional decision rationale"
+          className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+        />
+      </div>
+    </div>
   );
 }
 
@@ -2387,6 +2674,20 @@ function ReviewStatusBadge({ status }: { status: HypothesisReviewStatus }) {
     rejected: "bg-rose-50 text-rose-700 ring-rose-200",
   };
   return <span className={`badge ${map[status]}`}>{status}</span>;
+}
+
+// The decision state of a Remediation Proposal (ADR 0041): generated 'proposed'
+// until a human accepts, rejects, or defers it.
+const REMEDIATION_STATUS_BADGE: Record<RemediationStatus, { label: string; cls: string }> = {
+  proposed: { label: "proposed", cls: "bg-slate-100 text-slate-600 ring-slate-200" },
+  accepted: { label: "accepted", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
+  rejected: { label: "rejected", cls: "bg-rose-50 text-rose-700 ring-rose-200" },
+  deferred: { label: "deferred", cls: "bg-amber-50 text-amber-700 ring-amber-200" },
+};
+
+function RemediationStatusBadge({ status }: { status: RemediationStatus }) {
+  const config = REMEDIATION_STATUS_BADGE[status];
+  return <span className={`badge ${config.cls}`}>{config.label}</span>;
 }
 
 // Semantic claim-support verdict (ADR 0014). `unevaluated` shows nothing — the

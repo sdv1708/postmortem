@@ -25,6 +25,13 @@ from .conclusions import (
     conclusion_read,
     discrepancy_read,
 )
+from .remediation import (
+    RemediationLinkNotFoundError,
+    RemediationProposalNotFoundError,
+    RemediationService,
+    RemediationValidationError,
+    remediation_proposal_read,
+)
 from .stages import PipelineStageRunner
 from ..retrieval import (
     DeterministicChunkArtifactRetrievalStrategy,
@@ -67,6 +74,11 @@ __all__ = [
     "causal_factor_read",
     "conclusion_read",
     "discrepancy_read",
+    "RemediationLinkNotFoundError",
+    "RemediationProposalNotFoundError",
+    "RemediationService",
+    "RemediationValidationError",
+    "remediation_proposal_read",
     "hypothesis_read",
     "impact_claim_read",
     "model_call_record_read",

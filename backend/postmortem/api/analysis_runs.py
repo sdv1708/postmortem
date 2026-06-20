@@ -18,9 +18,11 @@ from ..schemas import (
     HypothesisRead,
     HypothesisReviewCreate,
     ImpactClaimRead,
+    ActionItemRead,
     MarkdownExportCreate,
     MarkdownExportRead,
     PostmortemRead,
+    RemediationDecisionCreate,
     ReviewerNoteCreate,
     ReviewerNoteRead,
     RootCauseConclusionCreate,
@@ -41,11 +43,16 @@ from ..services import (
     IncidentNotFoundError,
     NoArtifactsError,
     PostmortemNotFoundError,
+    RemediationLinkNotFoundError,
+    RemediationProposalNotFoundError,
+    RemediationService,
+    RemediationValidationError,
     analysis_run_read,
     conclusion_read,
     discrepancy_read,
     hypothesis_read,
     impact_claim_read,
+    remediation_proposal_read,
     reviewer_note_read,
     timeline_event_read,
 )
@@ -435,3 +442,64 @@ def raise_run_conclusion_discrepancy(
     except ConclusionValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     return ConclusionDiscrepancyRead.model_validate(discrepancy_read(discrepancy))
+
+
+@router.get("/{run_id}/remediation", response_model=list[ActionItemRead])
+def list_run_remediation(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> list[ActionItemRead]:
+    """Every Remediation Proposal for a run, with its decision state (ADR 0041).
+
+    Backs the Review Surface remediation panel: generated remediation presented as
+    proposed/accepted/rejected/deferred so a reviewer can dispose of each candidate
+    (PRD #26 stories 51-53). The same proposals also stay nested under their
+    hypothesis in the structured Postmortem.
+    """
+    try:
+        proposals = RemediationService(db).list_proposals(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    return [ActionItemRead.model_validate(remediation_proposal_read(p)) for p in proposals]
+
+
+@router.post(
+    "/{run_id}/remediation/{action_item_id}/decision",
+    response_model=ActionItemRead,
+)
+def decide_run_remediation(
+    incident_id: str,
+    run_id: str,
+    action_item_id: str,
+    payload: RemediationDecisionCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> ActionItemRead:
+    """Accept, reject, or defer a Remediation Proposal (ADR 0041 / 0022).
+
+    A deliberate human command that never edits the generated remediation text
+    (ADR 0016). Accepting requires a link to a Causal Factor or documented Evidence
+    Gap from the reviewed incident (PRD story 53); the other decisions carry none.
+    This review is separate from the bounded Falsification Round.
+    """
+    try:
+        proposal = RemediationService(db).decide(
+            incident_id, run_id, action_item_id, payload, principal
+        )
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except RemediationProposalNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="remediation proposal not found"
+        )
+    except RemediationLinkNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="remediation link target not found for this incident",
+        )
+    except RemediationValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return ActionItemRead.model_validate(remediation_proposal_read(proposal))

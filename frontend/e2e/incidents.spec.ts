@@ -247,6 +247,37 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   expect(finalizedMarkdown).toContain("**Status:** finalized");
   expect(finalizedMarkdown).not.toContain("Draft: Root cause not finalized");
 
+  // Remediation review (ADR 0041, #35): generated remediation is a proposal, not
+  // committed work. The reviewer accepts one — linking it to the finalized causal
+  // factor — and the four states are distinguished in the panel and in exports.
+  await expect(page.getByText(/Remediation review ·/)).toBeVisible();
+  const remediationLink = page.getByLabel(/Accept link target/).first();
+  await expect(remediationLink).toBeVisible();
+  // Option index 1 is the first real link target; the finalized causal factor
+  // sorts ahead of evidence gaps in the option list.
+  await remediationLink.selectOption({ index: 1 });
+  await page.getByRole("button", { name: "Accept proposal" }).first().click();
+  // The decision is recorded with provenance and never edits the generated text.
+  await expect(page.getByText(/Decided by human/).first()).toBeVisible();
+
+  // A clean export now lists the accepted remediation as committed follow-up; an
+  // audit export groups every proposal by state (AC #4).
+  const remediationClean = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export clean" }).click(),
+  ]).then(([d]) => d);
+  const remediationCleanMarkdown = await streamToString(await remediationClean.createReadStream());
+  expect(remediationCleanMarkdown).toContain("## Remediation");
+
+  const remediationAudit = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export audit" }).click(),
+  ]).then(([d]) => d);
+  const remediationAuditMarkdown = await streamToString(
+    await remediationAudit.createReadStream(),
+  );
+  expect(remediationAuditMarkdown).toContain("**Accepted:**");
+
   // Flagging an immutable conclusion as disputed (ADR 0040, #34): a reviewer records
   // an append-only Conclusion Discrepancy without editing the conclusion. The
   // conclusion is preserved but returns to unresolved, no longer authoritative.

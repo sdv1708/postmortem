@@ -242,9 +242,13 @@ def test_clean_export_omits_unsupported_claims():
     # The unsupported claim must not appear as fact in a clean export (ADR 0015).
     assert "Sunspot interference theory" not in markdown
     assert "Review findings" not in markdown
-    # Supported + partial impact and remediation are part of the clean narrative.
+    # Supported + partial impact is part of the clean narrative.
     assert "Users saw elevated 500s" in markdown
-    assert "Add pool-size regression alert" in markdown
+    # Generated remediation is a candidate, not committed work (ADR 0041): an
+    # undecided ('proposed') proposal is not listed in a clean export; it is noted
+    # as pending review instead.
+    assert "Add pool-size regression alert" not in markdown
+    assert "pending review" in markdown
 
 
 def test_audit_export_includes_unsupported_claims_labeled():
