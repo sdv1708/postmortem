@@ -223,11 +223,22 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   await page
     .getByPlaceholder(/Summarize the causal account/)
     .fill("The v184 connection-pool refactor regressed connection handling.");
+  // Human Assumptions (ADR 0042, #36): an unevidenced reviewer belief recorded
+  // separately from the evidence-backed factors so it never reads as established
+  // fact (PRD #26 story 38).
+  await page
+    .getByLabel("Human assumptions")
+    .fill("The on-call likely restarted the service manually before the rollback.");
   await page.getByRole("button", { name: "Finalize root cause conclusion" }).click();
 
   await expect(page.getByText("finalized by human")).toBeVisible();
   await expect(
     page.getByText("The v184 connection-pool refactor regressed connection handling."),
+  ).toBeVisible();
+  // The human assumption renders in its own labeled section, never as a causal factor.
+  await expect(page.getByText("not evidence-backed")).toBeVisible();
+  await expect(
+    page.getByText("The on-call likely restarted the service manually before the rollback."),
   ).toBeVisible();
   // The failure mechanism is shown as the human conclusion, separate from the
   // advisory ranking above.
@@ -246,6 +257,11 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   expect(finalizedMarkdown).toContain("## Root Cause Conclusion");
   expect(finalizedMarkdown).toContain("**Status:** finalized");
   expect(finalizedMarkdown).not.toContain("Draft: Root cause not finalized");
+  // The labeled human assumption is preserved in the export (ADR 0042, #36).
+  expect(finalizedMarkdown).toContain("Human assumptions (not evidence-backed):");
+  expect(finalizedMarkdown).toContain(
+    "The on-call likely restarted the service manually before the rollback.",
+  );
 
   // Remediation review (ADR 0041, #35): generated remediation is a proposal, not
   // committed work. The reviewer accepts one — linking it to the finalized causal

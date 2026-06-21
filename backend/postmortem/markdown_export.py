@@ -240,16 +240,25 @@ def _conclusion_section(
     lines.append(conclusion.summary)
     lines.append("")
     lines.append("**Failure mechanism:**")
-    lines.append(_causal_factor_line(conclusion.failure_mechanism))
+    _emit_causal_factor(lines, conclusion.failure_mechanism)
     if conclusion.triggers:
         lines.append("")
         lines.append("**Triggers:**")
-        lines.extend(_causal_factor_line(factor) for factor in conclusion.triggers)
+        for factor in conclusion.triggers:
+            _emit_causal_factor(lines, factor)
     if conclusion.amplifying_conditions:
         lines.append("")
         lines.append("**Amplifying conditions:**")
+        for factor in conclusion.amplifying_conditions:
+            _emit_causal_factor(lines, factor)
+    if conclusion.human_assumptions:
+        # Unevidenced reviewer beliefs, rendered separately from the evidence-backed
+        # factors and always labeled so they never read as established fact (ADR 0042,
+        # PRD #26 story 38).
+        lines.append("")
+        lines.append("**Human assumptions (not evidence-backed):**")
         lines.extend(
-            _causal_factor_line(factor) for factor in conclusion.amplifying_conditions
+            f"- {assumption.statement}" for assumption in conclusion.human_assumptions
         )
     if conclusion.discrepancies:
         # Audit-only: preserve the recorded disagreement alongside the conclusion.
@@ -264,10 +273,44 @@ def _conclusion_section(
     lines.append("")
 
 
-def _causal_factor_line(factor: CausalFactorRead) -> str:
+def _emit_causal_factor(lines: list[str], factor: CausalFactorRead) -> None:
+    """Render a Causal Factor bullet, preserving its qualifications (ADR 0042).
+
+    A critically challenged factor is labeled wherever it is rendered, the actual
+    critical challenge content (challenged claim, counterclaims, evidence gaps,
+    falsification tests) is preserved, and its Critical-Challenge Override is shown
+    with non-definitive wording, so finalization never erases the unresolved concern
+    and the override can be audited against it (PRD #26 stories 40-41). A partially
+    supported factor shows its Partial-Support Acknowledgment so the uncertainty
+    stays visible (stories 38-39).
+    """
+    challenge = factor.challenge
+    is_critical = challenge is not None and challenge.severity == "critical"
     refs = _refs(factor.supporting_evidence)
     suffix = f" ({refs})" if refs else ""
-    return f"- {factor.title}{suffix}"
+    label = " _(critically challenged)_" if is_critical else ""
+    lines.append(f"- {factor.title}{label}{suffix}")
+    if factor.partial_support_acknowledgment:
+        lines.append(
+            f"  - _Partial support — {factor.partial_support_acknowledgment}_"
+        )
+    if is_critical:
+        # Preserve what the critical challenge actually was, so the override is
+        # auditable against the concern it addresses (PRD #26 story 41).
+        lines.append(f"  - _Critical challenge: {challenge.challenged_claim}_")
+        for counterclaim in challenge.counterclaims:
+            crefs = _refs(counterclaim.evidence_refs)
+            csuffix = f" ({crefs})" if crefs else ""
+            lines.append(f"    - Counterclaim: {counterclaim.statement}{csuffix}")
+        for gap in challenge.evidence_gaps:
+            lines.append(f"    - Evidence gap: {gap}")
+        for test in challenge.falsification_tests:
+            lines.append(f"    - Falsification test: {test}")
+    if factor.critical_challenge_override:
+        lines.append(
+            "  - _Included with override (not definitive): "
+            f"{factor.critical_challenge_override}_"
+        )
 
 
 def _hypotheses_section(

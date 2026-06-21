@@ -50,6 +50,9 @@ _IMMUTABLE_APPEND_ONLY_TABLES = (
     "root_cause_conclusions",
     "causal_factors",
     "conclusion_discrepancies",
+    # Human Assumptions are finalized with the immutable conclusion and never edited
+    # (ADR 0042): a reviewer belief, once recorded, is part of the audit record.
+    "human_assumptions",
 )
 
 
@@ -409,6 +412,22 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         {
             "advisory_rank": "INTEGER",
             "ranking_rationale": "JSON",
+        },
+    )
+
+    # Conclusion qualification columns added in slice #36 (ADR 0042): a partially
+    # supported Causal Factor carries a Partial-Support Acknowledgment and a
+    # critically challenged Failure Mechanism carries a Critical-Challenge Override.
+    # Both are nullable — only required by the service when the factor's hypothesis
+    # warrants them — so existing causal_factors rows need no backfill. TEXT ddl is
+    # valid on both SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "causal_factors",
+        {
+            "partial_support_acknowledgment": "TEXT",
+            "critical_challenge_override": "TEXT",
         },
     )
 

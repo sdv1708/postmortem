@@ -41,7 +41,9 @@ from tests._fakes import (
 PRINCIPAL = Principal(id="reviewer-1", display="Reviewer One")
 
 
-def _succeeded_run(session, *, titles=("Primary cause", "Alternative cause"), verifier=None):
+def _succeeded_run(
+    session, *, titles=("Primary cause", "Alternative cause"), verifier=None, falsifier=None
+):
     """Seed a succeeded run with the given hypotheses (each line-cited)."""
     incident = IncidentService(session).create(IncidentCreate(title="Ambiguous"))
     artifact = ArtifactService(session).create(
@@ -75,7 +77,7 @@ def _succeeded_run(session, *, titles=("Primary cause", "Alternative cause"), ve
         llm_client=FakeLLMClient([payload], label="fake-model"),
         claim_support_verifier=verifier or FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(impact),
-        falsifier=FakeFalsifier(),
+        falsifier=falsifier or FakeFalsifier(),
     )
     run = service.start_run(incident.id, AnalysisRunCreate())
     session.commit()
@@ -550,6 +552,258 @@ def test_raise_discrepancy_requires_a_finalized_conclusion(fresh_session):
             ConclusionDiscrepancyCreate(explanation="Nothing to dispute yet."),
             PRINCIPAL,
         )
+
+
+def _partial_verifier(*titles):
+    """A claim-support verifier that judges the named hypotheses PARTIAL."""
+    wanted = set(titles)
+
+    def judge(claim):
+        for title in wanted:
+            if claim.claim_text.startswith(title):
+                return ClaimSupportJudgment(ClaimSupportStatus.PARTIAL, "Partly shown.")
+        return ClaimSupportJudgment(ClaimSupportStatus.SUPPORTED, "ok")
+
+    return FakeClaimSupportVerifier(judge)
+
+
+def test_finalize_requires_partial_support_acknowledgment(fresh_session):
+    # A partially supported Causal Factor cannot be finalized without an
+    # acknowledgment describing supported and uncertain portions (PRD #26 stories
+    # 38-39).
+    service, incident, run = _succeeded_run(
+        fresh_session, verifier=_partial_verifier("Primary cause")
+    )
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    assert target.support_status == "partial"
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+    svc = ConclusionService(fresh_session)
+
+    # Missing acknowledgment is rejected.
+    with pytest.raises(ConclusionValidationError, match="partial-support acknowledgment"):
+        svc.finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism")],
+            ),
+            PRINCIPAL,
+        )
+    fresh_session.rollback()
+
+    # A blank-only acknowledgment is treated as missing.
+    _accept(service, incident, run, target)
+    with pytest.raises(ConclusionValidationError, match="partial-support acknowledgment"):
+        svc.finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[
+                    CausalFactorCreate(
+                        hypothesis_id=target.id,
+                        role="failure_mechanism",
+                        partial_support_acknowledgment="   ",
+                    )
+                ],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_persists_partial_support_acknowledgment(fresh_session):
+    service, incident, run = _succeeded_run(
+        fresh_session, verifier=_partial_verifier("Primary cause")
+    )
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+
+    conclusion = ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="Partly evidenced mechanism.",
+            factors=[
+                CausalFactorCreate(
+                    hypothesis_id=target.id,
+                    role="failure_mechanism",
+                    partial_support_acknowledgment=(
+                        "Logs confirm the pool exhausted; the deploy link is unconfirmed."
+                    ),
+                )
+            ],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    shaped = conclusion_read(conclusion)["failure_mechanism"]
+    assert shaped["support_status"] == "partial"
+    assert "unconfirmed" in shaped["partial_support_acknowledgment"]
+
+
+def test_supported_factor_does_not_store_acknowledgment(fresh_session):
+    # A fully supported factor needs no acknowledgment; any stray text is dropped so
+    # the conclusion carries no misleading qualification.
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+
+    conclusion = ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="Fully evidenced.",
+            factors=[
+                CausalFactorCreate(
+                    hypothesis_id=target.id,
+                    role="failure_mechanism",
+                    partial_support_acknowledgment="ignored because support is full",
+                )
+            ],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+    assert conclusion_read(conclusion)["failure_mechanism"][
+        "partial_support_acknowledgment"
+    ] is None
+
+
+def test_finalize_requires_critical_challenge_override_for_failure_mechanism(fresh_session):
+    # A critically challenged hypothesis cannot be the Failure Mechanism without an
+    # override addressing the unresolved critical challenge (PRD #26 stories 40-41).
+    service, incident, run = _succeeded_run(
+        fresh_session, falsifier=FakeFalsifier(severity="critical")
+    )
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    assert target.challenge.severity == "critical"
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+
+    with pytest.raises(ConclusionValidationError, match="critical-challenge override"):
+        ConclusionService(fresh_session).finalize(
+            incident.id,
+            run.id,
+            RootCauseConclusionCreate(
+                summary="x",
+                factors=[CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism")],
+            ),
+            PRINCIPAL,
+        )
+
+
+def test_finalize_persists_critical_challenge_override_and_preserves_challenge(fresh_session):
+    service, incident, run = _succeeded_run(
+        fresh_session, falsifier=FakeFalsifier(severity="critical")
+    )
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+
+    conclusion = ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="Concluded despite the open critical challenge.",
+            factors=[
+                CausalFactorCreate(
+                    hypothesis_id=target.id,
+                    role="failure_mechanism",
+                    critical_challenge_override=(
+                        "The timing concern is addressed by the rollback log at 14:55."
+                    ),
+                )
+            ],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    shaped = conclusion_read(conclusion)["failure_mechanism"]
+    # The override is recorded and the actual critical challenge is preserved, never
+    # erased: the read model carries the full challenge, not just a severity label, so
+    # the override can be audited against the concern it addresses (story 41).
+    assert "rollback log" in shaped["critical_challenge_override"]
+    assert shaped["challenge"]["severity"] == "critical"
+    assert shaped["challenge"]["challenged_claim"] == "Challenge of: Primary cause"
+
+
+def test_critically_challenged_hypothesis_allowed_as_trigger_without_override(fresh_session):
+    # Challenge Severity 'critical' blocks the Failure Mechanism role only; a
+    # critically challenged hypothesis may still be a Trigger without an override.
+    service, incident, run = _succeeded_run(
+        fresh_session,
+        titles=("Mechanism", "Initiating event"),
+        falsifier=FakeFalsifier(severity="critical"),
+    )
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, *hyps.values())
+    fresh_session.commit()
+
+    conclusion = ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="Mechanism with a critically challenged trigger.",
+            factors=[
+                CausalFactorCreate(
+                    hypothesis_id=hyps["Mechanism"].id,
+                    role="failure_mechanism",
+                    critical_challenge_override="Addressed by the rollback log.",
+                ),
+                CausalFactorCreate(
+                    hypothesis_id=hyps["Initiating event"].id, role="trigger"
+                ),
+            ],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+    trigger = conclusion_read(conclusion)["triggers"][0]
+    assert trigger["critical_challenge_override"] is None
+    assert trigger["challenge"]["severity"] == "critical"
+
+
+def test_finalize_records_human_assumptions_separately(fresh_session):
+    # Unevidenced beliefs are stored separately from factors and never become
+    # Causal Factors (PRD #26 story 38).
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    target = hyps["Primary cause"]
+    _accept(service, incident, run, target)
+    fresh_session.commit()
+
+    conclusion = ConclusionService(fresh_session).finalize(
+        incident.id,
+        run.id,
+        RootCauseConclusionCreate(
+            summary="Concluded with one labeled assumption.",
+            factors=[CausalFactorCreate(hypothesis_id=target.id, role="failure_mechanism")],
+            human_assumptions=[
+                "The on-call likely restarted the service manually.",
+                "   ",  # blanks are dropped
+            ],
+        ),
+        PRINCIPAL,
+    )
+    fresh_session.commit()
+
+    shaped = conclusion_read(conclusion)
+    assert len(shaped["human_assumptions"]) == 1
+    assert shaped["human_assumptions"][0]["statement"].startswith("The on-call")
+    # The assumption is not among the evidence-backed factors.
+    factor_titles = {shaped["failure_mechanism"]["title"]}
+    assert shaped["human_assumptions"][0]["statement"] not in factor_titles
 
 
 def test_raise_discrepancy_rejects_cross_incident_run(fresh_session):

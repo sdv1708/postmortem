@@ -8,6 +8,7 @@ from postmortem.incident_facts import FactsImpactClaim
 from postmortem.llm import FakeLLMClient
 from postmortem.rca import RcaEvidenceRef
 from postmortem.services import AnalysisService
+from postmortem.verification import ClaimSupportJudgment, ClaimSupportStatus
 
 from tests._fakes import (
     FakeClaimSupportVerifier,
@@ -16,7 +17,27 @@ from tests._fakes import (
 )
 
 
-def _seed_succeeded_run(app, client, auth_headers, *, titles=("Primary cause", "Alternative cause")):
+def _partial_verifier(*titles):
+    wanted = set(titles)
+
+    def judge(claim):
+        for title in wanted:
+            if claim.claim_text.startswith(title):
+                return ClaimSupportJudgment(ClaimSupportStatus.PARTIAL, "Partly shown.")
+        return ClaimSupportJudgment(ClaimSupportStatus.SUPPORTED, "ok")
+
+    return FakeClaimSupportVerifier(judge)
+
+
+def _seed_succeeded_run(
+    app,
+    client,
+    auth_headers,
+    *,
+    titles=("Primary cause", "Alternative cause"),
+    verifier=None,
+    falsifier=None,
+):
     """Queue a run via HTTP, then execute it with seeded fakes (mirrors hypotheses tests)."""
     captured: list[str] = []
     app.state.run_scheduler = lambda background_tasks, session_factory, run_id: captured.append(
@@ -65,9 +86,9 @@ def _seed_succeeded_run(app, client, auth_headers, *, titles=("Primary cause", "
         run = AnalysisService(
             session,
             llm_client=FakeLLMClient([payload], label="fake-model"),
-            claim_support_verifier=FakeClaimSupportVerifier(),
+            claim_support_verifier=verifier or FakeClaimSupportVerifier(),
             incident_fact_extractor=FakeIncidentFactExtractor(impact),
-            falsifier=FakeFalsifier(),
+            falsifier=falsifier or FakeFalsifier(),
         ).execute_run(run_id, commit_progress=True)
         assert run.status == "succeeded"
         session.commit()
@@ -261,6 +282,160 @@ def test_finalized_conclusion_appears_in_clean_export(app, client: TestClient, a
     assert "**Status:** finalized" in markdown
     # Once finalized, the provisional "Draft" label is gone (ADR 0035 → 0039).
     assert "Draft: Root cause not finalized" not in markdown
+
+
+def test_finalize_requires_partial_support_acknowledgment(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(
+        app, client, auth_headers, verifier=_partial_verifier("Primary cause")
+    )
+    hyps = _hypotheses(client, auth_headers, incident_id, run_id)
+    target = hyps["Primary cause"]
+    assert target["support_status"] == "partial"
+    _accept(client, auth_headers, incident_id, run_id, target["id"])
+
+    # Without an acknowledgment the partial factor is rejected.
+    missing = client.post(
+        _conclusion_url(incident_id, run_id),
+        json={
+            "summary": "x",
+            "factors": [{"hypothesis_id": target["id"], "role": "failure_mechanism"}],
+        },
+        headers=auth_headers,
+    )
+    assert missing.status_code == 422
+    assert "partial-support acknowledgment" in missing.json()["detail"]
+
+    # With one, finalization succeeds and the acknowledgment is preserved.
+    ok = client.post(
+        _conclusion_url(incident_id, run_id),
+        json={
+            "summary": "Partly evidenced mechanism.",
+            "factors": [
+                {
+                    "hypothesis_id": target["id"],
+                    "role": "failure_mechanism",
+                    "partial_support_acknowledgment": (
+                        "Pool exhaustion is shown; the deploy link is unconfirmed."
+                    ),
+                }
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert ok.status_code == 201, ok.text
+    fm = ok.json()["failure_mechanism"]
+    assert "unconfirmed" in fm["partial_support_acknowledgment"]
+
+
+def test_finalize_requires_critical_challenge_override(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(
+        app, client, auth_headers, falsifier=FakeFalsifier(severity="critical")
+    )
+    hyps = _hypotheses(client, auth_headers, incident_id, run_id)
+    target = hyps["Primary cause"]
+    assert target["challenge"]["severity"] == "critical"
+    _accept(client, auth_headers, incident_id, run_id, target["id"])
+
+    # An incomplete (missing) override on a critically challenged failure mechanism.
+    missing = client.post(
+        _conclusion_url(incident_id, run_id),
+        json={
+            "summary": "x",
+            "factors": [{"hypothesis_id": target["id"], "role": "failure_mechanism"}],
+        },
+        headers=auth_headers,
+    )
+    assert missing.status_code == 422
+    assert "critical-challenge override" in missing.json()["detail"]
+
+    # With an override the conclusion finalizes and preserves the critical challenge.
+    ok = client.post(
+        _conclusion_url(incident_id, run_id),
+        json={
+            "summary": "Concluded despite the open critical challenge.",
+            "factors": [
+                {
+                    "hypothesis_id": target["id"],
+                    "role": "failure_mechanism",
+                    "critical_challenge_override": "Addressed by the rollback log at 14:55.",
+                }
+            ],
+        },
+        headers=auth_headers,
+    )
+    assert ok.status_code == 201, ok.text
+    fm = ok.json()["failure_mechanism"]
+    assert "rollback log" in fm["critical_challenge_override"]
+    # The full critical challenge is preserved on the factor, not just its severity.
+    assert fm["challenge"]["severity"] == "critical"
+    assert fm["challenge"]["challenged_claim"] == "Challenge of: Primary cause"
+
+
+def test_finalize_records_human_assumptions(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    hyps = _hypotheses(client, auth_headers, incident_id, run_id)
+    target = hyps["Primary cause"]
+    _accept(client, auth_headers, incident_id, run_id, target["id"])
+
+    resp = client.post(
+        _conclusion_url(incident_id, run_id),
+        json={
+            "summary": "Concluded with a labeled assumption.",
+            "factors": [{"hypothesis_id": target["id"], "role": "failure_mechanism"}],
+            "human_assumptions": ["The on-call restarted the service manually."],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    assumptions = resp.json()["human_assumptions"]
+    assert len(assumptions) == 1
+    assert assumptions[0]["statement"].startswith("The on-call")
+
+
+def test_qualified_conclusion_export_preserves_qualifications(app, client: TestClient, auth_headers):
+    # Exports preserve partial-support acknowledgments, critical challenges, override
+    # rationale, non-definitive wording, and labeled human assumptions (AC).
+    incident_id, run_id = _seed_succeeded_run(
+        app,
+        client,
+        auth_headers,
+        verifier=_partial_verifier("Primary cause"),
+        falsifier=FakeFalsifier(severity="critical"),
+    )
+    hyps = _hypotheses(client, auth_headers, incident_id, run_id)
+    target = hyps["Primary cause"]
+    _accept(client, auth_headers, incident_id, run_id, target["id"])
+    client.post(
+        _conclusion_url(incident_id, run_id),
+        json={
+            "summary": "Qualified conclusion.",
+            "factors": [
+                {
+                    "hypothesis_id": target["id"],
+                    "role": "failure_mechanism",
+                    "partial_support_acknowledgment": "Exhaustion shown; deploy link unconfirmed.",
+                    "critical_challenge_override": "Addressed by the rollback log.",
+                }
+            ],
+            "human_assumptions": ["The on-call restarted the service manually."],
+        },
+        headers=auth_headers,
+    )
+
+    markdown = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem/export",
+        json={"mode": "clean"},
+        headers=auth_headers,
+    ).json()["markdown"]
+    assert "critically challenged" in markdown
+    assert "deploy link unconfirmed" in markdown
+    assert "not definitive" in markdown.lower() or "not\ndefinitive" in markdown.lower()
+    assert "Addressed by the rollback log." in markdown
+    # The actual critical challenge content is preserved in the export, so the
+    # override can be audited against the concern it addresses (story 41).
+    assert "Critical challenge: Challenge of: Primary cause" in markdown
+    assert "Human assumptions (not evidence-backed):" in markdown
+    assert "The on-call restarted the service manually." in markdown
 
 
 def test_finalize_requires_auth(client: TestClient):

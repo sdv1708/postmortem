@@ -412,23 +412,51 @@ CausalRole = Literal["failure_mechanism", "trigger", "amplifying_condition"]
 
 
 class CausalFactorCreate(BaseModel):
-    """One accepted hypothesis the reviewer assigns a causal role (ADR 0039)."""
+    """One accepted hypothesis the reviewer assigns a causal role (ADR 0039 / 0042).
+
+    A partially supported factor must carry a ``partial_support_acknowledgment``
+    describing what is supported and what remains uncertain (PRD #26 stories 38-39);
+    a critically challenged Failure Mechanism must carry a ``critical_challenge_override``
+    addressing the unresolved critical challenge (stories 40-41). The service enforces
+    when each is required; both are optional here so a fully supported, uncontested
+    factor needs neither.
+    """
 
     hypothesis_id: str
     role: CausalRole
+    partial_support_acknowledgment: str | None = Field(default=None, max_length=4000)
+    critical_challenge_override: str | None = Field(default=None, max_length=4000)
 
 
 class RootCauseConclusionCreate(BaseModel):
-    """Command payload to finalize a human Root Cause Conclusion (ADR 0039 / 0022).
+    """Command payload to finalize a human Root Cause Conclusion (ADR 0039 / 0042 / 0022).
 
     The reviewer supplies a structured causal ``summary`` and one or more
     ``factors`` drawn from accepted RCA Hypotheses. The service enforces the trust
     floor: exactly one Failure Mechanism, each factor an accepted hypothesis with
-    verified citations and supported/partial claim support (PRD #26 stories 31-37).
+    verified citations and supported/partial claim support (PRD #26 stories 31-37),
+    a Partial-Support Acknowledgment for each partial factor and a Critical-Challenge
+    Override for a critically challenged Failure Mechanism (stories 38-41).
+
+    ``human_assumptions`` are unevidenced reviewer beliefs recorded separately from
+    the evidence-backed factors so they never render as established fact (story 38).
     """
 
     summary: str = Field(min_length=1, max_length=4000)
     factors: list[CausalFactorCreate] = Field(min_length=1)
+    human_assumptions: list[str] = Field(default_factory=list)
+
+
+class HumanAssumptionRead(BaseModel):
+    """A labeled, unevidenced reviewer belief recorded with a conclusion (ADR 0042).
+
+    Stored separately from the evidence-backed Causal Factors and always rendered as
+    an explicit assumption, never as established fact (PRD #26 story 38).
+    """
+
+    id: str
+    statement: str
+    created_at: datetime
 
 
 class CausalFactorRead(BaseModel):
@@ -437,6 +465,14 @@ class CausalFactorRead(BaseModel):
     Carries the linked hypothesis's title/summary, semantic support, advisory rank,
     and verified supporting citations so the conclusion is navigable to exact
     evidence and visibly preserves generated provenance (PRD #26 stories 36-37).
+
+    ``partial_support_acknowledgment`` and ``critical_challenge_override`` preserve
+    the reviewer's qualifications (PRD #26 stories 38-41); ``challenge`` is the factor
+    hypothesis's full persisted Hypothesis Challenge — challenged claim, severity,
+    cited Counterclaims, Evidence Gaps, Falsification Tests — so the Review Surface
+    and exports preserve the actual critical challenge wherever the factor is
+    rendered, and an override can be audited against the concern it addresses (story
+    41), not just a severity label.
     """
 
     id: str
@@ -447,6 +483,9 @@ class CausalFactorRead(BaseModel):
     support_status: ClaimSupportStatus
     advisory_rank: int | None
     supporting_evidence: list[EvidenceRefRead]
+    partial_support_acknowledgment: str | None = None
+    critical_challenge_override: str | None = None
+    challenge: HypothesisChallengeRead | None = None
 
 
 class ConclusionDiscrepancyCreate(BaseModel):
@@ -500,6 +539,7 @@ class RootCauseConclusionRead(BaseModel):
     failure_mechanism: CausalFactorRead
     triggers: list[CausalFactorRead]
     amplifying_conditions: list[CausalFactorRead]
+    human_assumptions: list[HumanAssumptionRead] = Field(default_factory=list)
     disputed: bool
     discrepancies: list[ConclusionDiscrepancyRead]
     created_at: datetime

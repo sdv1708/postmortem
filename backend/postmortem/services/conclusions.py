@@ -12,12 +12,17 @@ from ..models import (
     AnalysisRun,
     CausalFactor,
     ConclusionDiscrepancy,
+    HumanAssumption,
     Hypothesis,
     Postmortem,
     RootCauseConclusion,
 )
-from ..schemas import ConclusionDiscrepancyCreate, RootCauseConclusionCreate
-from .analysis import AnalysisRunNotFoundError, HypothesisNotFoundError
+from ..schemas import (
+    ConclusionDiscrepancyCreate,
+    CausalFactorCreate,
+    RootCauseConclusionCreate,
+)
+from .analysis import AnalysisRunNotFoundError, HypothesisNotFoundError, challenge_read
 from .incidents import IncidentService
 
 
@@ -27,6 +32,10 @@ logger = logging.getLogger("postmortem.conclusions")
 # carry (ADR 0039 / 0014): finalization cannot bypass the evidence trust floor.
 FAILURE_MECHANISM = "failure_mechanism"
 _SUFFICIENT_SUPPORT: frozenset[str] = frozenset({"supported", "partial"})
+# A partially supported factor must be qualified; a critically challenged Failure
+# Mechanism must be explicitly overridden (ADR 0042, PRD #26 stories 38-41).
+PARTIAL_SUPPORT = "partial"
+CRITICAL_SEVERITY = "critical"
 
 
 class ConclusionValidationError(ValueError):
@@ -122,18 +131,29 @@ class ConclusionService:
                 "a Root Cause Conclusion requires exactly one failure mechanism"
             )
 
+        # Validate every factor and stash its normalized qualification text so the
+        # persistence loop below stores exactly what the trust floor required.
         seen: set[str] = set()
+        qualifications: dict[str, tuple[str | None, str | None]] = {}
         for factor in factors:
             if factor.hypothesis_id in seen:
                 raise ConclusionValidationError(
                     "a hypothesis cannot play more than one causal role"
                 )
             seen.add(factor.hypothesis_id)
-            self._validate_hypothesis(run_id, factor.hypothesis_id)
+            hypothesis = self._validate_hypothesis(run_id, factor.hypothesis_id)
+            qualifications[factor.hypothesis_id] = self._validate_qualifications(
+                factor, hypothesis
+            )
 
         summary = payload.summary.strip()
         if not summary:
             raise ConclusionValidationError("conclusion summary cannot be blank")
+
+        # Human Assumptions are unevidenced reviewer beliefs (PRD #26 story 38):
+        # normalize, drop blanks, and persist them separately from the factors so
+        # they can never render as established fact.
+        assumptions = [a.strip() for a in payload.human_assumptions if a.strip()]
 
         conclusion = RootCauseConclusion(
             run_id=run_id,
@@ -158,12 +178,24 @@ class ConclusionService:
         for factor in factors:
             sequence = role_sequence.get(factor.role, 0)
             role_sequence[factor.role] = sequence + 1
+            acknowledgment, override = qualifications[factor.hypothesis_id]
             self._session.add(
                 CausalFactor(
                     conclusion_id=conclusion.id,
                     hypothesis_id=factor.hypothesis_id,
                     role=factor.role,
                     sequence=sequence,
+                    partial_support_acknowledgment=acknowledgment,
+                    critical_challenge_override=override,
+                )
+            )
+
+        for sequence, statement in enumerate(assumptions):
+            self._session.add(
+                HumanAssumption(
+                    conclusion_id=conclusion.id,
+                    sequence=sequence,
+                    statement=statement,
                 )
             )
 
@@ -179,11 +211,12 @@ class ConclusionService:
             incident_id=incident_id,
             conclusion_id=conclusion.id,
             factor_count=len(factors),
+            human_assumption_count=len(assumptions),
             finalized_by=principal.id,
         )
         return conclusion
 
-    def _validate_hypothesis(self, run_id: str, hypothesis_id: str) -> None:
+    def _validate_hypothesis(self, run_id: str, hypothesis_id: str) -> Hypothesis:
         hypothesis = self._session.get(Hypothesis, hypothesis_id)
         # Cross-run ownership rejection: a conclusion may only reference its own
         # run's hypotheses (PRD #26 / AC). A foreign or missing id is "not found".
@@ -213,6 +246,47 @@ class ConclusionService:
             raise ConclusionValidationError(
                 f"hypothesis {hypothesis_id} has no verified supporting citation"
             )
+        return hypothesis
+
+    def _validate_qualifications(
+        self, factor: CausalFactorCreate, hypothesis: Hypothesis
+    ) -> tuple[str | None, str | None]:
+        """Enforce the qualification trust floor and return persisted text (ADR 0042).
+
+        A partially supported Causal Factor cannot be finalized without a
+        Partial-Support Acknowledgment describing what is supported and what remains
+        uncertain (PRD #26 stories 38-39). A critically challenged hypothesis cannot
+        serve as the Failure Mechanism without a Critical-Challenge Override that
+        addresses the unresolved critical challenge (stories 40-41); the challenge is
+        preserved either way. Returns the normalized ``(acknowledgment, override)``
+        to persist — ``None`` for a qualification that does not apply, so a fully
+        supported, uncontested factor stores neither and the conclusion never carries
+        misleading qualification text.
+        """
+        acknowledgment: str | None = None
+        if hypothesis.support_status == PARTIAL_SUPPORT:
+            acknowledgment = (factor.partial_support_acknowledgment or "").strip()
+            if not acknowledgment:
+                raise ConclusionValidationError(
+                    f"hypothesis {hypothesis.id} has partial support and requires a "
+                    "partial-support acknowledgment describing what is supported and "
+                    "what remains uncertain"
+                )
+
+        override: str | None = None
+        challenge = hypothesis.challenge
+        is_critically_challenged = (
+            challenge is not None and challenge.severity == CRITICAL_SEVERITY
+        )
+        if factor.role == FAILURE_MECHANISM and is_critically_challenged:
+            override = (factor.critical_challenge_override or "").strip()
+            if not override:
+                raise ConclusionValidationError(
+                    f"hypothesis {hypothesis.id} has an unresolved critical challenge "
+                    "and cannot be the failure mechanism without a critical-challenge "
+                    "override addressing it"
+                )
+        return acknowledgment, override
 
     def raise_discrepancy(
         self,
@@ -298,11 +372,20 @@ class ConclusionService:
 
 
 def causal_factor_read(factor: CausalFactor) -> dict:
-    """Shape a CausalFactor (with its hypothesis provenance) for CausalFactorRead."""
+    """Shape a CausalFactor (with its hypothesis provenance) for CausalFactorRead.
+
+    Surfaces the reviewer's Partial-Support Acknowledgment and Critical-Challenge
+    Override, and the factor hypothesis's full persisted Hypothesis Challenge, so the
+    qualifications and the actual critical challenge (challenged claim, counterclaims,
+    evidence gaps, falsification tests) stay visible wherever the conclusion is
+    rendered — finalization never erases the concern, and an override can be audited
+    against it (ADR 0042, PRD #26 stories 38-41).
+    """
     hypothesis = factor.hypothesis
     supporting = [
         ref for ref in hypothesis.evidence_refs if ref.role != "contradicting"
     ]
+    challenge = hypothesis.challenge
     return {
         "id": factor.id,
         "role": factor.role,
@@ -312,6 +395,18 @@ def causal_factor_read(factor: CausalFactor) -> dict:
         "support_status": hypothesis.support_status,
         "advisory_rank": hypothesis.advisory_rank,
         "supporting_evidence": supporting,
+        "partial_support_acknowledgment": factor.partial_support_acknowledgment,
+        "critical_challenge_override": factor.critical_challenge_override,
+        "challenge": challenge_read(challenge) if challenge is not None else None,
+    }
+
+
+def human_assumption_read(assumption: HumanAssumption) -> dict:
+    """Shape a HumanAssumption for HumanAssumptionRead (ADR 0042)."""
+    return {
+        "id": assumption.id,
+        "statement": assumption.statement,
+        "created_at": _aware(assumption.created_at),
     }
 
 
@@ -340,6 +435,9 @@ def conclusion_read(conclusion: RootCauseConclusion) -> dict:
         "failure_mechanism": causal_factor_read(failure_mechanism),
         "triggers": [causal_factor_read(f) for f in triggers],
         "amplifying_conditions": [causal_factor_read(f) for f in amplifying],
+        "human_assumptions": [
+            human_assumption_read(a) for a in conclusion.human_assumptions
+        ],
         "disputed": bool(discrepancies),
         "discrepancies": [discrepancy_read(d) for d in discrepancies],
         "created_at": _aware(conclusion.created_at),
