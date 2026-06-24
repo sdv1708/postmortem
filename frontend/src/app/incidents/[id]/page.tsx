@@ -846,6 +846,16 @@ function RunStatusCard({
             {run.artifact_ids.length} artifact{run.artifact_ids.length === 1 ? "" : "s"} ·{" "}
             {run.experiment_metadata.pipeline_version}
           </span>
+          {run.experiment_metadata.reasoning_budget && (
+            // The recorded Reasoning Budget the Causal Analysis Stage ran under
+            // (ADR 0043): a visible, comparable bound even on a successful run.
+            <span
+              className="badge bg-slate-100 text-slate-600 ring-slate-200"
+              title="Causal analysis Reasoning Budget (per-role call ceiling, with one Targeted Repair reserved)"
+            >
+              budget ≤{run.experiment_metadata.reasoning_budget.max_calls_per_role} calls/role
+            </span>
+          )}
           {isPolling && (
             <span className="inline-flex items-center gap-1.5 text-xs text-slate-500">
               <Spinner /> Updating…
@@ -858,9 +868,24 @@ function RunStatusCard({
       </div>
 
       {run.error && (
-        <p className="border-b border-rose-100 bg-rose-50/60 px-5 py-2 text-xs text-rose-700">
-          {run.error}
-        </p>
+        <div className="border-b border-rose-100 bg-rose-50/60 px-5 py-2.5 text-xs text-rose-700">
+          {run.failure_code && (
+            // A controlled Causal Analysis Stage failure (ADR 0043): show the
+            // machine-readable code and the failed substep so the failure is
+            // explainable without exposing Sensitive Evidence (PRD #26 story 68).
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              <span className="badge bg-rose-100 text-rose-800 ring-rose-300">
+                {failureCodeLabel(run.failure_code)}
+              </span>
+              {run.failed_substep && (
+                <span className="font-mono text-[11px] text-rose-600">
+                  at {run.failed_substep}
+                </span>
+              )}
+            </div>
+          )}
+          <p>{run.error}</p>
+        </div>
       )}
 
       <ol className="divide-y divide-slate-100">
@@ -3083,6 +3108,18 @@ function RunImpact({
       </ul>
     </div>
   );
+}
+
+// Human-readable labels for the controlled Causal Analysis Stage failure codes
+// (ADR 0043). The raw code is still shown verbatim for an unmapped value so a new
+// backend code never renders blank.
+function failureCodeLabel(code: string): string {
+  const map: Record<string, string> = {
+    repair_exhausted: "Repair exhausted",
+    budget_exhausted: "Reasoning budget exhausted",
+    limit_exceeded: "Limit exceeded",
+  };
+  return map[code] ?? code;
 }
 
 function RunStatusBadge({ status }: { status: RunStatus }) {

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..logging import log_event
 from ..models import AnalysisRun, RunStageEvent
 from ..pipeline import RUN_STAGES
+from ..reasoning import CausalAnalysisError
 
 
 logger = logging.getLogger("postmortem.pipeline")
@@ -20,11 +21,26 @@ def _utcnow() -> datetime:
 
 
 class StageFailedError(RuntimeError):
-    """Raised by an executor when a stage exhausts its single retry (ADR 0029)."""
+    """Raised by an executor when a stage exhausts its single retry (ADR 0029).
 
-    def __init__(self, stage: str, error: str) -> None:
+    ``failure_code`` and ``failed_substep`` are set only when the failure is a
+    controlled Causal Analysis Stage failure (ADR 0043) — an exhausted Targeted
+    Repair or Reasoning Budget — so the run can record machine-readable failed-run
+    diagnostics. They stay None for generic stage failures.
+    """
+
+    def __init__(
+        self,
+        stage: str,
+        error: str,
+        *,
+        failure_code: str | None = None,
+        failed_substep: str | None = None,
+    ) -> None:
         self.stage = stage
         self.error = error
+        self.failure_code = failure_code
+        self.failed_substep = failed_substep
         super().__init__(f"stage '{stage}' failed: {error}")
 
 
@@ -198,6 +214,33 @@ class StagedRunExecutor:
             try:
                 result = self._stage_runner(stage, attempt, run)
                 outcome = _normalize_outcome(result)
+            except CausalAnalysisError as exc:
+                # The Causal Analysis Stage already consumed its bounded recovery
+                # through one Targeted Repair per role (ADR 0043). A controlled
+                # failure here is terminal: the whole-stage retry must not re-run the
+                # already-succeeded roles, and a controlled budget/repair failure is
+                # deterministic, so a second attempt would only repeat it. Fail the
+                # stage immediately, preserving the inspectable prior substep outputs,
+                # and carry the machine-readable code/substep for failed-run diagnostics.
+                last_error = str(exc)
+                recorder.fail(event, last_error)
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pipeline_stage_causal_failure",
+                    run_id=run.id,
+                    incident_id=run.incident_id,
+                    stage=stage,
+                    failure_code=exc.code,
+                    failed_substep=exc.substep,
+                    gate_code=exc.gate_code,
+                )
+                raise StageFailedError(
+                    stage,
+                    last_error,
+                    failure_code=exc.code,
+                    failed_substep=exc.substep,
+                ) from exc
             except Exception as exc:
                 last_error = str(exc) or exc.__class__.__name__
                 recorder.fail(event, last_error)

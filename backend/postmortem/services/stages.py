@@ -17,7 +17,6 @@ from ..drafting import (
 from ..falsification import (
     FALSIFICATION_PROMPT_VERSION,
     FALSIFICATION_SCHEMA_VERSION,
-    MAX_PROPOSED_HYPOTHESES,
     Falsifier,
     HypothesisChallengeOutput,
     HypothesisToChallenge,
@@ -67,12 +66,27 @@ from ..ranking import (
     RankingCandidate,
 )
 from ..rca import (
-    MAX_INITIAL_HYPOTHESES,
     PROMPT_VERSION,
     RCA_SCHEMA_VERSION,
     RcaEvidenceRef,
     RcaGenerationOutput,
     build_rca_prompt,
+)
+from ..reasoning import (
+    DEFAULT_REASONING_BUDGET,
+    GATE_CHALLENGE_COVERAGE_INCOMPLETE,
+    GATE_DUPLICATE_HYPOTHESIS,
+    GATE_LIMIT_EXCEEDED,
+    GATE_MISSING_DIMENSIONAL_RATIONALE,
+    GATE_RANKING_COVERAGE_INCOMPLETE,
+    GATE_SCHEMA_INVALID,
+    FAILURE_LIMIT_EXCEEDED,
+    BudgetLedger,
+    CausalAnalysisError,
+    ReasoningBudget,
+    ReasoningGateError,
+    append_repair_feedback,
+    targeted_repair,
 )
 from ..retrieval import (
     DeterministicChunkArtifactRetrievalStrategy,
@@ -136,9 +150,15 @@ class PipelineStageRunner:
         incident_fact_extractor: IncidentFactExtractor | None = None,
         falsifier: Falsifier | None = None,
         advisory_ranker: AdvisoryRanker | None = None,
+        reasoning_budget: ReasoningBudget | None = None,
     ) -> None:
         self._session = session
         self._chunker = chunker or SourceAwareLineWindowChunker()
+        # The Reasoning Budget bounding the Causal Analysis Stage (ADR 0043): the
+        # per-role and stage limits for retrieval, tokens, and calls, with capacity
+        # reserved for one Targeted Repair per role. The MVP default is configured;
+        # tests inject a tighter budget to exercise the budget-exhaustion path.
+        self._budget = reasoning_budget or DEFAULT_REASONING_BUDGET
         # Default to the offline client so deterministic stages still complete a
         # run when no provider is configured; real runs inject a configured
         # client (ADR 0011). The client is wrapped in a RecordingLLMClient so every
@@ -441,26 +461,66 @@ class PipelineStageRunner:
             timeline_event_count=len(timeline),
             retrieval_strategy=self._retrieval.version,
         )
+        # The Reasoning Budget ledger bounds every role in this stage (ADR 0043):
+        # builder, falsifier, support verifier, and ranker share one per-run ledger
+        # so per-role and total call/token/retrieval limits are enforced together.
+        ledger = BudgetLedger(self._budget)
         system, user = build_rca_prompt(retrieval.artifacts, timeline)
-        response = self._llm.complete(system=system, user=user)
-        try:
-            output = RcaGenerationOutput.model_validate_json(response.text)
-        except ValidationError as exc:
-            # Schema-invalid (or non-JSON) model output fails the stage rather
-            # than becoming pipeline state (ADR 0028).
-            raise ValueError(f"RCA output failed schema validation: {exc}") from exc
+        ledger.observe_retrieval(ROLE_BUILDER, len(retrieval.chunks), "builder:generate")
 
-        # Runtime Reasoning Gate: the builder is bounded to MAX_INITIAL_HYPOTHESES
-        # (ADR 0036, PRD #26 / #30 user story 65). An over-budget candidate set fails
-        # the stage rather than persisting and challenging an unbounded number of
-        # hypotheses, which would blow the bounded review/token surface. Failing
-        # before persistence keeps the gate deterministic and uses the same bounded
-        # repair/failure contract as the proposed-alternative cap (one retry, ADR 0029).
-        if len(output.hypotheses) > MAX_INITIAL_HYPOTHESES:
-            raise ValueError(
-                f"builder generated {len(output.hypotheses)} initial hypotheses, exceeding the "
-                f"bounded maximum of {MAX_INITIAL_HYPOTHESES}"
+        # The builder is a Reasoning Role behind a Targeted Repair (ADR 0043). Its
+        # output passes through a Runtime Reasoning Gate; a mechanically invalid
+        # result (non-JSON / schema violation, an over-budget candidate set, or
+        # duplicate hypotheses) is re-attempted exactly once with the deterministic
+        # validation errors fed back into the prompt. A still-invalid repair fails
+        # the stage with a controlled code rather than persisting bad state (ADR 0028).
+        last_response: dict = {}
+
+        def build_builder(feedback: tuple[str, ...]) -> RcaGenerationOutput:
+            response = self._llm.complete(
+                system=system, user=append_repair_feedback(user, feedback)
             )
+            last_response["usage"] = response.usage
+            try:
+                return RcaGenerationOutput.model_validate_json(response.text)
+            except ValidationError as exc:
+                # Schema-invalid (or non-JSON) model output is a gate failure
+                # (ADR 0028); the Targeted Repair re-asks the builder once.
+                raise ReasoningGateError(
+                    GATE_SCHEMA_INVALID,
+                    [f"RCA output failed schema validation: {exc}"],
+                )
+
+        def validate_builder(output: RcaGenerationOutput) -> None:
+            # The builder is bounded to the configured initial-hypothesis maximum
+            # (ADR 0036/0043, PRD user story 65): an over-budget candidate set would
+            # blow the bounded review/token surface.
+            if len(output.hypotheses) > self._budget.max_initial_hypotheses:
+                raise ReasoningGateError(
+                    GATE_LIMIT_EXCEEDED,
+                    [
+                        f"builder generated {len(output.hypotheses)} initial hypotheses, "
+                        f"exceeding the bounded maximum of {self._budget.max_initial_hypotheses}"
+                    ],
+                )
+            # Uniqueness gate: near-duplicate candidates collapse review and inflate
+            # the ranking surface, so a builder that repeats a title is repaired once.
+            titles = [_normalize_hypothesis_title(h.title) for h in output.hypotheses]
+            duplicates = sorted({t for t in titles if t and titles.count(t) > 1})
+            if duplicates:
+                raise ReasoningGateError(
+                    GATE_DUPLICATE_HYPOTHESIS,
+                    [f"builder generated duplicate hypotheses: {duplicates}"],
+                )
+
+        output = targeted_repair(
+            role=ROLE_BUILDER,
+            substep="builder:generate",
+            ledger=ledger,
+            produce=build_builder,
+            validate=validate_builder,
+        )
+        response_usage = last_response.get("usage")
 
         # Provenance for the builder substep (ADR 0038): a Retrieval Trace over the
         # chunks the strategy selected — flagging which the model actually cited so
@@ -484,6 +544,7 @@ class PipelineStageRunner:
             fallback_identity=self._llm.label,
             structured_output=_sanitized_builder_output(output),
             retrieval_trace=builder_trace,
+            ledger=ledger,
         )
 
         by_id = {artifact.id: artifact for artifact in retrieval.artifacts}
@@ -531,18 +592,23 @@ class PipelineStageRunner:
         # searches all run artifacts, so counterclaims and proposed-alternative
         # citations resolve against the full immutable evidence set, not just the
         # builder's retrieval subset.
-        self._run_falsification_round(run, hypotheses, timeline, warning_codes)
+        self._run_falsification_round(run, hypotheses, timeline, warning_codes, ledger)
 
         # Final substep of stage 3 (ADR 0037): incrementally verify the candidates'
         # citations, judge provisional semantic support, then produce one ordinal
         # Advisory Hypothesis Ranking across all initial and proposed hypotheses.
-        self._rank_hypotheses(run, warning_codes)
+        self._rank_hypotheses(run, warning_codes, ledger)
 
         outcome: dict = {}
         if warning_codes:
             outcome["warning_codes"] = _dedupe(warning_codes)
-        if response.usage:
-            outcome["usage"] = response.usage
+        # Surface the recorded Reasoning Budget consumption on the stage event so the
+        # status page and evaluation harness can see how close the run ran to its
+        # bounds (ADR 0021 / 0043), alongside the builder's raw token usage.
+        usage: dict = {"reasoning_budget": ledger.snapshot()}
+        if response_usage:
+            usage.update(response_usage)
+        outcome["usage"] = usage
         log_event(
             logger,
             logging.INFO,
@@ -550,7 +616,8 @@ class PipelineStageRunner:
             run_id=run.id,
             hypothesis_count=len(output.hypotheses),
             warning_codes=",".join(_dedupe(warning_codes)) if warning_codes else None,
-            usage_keys=",".join(sorted(response.usage.keys())) if response.usage else None,
+            usage_keys=",".join(sorted(response_usage.keys())) if response_usage else None,
+            total_calls=ledger.snapshot()["total_calls"],
         )
         return outcome or None
 
@@ -560,6 +627,7 @@ class PipelineStageRunner:
         initial_hypotheses: list[Hypothesis],
         timeline: list[TimelineEvent],
         warning_codes: list[str],
+        ledger: BudgetLedger,
     ) -> None:
         """Run the single bounded Falsification Round (ADR 0034 / 0036).
 
@@ -594,16 +662,25 @@ class PipelineStageRunner:
         proposed: list = []
         for hypothesis in initial_hypotheses:
             result = self._challenge_hypothesis(
-                run, hypothesis, all_artifacts, timeline, by_id, warning_codes, allow_proposals=True
+                run, hypothesis, all_artifacts, timeline, by_id, warning_codes, ledger,
+                allow_proposals=True,
             )
             proposed.extend(result.proposed_hypotheses)
 
-        # Runtime Reasoning Gate: the expansion round is bounded. Exceeding the cap
-        # fails the stage rather than silently truncating, so the bound is auditable.
-        if len(proposed) > MAX_PROPOSED_HYPOTHESES:
-            raise ValueError(
-                f"falsification proposed {len(proposed)} alternatives, exceeding the "
-                f"bounded maximum of {MAX_PROPOSED_HYPOTHESES}"
+        # Runtime Reasoning Gate: the expansion round is bounded (ADR 0043). The cap
+        # is a structural limit on the whole round, not a single invalid invocation,
+        # so exceeding it fails the stage immediately with a controlled
+        # ``limit_exceeded`` code rather than re-attempting one role (a re-challenge
+        # would not change the aggregate).
+        if len(proposed) > self._budget.max_proposed_hypotheses:
+            raise CausalAnalysisError(
+                FAILURE_LIMIT_EXCEEDED,
+                substep="falsifier:expansion",
+                detail=(
+                    f"falsification proposed {len(proposed)} alternatives, exceeding the "
+                    f"bounded maximum of {self._budget.max_proposed_hypotheses}"
+                ),
+                gate_code=GATE_LIMIT_EXCEEDED,
             )
 
         # Pass 2: persist each proposed alternative as an origin='proposed'
@@ -619,14 +696,20 @@ class PipelineStageRunner:
         self._session.flush()
         for hypothesis in proposed_hypotheses:
             result = self._challenge_hypothesis(
-                run, hypothesis, all_artifacts, timeline, by_id, warning_codes, allow_proposals=False
+                run, hypothesis, all_artifacts, timeline, by_id, warning_codes, ledger,
+                allow_proposals=False,
             )
             if result.proposed_hypotheses:
                 # No recursive expansion: a proposed hypothesis may not itself
-                # spawn further alternatives (ADR 0036, PRD user story 16 / AC #1).
-                raise ValueError(
-                    "falsification attempted a second expansion round while challenging a "
-                    "proposed alternative"
+                # spawn further alternatives (ADR 0036/0043, PRD user story 16 / AC #1).
+                raise CausalAnalysisError(
+                    FAILURE_LIMIT_EXCEEDED,
+                    substep="falsifier:expansion",
+                    detail=(
+                        "falsification attempted a second expansion round while challenging "
+                        "a proposed alternative"
+                    ),
+                    gate_code=GATE_LIMIT_EXCEEDED,
                 )
 
         self._session.flush()
@@ -650,6 +733,7 @@ class PipelineStageRunner:
         timeline: list[TimelineEvent],
         by_id: dict[str, Artifact],
         warning_codes: list[str],
+        ledger: BudgetLedger,
         *,
         allow_proposals: bool,
     ) -> HypothesisChallengeOutput:
@@ -658,10 +742,13 @@ class PipelineStageRunner:
         The falsifier is handed the persisted hypothesis and ALL run artifacts so
         it can find counterevidence the builder's retrieval subset omitted (PRD
         user story 13); a Counterclaim's citations resolve from the stored artifact
-        lines, never model text (ADR 0024). A schema-invalid or missing challenge
-        raises, failing the stage after its single retry rather than shipping
-        partial coverage (PRD user stories 61-62). Returns the falsifier output so
-        the caller can read any proposed alternatives.
+        lines, never model text (ADR 0024). The falsifier runs behind a Targeted
+        Repair (ADR 0043): a falsifier that cannot produce a usable challenge (it
+        raises, or returns a degenerate one) is re-attempted exactly once with the
+        validation errors. If the repair still fails, complete challenge coverage is
+        impossible, so the stage fails with a controlled ``repair_exhausted`` code
+        rather than shipping partial coverage (PRD user stories 61-62). Returns the
+        falsifier output so the caller can read any proposed alternatives.
         """
         target = HypothesisToChallenge(
             title=hypothesis.title,
@@ -673,18 +760,55 @@ class PipelineStageRunner:
                 ref.snippet for ref in hypothesis.evidence_refs if ref.role == "contradicting"
             ),
         )
-        result = self._falsifier.challenge(
-            hypothesis=target,
-            artifacts=all_artifacts,
-            timeline_events=timeline,
-            allow_proposals=allow_proposals,
+        substep = f"challenge:{hypothesis.origin or 'initial'}:{hypothesis.id}"
+
+        def produce_challenge(feedback: tuple[str, ...]) -> HypothesisChallengeOutput:
+            try:
+                return self._falsifier.challenge(
+                    hypothesis=target,
+                    artifacts=all_artifacts,
+                    timeline_events=timeline,
+                    allow_proposals=allow_proposals,
+                    # Inform the single repair with the gate errors (ADR 0043): a
+                    # real falsifier re-prompts with the violation rather than
+                    # blindly replaying the same request (issue #37).
+                    repair_feedback=feedback,
+                )
+            except ReasoningGateError:
+                raise
+            except Exception as exc:
+                # A falsifier that cannot challenge this hypothesis leaves a coverage
+                # hole; convert it into a gate failure so the Targeted Repair re-asks
+                # once before the mandatory-coverage stage failure (PRD stories 61-62).
+                raise ReasoningGateError(
+                    GATE_CHALLENGE_COVERAGE_INCOMPLETE,
+                    [f"falsifier could not challenge hypothesis {hypothesis.title!r}: {exc}"],
+                )
+
+        def validate_challenge(result: HypothesisChallengeOutput) -> None:
+            if not (result.challenged_claim or "").strip():
+                raise ReasoningGateError(
+                    GATE_CHALLENGE_COVERAGE_INCOMPLETE,
+                    [f"challenge for hypothesis {hypothesis.title!r} has no challenged claim"],
+                )
+
+        # Falsification Retrieval spans all immutable run chunks (PRD user story 13);
+        # bound its breadth against the role's retrieval budget (ADR 0043).
+        ledger.observe_retrieval(
+            ROLE_FALSIFIER, len(self._run_chunk_refs(run)), substep
+        )
+        result = targeted_repair(
+            role=ROLE_FALSIFIER,
+            substep=substep,
+            ledger=ledger,
+            produce=produce_challenge,
+            validate=validate_challenge,
         )
         # Provenance for this falsifier substep (ADR 0038). Falsification Retrieval
         # spans ALL run artifacts (PRD user story 13), so the Retrieval Trace
         # records the whole ordered chunk set and flags which the counterclaims
         # cited — retrieved-but-uncited chunks stay visible (PRD user story 70). The
         # Model Call Record links the challenge call to that trace.
-        substep = f"challenge:{hypothesis.origin or 'initial'}:{hypothesis.id}"
         falsifier_trace = self._record_retrieval(
             run,
             role=ROLE_FALSIFIER,
@@ -707,6 +831,7 @@ class PipelineStageRunner:
             fallback_identity=self._falsifier.version,
             structured_output=_sanitized_falsifier_output(result),
             retrieval_trace=falsifier_trace,
+            ledger=ledger,
         )
         challenge = HypothesisChallenge(
             run_id=run.id,
@@ -784,7 +909,9 @@ class PipelineStageRunner:
         self._session.add(hypothesis)
         return hypothesis
 
-    def _rank_hypotheses(self, run: AnalysisRun, warning_codes: list[str]) -> None:
+    def _rank_hypotheses(
+        self, run: AnalysisRun, warning_codes: list[str], ledger: BudgetLedger
+    ) -> None:
         """Produce one ordinal Advisory Hypothesis Ranking for the run (ADR 0037).
 
         The final substep of stage 3 (PRD #26 user stories 17-25). It runs after
@@ -838,6 +965,9 @@ class PipelineStageRunner:
                 hypothesis, f"{hypothesis.title}: {hypothesis.summary}", provisional_warnings
             )
             if consulted:
+                # Each consulted support judgment is a model call against the
+                # support-verifier's budget (ADR 0043).
+                ledger.charge_call(ROLE_SUPPORT_VERIFIER, f"support:{hypothesis.id}")
                 # Trace the verified citations the support judgment actually saw
                 # (its Role Handoff), so an input omission is distinguishable from a
                 # reasoning outcome (PRD user story 69). The structured output keeps
@@ -853,24 +983,57 @@ class PipelineStageRunner:
                     fallback_identity=self._claim_support.version,
                     structured_output={"status": hypothesis.support_status},
                     retrieval_trace=support_trace,
+                    ledger=ledger,
                 )
 
         candidates = [self._ranking_candidate(hypothesis) for hypothesis in hypotheses]
-        output = self._ranker.rank(candidates)
-
-        # Runtime Reasoning Gate (PRD user story 60, issue #31 AC): the advisory
-        # ranking must place every candidate exactly once. A missing, duplicated, or
-        # unknown candidate fails the stage after its single retry rather than
-        # shipping a partial ranking.
         expected = {hypothesis.id for hypothesis in hypotheses}
-        ranked_ids = [entry.hypothesis_id for entry in output.rankings]
-        seen = set(ranked_ids)
-        if len(ranked_ids) != len(seen) or seen != expected:
-            raise ValueError(
-                "advisory ranking must cover every hypothesis exactly once: "
-                f"missing {sorted(expected - seen)}, unexpected {sorted(seen - expected)}, "
-                f"duplicates {sorted({i for i in ranked_ids if ranked_ids.count(i) > 1})}"
-            )
+
+        # The ranker is a Reasoning Role behind a Targeted Repair (ADR 0043). Two
+        # Runtime Reasoning Gates guard its output: it must cover every candidate
+        # exactly once (PRD user story 60), and every ranked entry must carry the
+        # full dimensioned rationale (PRD user story 19). A ranking that fails either
+        # gate is re-attempted once; a still-invalid repair fails the stage with a
+        # controlled code rather than shipping a partial or unexplained ranking.
+        def produce_ranking(feedback: tuple[str, ...]):
+            # Inform the single repair with the gate errors (ADR 0043); the
+            # deterministic default ranker ignores it, an LLM-backed ranker re-asks.
+            return self._ranker.rank(candidates, repair_feedback=feedback)
+
+        def validate_ranking(output) -> None:
+            ranked_ids = [entry.hypothesis_id for entry in output.rankings]
+            seen = set(ranked_ids)
+            if len(ranked_ids) != len(seen) or seen != expected:
+                raise ReasoningGateError(
+                    GATE_RANKING_COVERAGE_INCOMPLETE,
+                    [
+                        "advisory ranking must cover every hypothesis exactly once: "
+                        f"missing {sorted(expected - seen)}, "
+                        f"unexpected {sorted(seen - expected)}, "
+                        f"duplicates {sorted({i for i in ranked_ids if ranked_ids.count(i) > 1})}"
+                    ],
+                )
+            missing_rationale = [
+                entry.hypothesis_id
+                for entry in output.rankings
+                if not _has_dimensioned_rationale(entry.rationale)
+            ]
+            if missing_rationale:
+                raise ReasoningGateError(
+                    GATE_MISSING_DIMENSIONAL_RATIONALE,
+                    [
+                        "advisory ranking entries missing dimensioned rationale: "
+                        f"{sorted(missing_rationale)}"
+                    ],
+                )
+
+        output = targeted_repair(
+            role=ROLE_RANKER,
+            substep="ranker:rank",
+            ledger=ledger,
+            produce=produce_ranking,
+            validate=validate_ranking,
+        )
 
         by_id = {hypothesis.id: hypothesis for hypothesis in hypotheses}
         for position, entry in enumerate(output.rankings, start=1):
@@ -890,6 +1053,7 @@ class PipelineStageRunner:
             schema_version=ADVISORY_RANKING_SCHEMA_VERSION,
             fallback_identity=self._ranker.version,
             structured_output=_sanitized_ranker_output(output),
+            ledger=ledger,
         )
         log_event(
             logger,
@@ -1501,6 +1665,7 @@ class PipelineStageRunner:
         fallback_identity: str,
         structured_output: dict | None,
         retrieval_trace: RetrievalTrace | None = None,
+        ledger: BudgetLedger | None = None,
     ) -> ModelCallRecord:
         """Persist one Reasoning Role invocation's reproducibility metadata (ADR 0038).
 
@@ -1513,9 +1678,20 @@ class PipelineStageRunner:
         citations, never Artifact text — and ``retrieval_trace`` links the call to
         the evidence it received so a retrieval failure is distinguishable from a
         reasoning failure (PRD user story 69).
+
+        When a ``ledger`` is supplied (the Causal Analysis Stage roles), every
+        drained capture's token usage is charged to the role's Reasoning Budget
+        here — the one place all role model calls funnel through — so input/output
+        token budgets are enforced uniformly across builder, falsifier, support
+        verification, and ranking, including a repair attempt's tokens (ADR 0043,
+        issue #37). A role with no live model (the offline default, a fake) reports
+        no usage, so this is inert for deterministic runs.
         """
         captures = self._llm_recorder.drain()
         capture = captures[-1] if captures else None
+        if ledger is not None:
+            for cap in captures:
+                ledger.observe_usage(role, cap.usage, substep)
         record = ModelCallRecord(
             run_id=run.id,
             sequence=self._next_provenance_sequence(run),
@@ -1708,6 +1884,32 @@ def _sanitized_ranker_output(output) -> dict:
     # Ordered candidate ids are the ranking outcome; the per-dimension rationale is
     # model free text already persisted on Hypothesis.ranking_rationale.
     return {"rankings": [{"hypothesis_id": entry.hypothesis_id} for entry in output.rankings]}
+
+
+def _normalize_hypothesis_title(title: str) -> str:
+    """Fold a hypothesis title for the duplicate-hypothesis gate (ADR 0043)."""
+    return " ".join((title or "").lower().split())
+
+
+def _has_dimensioned_rationale(rationale) -> bool:
+    """Whether an advisory ranking entry carries the full dimensioned rationale.
+
+    The advisory ranking must explain ordering across supporting evidence
+    strength, counterevidence severity, explanatory coverage, evidence gaps, and
+    assumption dependence (PRD user story 19). A ranker that drops any dimension
+    fails the Runtime Reasoning Gate (ADR 0043).
+    """
+    for dimension in (
+        "support_strength",
+        "counterevidence_severity",
+        "explanatory_coverage",
+        "evidence_gaps",
+        "assumption_dependence",
+    ):
+        value = getattr(rationale, dimension, None)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    return True
 
 
 def _dedupe(values: list[str]) -> list[str]:

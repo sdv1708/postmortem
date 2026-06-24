@@ -128,7 +128,12 @@ class AdvisoryRanker(Protocol):
     @property
     def version(self) -> str: ...
 
-    def rank(self, candidates: list[RankingCandidate]) -> AdvisoryRankingOutput: ...
+    def rank(
+        self,
+        candidates: list[RankingCandidate],
+        *,
+        repair_feedback: tuple[str, ...] = (),
+    ) -> AdvisoryRankingOutput: ...
 
 
 # Support tiers as ordinal plausibility weight. A provisionally UNSUPPORTED claim
@@ -176,7 +181,16 @@ class DeterministicAdvisoryRanker:
 
     version: Final[str] = ADVISORY_RANKER_VERSION
 
-    def rank(self, candidates: list[RankingCandidate]) -> AdvisoryRankingOutput:
+    def rank(
+        self,
+        candidates: list[RankingCandidate],
+        *,
+        repair_feedback: tuple[str, ...] = (),
+    ) -> AdvisoryRankingOutput:
+        # The deterministic ranker is a pure function of the post-challenge facts, so
+        # a Targeted Repair cannot change its output; ``repair_feedback`` is accepted
+        # for interface parity with a future LLM-backed ranker (ADR 0043) and ignored.
+        del repair_feedback
         # Sort by descending plausibility, breaking ties by ascending builder rank
         # so equal candidates keep their generation order (stable, auditable).
         ordered = sorted(

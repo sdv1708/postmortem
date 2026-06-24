@@ -163,8 +163,14 @@ def test_run_status_exposes_six_ordered_stage_events(client: TestClient, auth_he
     ]
     assert all(event["status"] == "succeeded" for event in body["stage_events"])
     assert all(event["duration_ms"] is not None for event in body["stage_events"])
-    # Usage stays null until an LLM is wired in (#7); the field exists now.
-    assert all(event["usage"] is None for event in body["stage_events"])
+    # Usage stays null for stages with no model/budget activity. The Causal Analysis
+    # Stage records its bounded Reasoning Budget consumption (ADR 0043), so its usage
+    # carries a budget snapshot even on an offline run that produced no hypotheses.
+    for event in body["stage_events"]:
+        if event["stage"] == "analyzing_causal_hypotheses":
+            assert "reasoning_budget" in (event["usage"] or {})
+        else:
+            assert event["usage"] is None
 
 
 def test_run_status_is_terminal_and_pollable_after_start(client: TestClient, auth_headers):

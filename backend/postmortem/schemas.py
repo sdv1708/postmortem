@@ -100,6 +100,10 @@ class ExperimentMetadata(BaseModel):
     retrieval_strategy: str
     chunking_strategy: str
     verifier_version: str
+    # The recorded Reasoning Budget the Causal Analysis Stage ran under (ADR 0043):
+    # per-role and stage limits for retrieval, tokens, and calls, with one reserved
+    # Targeted Repair per role. Null on runs created before the budget existed.
+    reasoning_budget: dict | None = None
 
 
 class RunStageEventRead(BaseModel):
@@ -127,6 +131,12 @@ class AnalysisRunRead(BaseModel):
     incident_id: str
     status: RunStatus
     error: str | None
+    # Controlled Causal Analysis Stage failure diagnostics (ADR 0043): a
+    # machine-readable code and the failed role/invocation, set only when stage 3
+    # fails through an exhausted Targeted Repair or Reasoning Budget. The failed-run
+    # UI explains the failure from these without exposing Sensitive Evidence.
+    failure_code: str | None = None
+    failed_substep: str | None = None
     experiment_metadata: ExperimentMetadata
     artifact_ids: list[str]
     stage_events: list[RunStageEventRead]

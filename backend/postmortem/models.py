@@ -112,6 +112,14 @@ class AnalysisRun(Base):
     )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Controlled Causal Analysis Stage failure diagnostics (ADR 0043). When stage 3
+    # fails through a Runtime Reasoning Gate that a Targeted Repair could not
+    # resolve, or because the Reasoning Budget was exhausted, ``failure_code`` is a
+    # machine-readable code and ``failed_substep`` names the role/invocation that
+    # failed — without exposing Sensitive Evidence (PRD #26 user story 68). Null on
+    # success and on generic (non-causal) stage failures.
+    failure_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    failed_substep: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     # Experiment Metadata defaults (ADR 0025). Scenario id, deterministic check
     # results, and judge scores attach in later eval slices.
@@ -121,6 +129,11 @@ class AnalysisRun(Base):
     retrieval_strategy: Mapped[str] = mapped_column(String(64), nullable=False)
     chunking_strategy: Mapped[str] = mapped_column(String(64), nullable=False)
     verifier_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    # The recorded Reasoning Budget the Causal Analysis Stage ran under (ADR 0043).
+    # Stored as JSON so the per-role and stage limits are comparable across runs
+    # alongside the rest of Experiment Metadata (ADR 0025). Null on runs created
+    # before the budget was introduced.
+    reasoning_budget: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
