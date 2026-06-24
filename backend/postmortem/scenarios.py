@@ -532,8 +532,17 @@ class ScenarioReplayFalsifier:
         self.calls = 0
 
     def challenge(
-        self, *, hypothesis, artifacts, timeline_events, allow_proposals: bool = True
+        self,
+        *,
+        hypothesis,
+        artifacts,
+        timeline_events,
+        allow_proposals: bool = True,
+        repair_feedback: tuple[str, ...] = (),
     ) -> HypothesisChallengeOutput:
+        # The replay is a deterministic function of the hypothesis title, so a
+        # Targeted Repair cannot change its output; ``repair_feedback`` is accepted
+        # for interface parity (ADR 0043) and ignored.
         self.calls += 1
         output = self._by_title.get(hypothesis.title)
         if output is None:

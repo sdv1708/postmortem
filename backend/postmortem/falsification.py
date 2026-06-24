@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .llm import LLMClient
 from .rca import RcaEvidenceRef, RcaHypothesis
+from .reasoning import append_repair_feedback
 
 logger = logging.getLogger("postmortem.falsification")
 
@@ -176,7 +177,12 @@ def _render_artifact(artifact_id: str, source_type: str, source_name: str, body:
 
 
 def build_falsification_prompt(
-    hypothesis: HypothesisToChallenge, artifacts, timeline_events, *, allow_proposals: bool = True
+    hypothesis: HypothesisToChallenge,
+    artifacts,
+    timeline_events,
+    *,
+    allow_proposals: bool = True,
+    repair_feedback: tuple[str, ...] = (),
 ) -> tuple[str, str]:
     """Assemble the (system, user) prompt to challenge one hypothesis.
 
@@ -186,6 +192,10 @@ def build_falsification_prompt(
     ``allow_proposals`` controls whether the falsifier may surface a missed
     alternative: True while challenging an initial hypothesis, False during the
     second-round challenge of a proposed alternative (ADR 0036).
+
+    ``repair_feedback`` carries the deterministic Runtime Reasoning Gate errors from
+    a rejected first attempt so the single Targeted Repair re-invocation is informed
+    rather than a blind replay of the same prompt (ADR 0043, issue #37).
     """
     evidence = "\n\n".join(
         _render_artifact(a.id, a.source_type, a.source_name, a.body) for a in artifacts
@@ -216,7 +226,7 @@ def build_falsification_prompt(
         "Falsify the hypothesis as the JSON object described in the system "
         "message. Look beyond the cited lines for overlooked counterevidence."
     )
-    return _system_prompt(allow_proposals), user
+    return _system_prompt(allow_proposals), append_repair_feedback(user, repair_feedback)
 
 
 class Falsifier(Protocol):
@@ -237,6 +247,7 @@ class Falsifier(Protocol):
         artifacts,
         timeline_events,
         allow_proposals: bool = True,
+        repair_feedback: tuple[str, ...] = (),
     ) -> HypothesisChallengeOutput: ...
 
 
@@ -265,9 +276,14 @@ class LLMFalsifier:
         artifacts,
         timeline_events,
         allow_proposals: bool = True,
+        repair_feedback: tuple[str, ...] = (),
     ) -> HypothesisChallengeOutput:
         system, user = build_falsification_prompt(
-            hypothesis, artifacts, timeline_events, allow_proposals=allow_proposals
+            hypothesis,
+            artifacts,
+            timeline_events,
+            allow_proposals=allow_proposals,
+            repair_feedback=repair_feedback,
         )
         response = self._llm.complete(system=system, user=user)
         try:

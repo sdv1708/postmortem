@@ -83,6 +83,9 @@ export interface ExperimentMetadata {
   retrieval_strategy: string;
   chunking_strategy: string;
   verifier_version: string;
+  // The recorded Reasoning Budget the Causal Analysis Stage ran under (ADR 0043):
+  // per-role and stage limits for retrieval, tokens, and calls. Null on older runs.
+  reasoning_budget: Record<string, number | string> | null;
 }
 
 export interface RunStageEvent {
@@ -104,6 +107,11 @@ export interface AnalysisRun {
   incident_id: string;
   status: RunStatus;
   error: string | null;
+  // Controlled Causal Analysis Stage failure diagnostics (ADR 0043): a
+  // machine-readable code and the failed role/invocation, set only when stage 3
+  // fails through an exhausted Targeted Repair or Reasoning Budget.
+  failure_code: string | null;
+  failed_substep: string | null;
   experiment_metadata: ExperimentMetadata;
   artifact_ids: string[];
   stage_events: RunStageEvent[];

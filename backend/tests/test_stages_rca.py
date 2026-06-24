@@ -137,10 +137,17 @@ def test_ambiguous_evidence_yields_multiple_ranked_hypotheses(fresh_session):
     # only persists the hypothesis's own evidence and remediation.
     assert [a.description for a in top.action_items] == ["Roll back v184"]
 
-    # Usage from the provider is recorded on the stage event (ADR 0021).
+    # Usage from the provider is recorded on the stage event (ADR 0021), now
+    # alongside the recorded Reasoning Budget consumption (ADR 0043).
     event = _rca_event(fresh_session, run.id)
     assert event.status == "succeeded"
-    assert event.usage == {"total_tokens": 321}
+    assert event.usage["total_tokens"] == 321
+    # The bounded stage records its budget consumption: the builder made exactly one
+    # call (no Targeted Repair was needed) and the total stays within budget.
+    budget_usage = event.usage["reasoning_budget"]
+    assert budget_usage["roles"]["builder"]["calls"] == 1
+    assert budget_usage["roles"]["builder"]["repair_calls"] == 0
+    assert budget_usage["total_calls"] >= 1
     assert fake.calls, "the configured client was actually invoked"
 
 
@@ -203,9 +210,10 @@ def test_schema_invalid_output_fails_stage_without_corrupting_prior_outputs(fres
     _add(fresh_session, incident.id)
     fresh_session.commit()
 
-    # Malformed on every attempt (covers the single retry too): the stage must
-    # fail rather than persist corrupt output (ADR 0028). A fake extractor keeps
-    # stage 2 healthy so the malformed JSON is exercised by the RCA stage.
+    # Malformed on every attempt (covers the builder's single Targeted Repair too):
+    # the stage must fail rather than persist corrupt output (ADR 0028 / 0043). A
+    # fake extractor keeps stage 2 healthy so the malformed JSON is exercised by the
+    # RCA stage's builder role.
     fake = FakeLLMClient(lambda system, user: "{ not valid json")
     run = AnalysisService(
         fresh_session, llm_client=fake, incident_fact_extractor=FakeIncidentFactExtractor(), falsifier=FakeFalsifier()
@@ -213,6 +221,10 @@ def test_schema_invalid_output_fails_stage_without_corrupting_prior_outputs(fres
     fresh_session.commit()
 
     assert run.status == "failed"
+    # The builder's schema gate could not be satisfied by its one Targeted Repair,
+    # so the stage fails with a controlled code naming the failed substep (ADR 0043).
+    assert run.failure_code == "repair_exhausted"
+    assert run.failed_substep == "builder:generate"
     # No hypotheses leaked into state.
     assert _hypotheses(fresh_session, run.id) == []
     # Prior stages' outputs remain intact and inspectable (ADR 0029): the
@@ -221,10 +233,11 @@ def test_schema_invalid_output_fails_stage_without_corrupting_prior_outputs(fres
     timeline = fresh_session.query(TimelineEvent).filter_by(run_id=run.id).all()
     assert len(chunks) >= 1
     assert len(timeline) == 4
-    # The RCA stage event records the failure and a retry was attempted.
+    # The Causal Analysis Stage failure is terminal — its bounded Targeted Repair
+    # already ran, so the stage is not re-attempted (ADR 0043).
     event = _rca_event(fresh_session, run.id)
     assert event.status == "failed"
-    assert event.attempt == 2
+    assert event.attempt == 1
 
 
 def test_unknown_output_field_fails_stage(fresh_session):
@@ -252,8 +265,10 @@ def test_unknown_output_field_fails_stage(fresh_session):
     fresh_session.commit()
 
     assert run.status == "failed"
+    assert run.failure_code == "repair_exhausted"
+    assert run.failed_substep == "builder:generate"
     assert _hypotheses(fresh_session, run.id) == []
-    assert _rca_event(fresh_session, run.id).attempt == 2
+    assert _rca_event(fresh_session, run.id).attempt == 1
 
 
 def test_uncited_hypothesis_normalized_to_assumption_with_warning(fresh_session):

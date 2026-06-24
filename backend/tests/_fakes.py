@@ -121,9 +121,11 @@ class FakeFalsifier:
         artifacts,
         timeline_events,
         allow_proposals: bool = True,
+        repair_feedback: tuple[str, ...] = (),
     ) -> HypothesisChallengeOutput:
         self.calls.append(hypothesis)
         self.last_allow_proposals = allow_proposals
+        self.last_repair_feedback = repair_feedback
         if hypothesis.title in self._raise_for:
             raise ValueError(f"fake falsifier cannot challenge {hypothesis.title!r}")
         if self._challenge is not None:
@@ -204,8 +206,14 @@ class FakeAdvisoryRanker:
         self._duplicate = duplicate
         self.calls: list[list[RankingCandidate]] = []
 
-    def rank(self, candidates: list[RankingCandidate]) -> AdvisoryRankingOutput:
+    def rank(
+        self,
+        candidates: list[RankingCandidate],
+        *,
+        repair_feedback: tuple[str, ...] = (),
+    ) -> AdvisoryRankingOutput:
         self.calls.append(list(candidates))
+        self.last_repair_feedback = repair_feedback
         kept = [c for c in candidates if c.title not in self._drop]
         if self._order is not None:
             by_title = {c.title: c for c in kept}

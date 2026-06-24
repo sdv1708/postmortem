@@ -364,6 +364,21 @@ def ensure_schema_compatibility(engine: Engine) -> None:
     if "evidence_refs" not in inspector.get_table_names():
         return
 
+    # Controlled causal-analysis failure diagnostics + recorded Reasoning Budget
+    # added in slice #37 (ADR 0043). All nullable: existing runs carry no failure
+    # code and predate the recorded budget. JSON/VARCHAR ddl is valid on both
+    # SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "analysis_runs",
+        {
+            "failure_code": "VARCHAR(48)",
+            "failed_substep": "VARCHAR(128)",
+            "reasoning_budget": "JSON",
+        },
+    )
+
     _add_columns_if_missing(
         engine,
         inspector,

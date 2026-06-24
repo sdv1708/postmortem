@@ -196,13 +196,16 @@ def test_falsifier_sees_all_run_artifacts_not_just_the_cited_subset(fresh_sessio
         return HypothesisChallengeOutput(challenged_claim="x", severity="minor")
 
     class RecordingFalsifier(FakeFalsifier):
-        def challenge(self, *, hypothesis, artifacts, timeline_events, allow_proposals=True):
+        def challenge(
+            self, *, hypothesis, artifacts, timeline_events, allow_proposals=True, repair_feedback=()
+        ):
             seen_artifact_ids.update(a.id for a in artifacts)
             return super().challenge(
                 hypothesis=hypothesis,
                 artifacts=artifacts,
                 timeline_events=timeline_events,
                 allow_proposals=allow_proposals,
+                repair_feedback=repair_feedback,
             )
 
     run = AnalysisService(
@@ -225,12 +228,13 @@ def test_missing_challenge_coverage_fails_stage_after_retry(fresh_session):
     artifact = _add(fresh_session, incident.id)
     fresh_session.commit()
 
-    # The falsifier cannot challenge the second hypothesis on any attempt, so the
-    # mandatory coverage gate fails stage 3 after its single retry (ADR 0034).
-    # Seed the builder twice because stage 3 runs the original attempt + one retry.
+    # The falsifier cannot challenge the second hypothesis on its first attempt or
+    # its one Targeted Repair, so the mandatory coverage gate fails stage 3 with a
+    # controlled code (ADR 0034 / 0043). The builder is seeded once: it succeeds on
+    # its first call, so its response is not re-consumed.
     run = AnalysisService(
         fresh_session,
-        llm_client=FakeLLMClient([_two_hypotheses(artifact.id), _two_hypotheses(artifact.id)]),
+        llm_client=FakeLLMClient([_two_hypotheses(artifact.id)]),
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
         falsifier=FakeFalsifier(raise_for={"Cache memory pressure cascaded"}),
@@ -239,9 +243,13 @@ def test_missing_challenge_coverage_fails_stage_after_retry(fresh_session):
 
     # The run fails and never looks successful (PRD user stories 61-62 / 64).
     assert run.status == "failed"
+    assert run.failure_code == "repair_exhausted"
+    assert run.failed_substep.startswith("challenge:initial:")
     event = _rca_event(fresh_session, run.id)
     assert event.status == "failed"
-    assert event.attempt == 2
+    # Terminal causal-stage failure: the bounded Targeted Repair already ran, so the
+    # stage is not re-attempted (ADR 0043).
+    assert event.attempt == 1
     # No Provisional Postmortem is produced after causal-analysis failure.
     assert fresh_session.query(Postmortem).filter_by(run_id=run.id).count() == 0
     # Prior stage outputs remain intact and inspectable (ADR 0029): the normalize

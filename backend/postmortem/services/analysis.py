@@ -28,6 +28,7 @@ from ..models import (
     TimelineEvent,
 )
 from ..rca import PROMPT_VERSION
+from ..reasoning import DEFAULT_REASONING_BUDGET, ReasoningBudget
 from ..retrieval import RETRIEVAL_STRATEGY_VERSION, RetrievalStrategy
 from ..schemas import AnalysisRunCreate, ReviewerNoteCreate
 from ..verification import (
@@ -37,7 +38,7 @@ from ..verification import (
 )
 from .artifacts import ArtifactNotFoundError
 from .incidents import IncidentService
-from .run_executor import RunExecutor, StagedRunExecutor, StageRecorder
+from .run_executor import RunExecutor, StagedRunExecutor, StageFailedError, StageRecorder
 from .stages import PipelineStageRunner
 
 
@@ -92,9 +93,15 @@ class AnalysisService:
         incident_fact_extractor: IncidentFactExtractor | None = None,
         falsifier: Falsifier | None = None,
         advisory_ranker: AdvisoryRanker | None = None,
+        reasoning_budget: ReasoningBudget | None = None,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
+        # The Reasoning Budget the Causal Analysis Stage runs under (ADR 0043). It is
+        # both threaded into the stage runner (which enforces it) and recorded in the
+        # run's Experiment Metadata (ADR 0025) so a run documents the bounds it ran
+        # under. Tests inject a tighter budget to exercise budget exhaustion.
+        self._reasoning_budget = reasoning_budget or DEFAULT_REASONING_BUDGET
         self._retrieval_strategy_version = (
             retrieval_strategy.version
             if retrieval_strategy is not None
@@ -121,6 +128,7 @@ class AnalysisService:
                 incident_fact_extractor=incident_fact_extractor,
                 falsifier=falsifier,
                 advisory_ranker=advisory_ranker,
+                reasoning_budget=self._reasoning_budget,
             )
         )
 
@@ -161,6 +169,9 @@ class AnalysisService:
         run = AnalysisRun(
             incident_id=incident_id,
             status="queued",
+            # Record the Reasoning Budget the Causal Analysis Stage will run under
+            # so the bounds are part of comparable Experiment Metadata (ADR 0025/0043).
+            reasoning_budget=self._reasoning_budget.as_metadata(),
             **metadata,
         )
         self._session.add(run)
@@ -436,9 +447,15 @@ class AnalysisService:
             self._executor.execute(run, recorder)
         except Exception as exc:  # ADR 0029: a stage that fails its retry fails the run
             # Prior stage events and the Artifact lock are left intact and
-            # inspectable; later stages were never started.
+            # inspectable; later stages were never started. A controlled Causal
+            # Analysis Stage failure (ADR 0043) also records its machine-readable
+            # code and the failed substep so failed-run diagnostics can explain the
+            # failure without exposing Sensitive Evidence (PRD #26 user story 68).
             run.status = "failed"
             run.error = str(exc) or exc.__class__.__name__
+            if isinstance(exc, StageFailedError):
+                run.failure_code = exc.failure_code
+                run.failed_substep = exc.failed_substep
             run.completed_at = _utcnow()
             self._session.flush()
             if commit_progress:
@@ -450,6 +467,8 @@ class AnalysisService:
                 run_id=run.id,
                 incident_id=run.incident_id,
                 error=run.error,
+                failure_code=run.failure_code,
+                failed_substep=run.failed_substep,
                 duration_ms=_elapsed_ms(started, run.completed_at),
             )
             return
@@ -801,6 +820,10 @@ def analysis_run_read(run: AnalysisRun) -> dict:
         "incident_id": run.incident_id,
         "status": run.status,
         "error": run.error,
+        # Controlled Causal Analysis Stage failure diagnostics (ADR 0043); null on
+        # success and on generic stage failures.
+        "failure_code": run.failure_code,
+        "failed_substep": run.failed_substep,
         "experiment_metadata": run,
         "artifact_ids": run_artifact_ids(run),
         "stage_events": list(run.stage_events),
