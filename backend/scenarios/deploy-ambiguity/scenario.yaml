@@ -23,6 +23,47 @@ expected_hypothesis_families:
   - connection-pool-capacity
   - upstream-dependency
 
+# Structured Causal Evaluation Expectations (PRD #38, ADR 0044). These drive the
+# deterministic causal checks and the comparison against the builder-only baseline
+# without depending on exact generated wording. Families must be drawn from
+# expected_hypothesis_families above; counterevidence cites real evidence lines.
+causal_evaluation:
+  expected_factors:
+    - family: connection-pool-capacity
+      role: failure_mechanism
+    - family: deploy-regression
+      role: trigger
+  known_counterevidence:
+    - description: >-
+        max_connections was left unchanged at 40, weakening a pure
+        deploy-regression explanation.
+      source_name: deploy-notes.md
+      line_start: 4
+      line_end: 4
+    - description: No upstream provider incident was found during the window.
+      source_name: oncall-notes.md
+      line_start: 6
+      line_end: 6
+    - description: >-
+        A cache node evicted at 14:33 under memory pressure, an independent
+        source of database read load.
+      source_name: oncall-notes.md
+      line_start: 4
+      line_end: 4
+  plausible_rejected_alternatives:
+    - upstream-dependency
+  critical_evidence_gaps:
+    - >-
+      No per-endpoint error-rate metrics to confirm the 500s originated at the
+      connection-pool layer rather than upstream.
+    - >-
+      No before/after comparison proving the v184 pool-acquisition refactor
+      changed runtime behavior versus v183.
+  expected_refusal: false
+  unacceptable_overclaims:
+    - the deploy was definitively the root cause
+    - the connection pool was conclusively the sole cause
+
 ground_truth_postmortem: ground_truth_postmortem.md
 
 evidence:

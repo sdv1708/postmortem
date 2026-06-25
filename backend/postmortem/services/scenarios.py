@@ -49,13 +49,21 @@ class ScenarioSeedService:
         return load_scenario(scenario_id, self._base_dir)
 
     def seed_and_run(
-        self, scenario_id: str, *, execute_inline: bool = True
+        self,
+        scenario_id: str,
+        *,
+        execute_inline: bool = True,
+        falsification_enabled: bool = True,
     ) -> tuple[Incident, AnalysisRun]:
         """Create the Incident + Artifacts and start an Analysis Run.
 
         Raises ``ScenarioNotFoundError`` for an unknown id and
         ``ScenarioValidationError`` for a malformed fixture (surfaced before any
         product rows are written).
+
+        ``falsification_enabled=False`` drives the Builder-Only Baseline (PRD #38):
+        the bundled falsifier replay is simply never consulted, so the same scenario
+        runs under both configurations with matched model and retrieval constraints.
         """
         scenario = self.get(scenario_id)
         log_event(
@@ -115,6 +123,7 @@ class ScenarioSeedService:
                 scenario.id, incident_facts
             ),
             falsifier=ScenarioReplayFalsifier(scenario.id, falsification),
+            falsification_enabled=falsification_enabled,
         ).start_run(incident.id, AnalysisRunCreate(), execute_inline=execute_inline)
         log_event(
             logger,

@@ -45,6 +45,9 @@ class FakePostmortemJudge:
             "root_cause_quality": 4,
             "evidence_grounding": 5,
             "uncertainty_honesty": 5,
+            # Causal-depth dimensions added for the multi-pass comparison (PRD #38).
+            "explanatory_coverage": 4,
+            "falsification_quality": 4,
         }
         self._rationale = rationale
         self.calls: list[JudgeInput] = []

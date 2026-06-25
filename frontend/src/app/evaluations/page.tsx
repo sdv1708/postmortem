@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type EvaluationRun } from "@/lib/api";
+import { api, type AnalysisMode, type EvaluationRun } from "@/lib/api";
 
-// Dev-oriented evaluation dashboard (ADR 0010). Citation validity and warning
-// counts are the deterministic trust floor; judge scores are semantic quality and
-// are never the authority for citation validity (ADR 0010 / AC #5).
+// Dev-oriented evaluation dashboard (ADR 0010 / 0044). Each scenario runs under
+// two configurations — the product "multi_pass" causal analysis and the
+// "builder_only" baseline that skips the Falsification Round — so the value of
+// bounded multi-pass reasoning is measured, not assumed (PRD #38). Citation
+// validity and warning counts are the deterministic trust floor; judge scores are
+// semantic quality and never decide citation validity (ADR 0010 / AC #5).
 export default function EvaluationsPage() {
   const [runs, setRuns] = useState<EvaluationRun[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,14 +38,20 @@ export default function EvaluationsPage() {
     }
   }
 
-  // Show the latest run per scenario at the top.
-  const latestByScenario = new Map<string, EvaluationRun>();
+  // Latest run per (scenario, configuration). Runs arrive newest-first, so the
+  // first time we see a (scenario_id, analysis_mode) pair it is the latest.
+  const latestByKey = new Map<string, EvaluationRun>();
+  const scenarioOrder: string[] = [];
   for (const run of runs ?? []) {
-    if (!latestByScenario.has(run.scenario_id)) {
-      latestByScenario.set(run.scenario_id, run);
-    }
+    const key = `${run.scenario_id}::${run.analysis_mode}`;
+    if (!latestByKey.has(key)) latestByKey.set(key, run);
+    if (!scenarioOrder.includes(run.scenario_id)) scenarioOrder.push(run.scenario_id);
   }
-  const latest = [...latestByScenario.values()];
+  const comparisons = scenarioOrder.map((scenarioId) => ({
+    scenarioId,
+    multiPass: latestByKey.get(`${scenarioId}::multi_pass`) ?? null,
+    builderOnly: latestByKey.get(`${scenarioId}::builder_only`) ?? null,
+  }));
 
   return (
     <div className="space-y-8">
@@ -51,9 +60,11 @@ export default function EvaluationsPage() {
           <p className="label">Internal</p>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-900">Evaluations</h1>
           <p className="max-w-prose text-sm text-slate-600">
-            Run scenario fixtures through the deterministic check floor and the
-            LLM-as-judge rubric. Citation validity and warning counts are mechanical;
-            judge scores measure semantic quality and never decide citations.
+            Each scenario runs through bounded multi-pass causal analysis and a
+            builder-only baseline under matched model and retrieval constraints.
+            Deterministic checks are the trust floor; judge scores measure semantic
+            quality and never decide citations. Calls, tokens, and latency show that
+            better reasoning is not bought with unbounded cost.
           </p>
         </div>
         <button type="button" className="button-primary" disabled={running} onClick={runAll}>
@@ -67,19 +78,19 @@ export default function EvaluationsPage() {
         </div>
       )}
 
-      {runs && latest.length === 0 && (
+      {runs && comparisons.length === 0 && (
         <div className="rounded-xl border border-dashed border-slate-300 bg-white/70 p-10 text-center">
           <h3 className="text-sm font-semibold text-slate-900">No evaluation runs yet</h3>
           <p className="mt-1 text-sm text-slate-600">
-            Run the suite to score every scenario fixture against its ground truth.
+            Run the suite to score every scenario fixture under both configurations.
           </p>
         </div>
       )}
 
-      {latest.length > 0 && (
+      {comparisons.length > 0 && (
         <div className="grid gap-4">
-          {latest.map((run) => (
-            <EvaluationCard key={run.id} run={run} />
+          {comparisons.map((comparison) => (
+            <ComparisonCard key={comparison.scenarioId} {...comparison} />
           ))}
         </div>
       )}
@@ -87,57 +98,122 @@ export default function EvaluationsPage() {
   );
 }
 
-function EvaluationCard({ run }: { run: EvaluationRun }) {
-  const citationsOk = run.citation_total > 0 && run.citation_verified === run.citation_total;
-  const warnings = Object.entries(run.warning_code_counts);
+function ComparisonCard({
+  scenarioId,
+  multiPass,
+  builderOnly,
+}: {
+  scenarioId: string;
+  multiPass: EvaluationRun | null;
+  builderOnly: EvaluationRun | null;
+}) {
+  const title = (multiPass ?? builderOnly)?.scenario_title ?? scenarioId;
+  const meta = (multiPass ?? builderOnly)?.experiment_metadata;
   return (
     <section className="card-padded">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold text-slate-900">{run.scenario_title}</h2>
-            <PassBadge passed={run.passed} />
+          <h2 className="text-base font-semibold text-slate-900">{title}</h2>
+          <p className="mt-0.5 font-mono text-xs text-slate-500">{scenarioId}</p>
+        </div>
+        {meta && (
+          <div className="text-right text-xs text-slate-500">
+            <p>{meta.model_provider}</p>
+            <p>{meta.verifier_version}</p>
           </div>
-          <p className="mt-0.5 font-mono text-xs text-slate-500">{run.scenario_id}</p>
-        </div>
-        <div className="text-right text-xs text-slate-500">
-          <p>{run.experiment_metadata.model_provider}</p>
-          <p>{run.experiment_metadata.verifier_version}</p>
-        </div>
+        )}
       </div>
 
-      <div className="mt-4 grid gap-4 sm:grid-cols-3">
-        {/* Deterministic citation validity — the trust floor. */}
-        <Metric label="Citation validity">
-          <span className={citationsOk ? "text-emerald-700" : "text-rose-700"}>
-            {run.citation_verified}/{run.citation_total} verified
-          </span>
-        </Metric>
-        {/* Warning Code counts. */}
-        <Metric label="Warnings">
-          {warnings.length === 0 ? (
-            <span className="text-slate-500">none</span>
-          ) : (
-            <span className="flex flex-wrap gap-1">
-              {warnings.map(([code, count]) => (
-                <span key={code} className="badge bg-amber-50 text-amber-700 ring-amber-200">
-                  {code} ×{count}
-                </span>
-              ))}
-            </span>
-          )}
-        </Metric>
-        {/* Semantic judge scores (optional). */}
-        <Metric label="Judge (semantic)">
-          {run.judge_scores ? (
-            <span className="text-slate-800">{run.judge_scores.overall.toFixed(2)} / 5 avg</span>
-          ) : (
-            <span className="text-slate-500">not scored (no model)</span>
-          )}
-        </Metric>
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <ConfigColumn label="Multi-pass causal analysis" mode="multi_pass" run={multiPass} />
+        <ConfigColumn label="Builder-only baseline" mode="builder_only" run={builderOnly} />
+      </div>
+    </section>
+  );
+}
+
+function ConfigColumn({
+  label,
+  mode,
+  run,
+}: {
+  label: string;
+  mode: AnalysisMode;
+  run: EvaluationRun | null;
+}) {
+  const accent =
+    mode === "multi_pass"
+      ? "border-indigo-200 bg-indigo-50/40"
+      : "border-slate-200 bg-slate-50/60";
+  return (
+    <div className={`rounded-xl border ${accent} p-4`}>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-slate-900">{label}</h3>
+        {run ? <PassBadge passed={run.passed} /> : null}
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      {!run ? (
+        <p className="mt-3 text-sm text-slate-500">Not run yet.</p>
+      ) : (
+        <div className="mt-3 space-y-4">
+          <ChecksSummary run={run} />
+
+          <div className="grid grid-cols-2 gap-3">
+            <Metric label="Citation validity">
+              <span
+                className={
+                  run.citation_total > 0 && run.citation_verified === run.citation_total
+                    ? "text-emerald-700"
+                    : run.citation_total === 0
+                      ? "text-slate-500"
+                      : "text-rose-700"
+                }
+              >
+                {run.citation_verified}/{run.citation_total} verified
+              </span>
+            </Metric>
+            <Metric label="Judge (semantic)">
+              {run.judge_scores ? (
+                <span className="text-slate-800">{run.judge_scores.overall.toFixed(2)} / 5</span>
+              ) : (
+                <span className="text-slate-500">not scored</span>
+              )}
+            </Metric>
+          </div>
+
+          {/* Causal-depth judge dimensions, the point of the comparison (PRD #38). */}
+          {run.judge_scores && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+              <JudgeDim scores={run.judge_scores.scores} dim="explanatory_coverage" />
+              <JudgeDim scores={run.judge_scores.scores} dim="falsification_quality" />
+            </div>
+          )}
+
+          {/* Cost: better reasoning should not be bought with unbounded cost. */}
+          <div className="grid grid-cols-3 gap-2 border-t border-slate-200 pt-3 text-center">
+            <Cost label="Model calls" value={run.model_calls} />
+            <Cost label="Tokens" value={run.total_tokens} />
+            <Cost label="Latency" value={`${run.latency_ms} ms`} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChecksSummary({ run }: { run: EvaluationRun }) {
+  const total = run.checks.length;
+  const passed = run.checks.filter((c) => c.passed).length;
+  const failing = run.checks.filter((c) => !c.passed);
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs">
+        <span className="label">Deterministic checks</span>
+        <span className={passed === total ? "text-emerald-700" : "text-rose-700"}>
+          {passed}/{total} passing
+        </span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
         {run.checks.map((check) => (
           <span
             key={check.name}
@@ -152,20 +228,26 @@ function EvaluationCard({ run }: { run: EvaluationRun }) {
           </span>
         ))}
       </div>
-
-      {run.judge_scores && (
-        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
-          <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-600">
-            {Object.entries(run.judge_scores.scores).map(([dim, score]) => (
-              <span key={dim}>
-                {dim.replace(/_/g, " ")}: <span className="font-semibold text-slate-900">{score}</span>
-              </span>
-            ))}
-          </div>
-          <p className="mt-2 text-xs italic text-slate-500">{run.judge_scores.rationale}</p>
-        </div>
+      {failing.length > 0 && (
+        <p className="mt-2 text-xs italic text-rose-600">{failing[0].detail}</p>
       )}
-    </section>
+    </div>
+  );
+}
+
+function JudgeDim({
+  scores,
+  dim,
+}: {
+  scores: Record<string, number>;
+  dim: string;
+}) {
+  const score = scores[dim];
+  if (score === undefined) return null;
+  return (
+    <span>
+      {dim.replace(/_/g, " ")}: <span className="font-semibold text-slate-900">{score}/5</span>
+    </span>
   );
 }
 
@@ -174,6 +256,15 @@ function Metric({ label, children }: { label: string; children: React.ReactNode 
     <div className="rounded-lg border border-slate-200 bg-white p-3">
       <p className="label">{label}</p>
       <div className="mt-1 text-sm font-medium">{children}</div>
+    </div>
+  );
+}
+
+function Cost({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div>
+      <p className="text-sm font-semibold text-slate-900">{value}</p>
+      <p className="label">{label}</p>
     </div>
   );
 }

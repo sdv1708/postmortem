@@ -379,6 +379,23 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         },
     )
 
+    # Multi-pass vs Builder-Only Baseline comparison columns added in slice #38
+    # (ADR 0044). Existing Evaluation Runs predate the comparison: they were the
+    # multi-pass configuration and recorded no cost metrics, so default the mode to
+    # 'multi_pass' and the cost columns to 0. VARCHAR/INTEGER ddl with a DEFAULT and
+    # NOT NULL is valid on both SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "evaluation_runs",
+        {
+            "analysis_mode": "VARCHAR(16) NOT NULL DEFAULT 'multi_pass'",
+            "model_calls": "INTEGER NOT NULL DEFAULT 0",
+            "total_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "latency_ms": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+
     _add_columns_if_missing(
         engine,
         inspector,

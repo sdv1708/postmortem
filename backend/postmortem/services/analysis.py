@@ -94,9 +94,14 @@ class AnalysisService:
         falsifier: Falsifier | None = None,
         advisory_ranker: AdvisoryRanker | None = None,
         reasoning_budget: ReasoningBudget | None = None,
+        falsification_enabled: bool = True,
     ) -> None:
         self._session = session
         self._llm_client = llm_client
+        # Builder-Only Baseline switch (PRD #38, ADR 0044): forwarded to the stage
+        # runner so the Evaluation Run harness can drive a baseline configuration
+        # alongside the multi-pass one. The product API never disables falsification.
+        self._falsification_enabled = falsification_enabled
         # The Reasoning Budget the Causal Analysis Stage runs under (ADR 0043). It is
         # both threaded into the stage runner (which enforces it) and recorded in the
         # run's Experiment Metadata (ADR 0025) so a run documents the bounds it ran
@@ -129,6 +134,7 @@ class AnalysisService:
                 falsifier=falsifier,
                 advisory_ranker=advisory_ranker,
                 reasoning_budget=self._reasoning_budget,
+                falsification_enabled=falsification_enabled,
             )
         )
 

@@ -35,6 +35,68 @@ class HypothesisView:
     # Post-challenge Advisory Hypothesis Ranking position (ADR 0037); None only
     # before the ranking substep ran or on an older run.
     advisory_rank: int | None = None
+    # Whether the bounded Falsification Round persisted a Hypothesis Challenge for
+    # this candidate (ADR 0034). False for every candidate in a Builder-Only
+    # Baseline run, which is the comparison signal the challenge-coverage check reads.
+    has_challenge: bool = False
+    # Generation provenance: "initial" (builder) or "proposed" (falsifier
+    # expansion). Used by the alternative-consideration check (PRD #38).
+    origin: str = "initial"
+    # Title + summary, scanned by the unacceptable-overclaims check (PRD #38).
+    title: str = ""
+    summary: str = ""
+
+
+@dataclass(frozen=True)
+class ExpectedFactorView:
+    """ORM-free view of one expected causal factor family + role (PRD #38)."""
+
+    family: str
+    role: str
+
+
+@dataclass(frozen=True)
+class CitationRange:
+    """An ORM-free citation address: source file + 1-based inclusive line range.
+
+    Used to match declared known counterevidence against the evidence the run's
+    challenges actually cited, by line-range overlap rather than wording (PRD #38).
+    """
+
+    source_name: str
+    line_start: int
+    line_end: int
+
+
+@dataclass(frozen=True)
+class CounterevidenceView:
+    """A declared known-counterevidence item: its description + cited line range."""
+
+    description: str
+    source_name: str
+    line_start: int
+    line_end: int
+
+
+@dataclass(frozen=True)
+class CausalExpectationsView:
+    """ORM-free distillation of a scenario's Causal Evaluation Expectations.
+
+    Mirrors ``scenarios.CausalEvaluationExpectations`` but stays free of the
+    scenario-loading imports so the deterministic checks remain pure and unit
+    testable, exactly like ``RunOutputSnapshot`` (ADR 0010 / 0044).
+    """
+
+    expected_factors: tuple[ExpectedFactorView, ...]
+    plausible_rejected_alternatives: tuple[str, ...]
+    expected_refusal: bool
+    unacceptable_overclaims: tuple[str, ...]
+    # Known counterevidence the falsifier should surface, cited to real evidence
+    # lines, and the critical Evidence Gaps a sound analysis should flag (PRD #38).
+    # Counterevidence is checked deterministically by citation overlap; the prose
+    # gaps inform the semantic judge (deterministic checks avoid exact wording).
+    known_counterevidence: tuple[CounterevidenceView, ...] = ()
+    critical_evidence_gaps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,6 +119,19 @@ class RunOutputSnapshot:
     # The product's own deterministic refusal verdict for the run (ADR 0032),
     # read back from the drafted Postmortem: 'sufficient' or 'insufficient'.
     evidence_sufficiency: str = "sufficient"
+    # The configuration that produced the run: "multi_pass" or "builder_only"
+    # (PRD #38). Recorded so the comparison is legible; the checks read the run's
+    # actual outputs, not this label.
+    analysis_mode: str = "multi_pass"
+    # Structured Causal Evaluation Expectations for the scenario, or None when the
+    # manifest declares no ``causal_evaluation`` block — in which case the
+    # causal-specific checks degrade to trivial passes (PRD #38 / ADR 0044).
+    causal_expectations: CausalExpectationsView | None = None
+    # Every citation a Counterclaim raised across the run's Hypothesis Challenges
+    # (source + line range). The counterevidence-coverage check matches declared
+    # known counterevidence against these; a Builder-Only Baseline has none, so it
+    # cannot surface the known counterevidence (PRD #38).
+    counterclaim_citations: tuple[CitationRange, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -200,6 +275,263 @@ def check_advisory_ranking_coverage(snapshot: RunOutputSnapshot) -> CheckResult:
     return CheckResult(name="advisory_ranking_coverage", passed=passed, detail=detail)
 
 
+# --- Causal-analysis deterministic checks (PRD #38 / ADR 0044) --------------
+#
+# These measure whether bounded multi-pass causal analysis actually does the work
+# the PRD promises, and they are what makes the Builder-Only Baseline measurably
+# weaker (it fails challenge coverage). They use the scenario's structured Causal
+# Evaluation Expectations where present, and never consult the judge for citation
+# validity (AC #4). A scenario with no expectations declared degrades to a trivial
+# pass for the expectation-driven checks rather than failing.
+
+# Semantic support statuses that could back a finalizable Causal Factor (CONTEXT
+# "Causal Factor vs Human Assumption"): only supported or partial, never an
+# uncited assumption or an unsupported claim.
+_FINALIZABLE_SUPPORT: Final[frozenset[str]] = frozenset({"supported", "partial"})
+
+
+def check_causal_challenge_coverage(snapshot: RunOutputSnapshot) -> CheckResult:
+    """Every RCA Hypothesis must carry a persisted Hypothesis Challenge (ADR 0034).
+
+    This is the headline multi-pass-vs-baseline signal: the Builder-Only Baseline
+    skips the Falsification Round, so none of its hypotheses are challenged and this
+    check fails for the baseline while passing for the multi-pass run.
+    """
+    total = len(snapshot.hypotheses)
+    if total == 0:
+        return CheckResult(
+            name="causal_challenge_coverage",
+            passed=True,
+            detail="no hypotheses to challenge",
+        )
+    challenged = sum(1 for h in snapshot.hypotheses if h.has_challenge)
+    passed = challenged == total
+    return CheckResult(
+        name="causal_challenge_coverage",
+        passed=passed,
+        detail=f"{challenged}/{total} hypotheses challenged",
+    )
+
+
+def _family_represented_by_non_leader(family: str, snapshot: RunOutputSnapshot) -> bool:
+    """Was a hypothesis family considered but not chosen as the advisory leader?
+
+    A causal factor family is "represented" by a hypothesis when every meaningful
+    token of its slug (``connection-pool-capacity`` → pool/capacity/connection)
+    appears in the hypothesis title — a concept match, not exact-wording matching of
+    generated prose. "Considered but rejected" means represented by a hypothesis the
+    Advisory Hypothesis Ranking did *not* place first.
+    """
+    tokens = [token for token in family.lower().split("-") if len(token) >= 3]
+    if not tokens:
+        return False
+    for hypothesis in snapshot.hypotheses:
+        title = hypothesis.title.lower()
+        if all(token in title for token in tokens) and hypothesis.advisory_rank != 1:
+            return True
+    return False
+
+
+def check_alternative_consideration(snapshot: RunOutputSnapshot) -> CheckResult:
+    """Each declared plausible alternative must be weighed and not chosen as lead.
+
+    The PRD's structured expectations let this be tested without exact wording: a
+    sound run must represent every declared ``plausible_rejected_alternative`` family
+    as a generated hypothesis that the Advisory Hypothesis Ranking did not place
+    first — i.e. it was genuinely considered and then ranked below the leading
+    candidate, rather than ignored or mistaken for the answer (PRD #38 story 83).
+    With no expectations (or none declared) the check passes with the observed count.
+    """
+    exp = snapshot.causal_expectations
+    observed = len(snapshot.hypotheses)
+    if exp is None or exp.expected_refusal or not exp.plausible_rejected_alternatives:
+        return CheckResult(
+            name="alternative_consideration",
+            passed=True,
+            detail=f"{observed} hypotheses considered (no alternatives required)",
+        )
+    missing = [
+        family
+        for family in exp.plausible_rejected_alternatives
+        if not _family_represented_by_non_leader(family, snapshot)
+    ]
+    passed = not missing
+    detail = (
+        f"all {len(exp.plausible_rejected_alternatives)} declared alternative(s) "
+        "considered and ranked below the lead"
+        if passed
+        else f"declared alternative(s) not considered as a non-leading candidate: {missing}"
+    )
+    return CheckResult(name="alternative_consideration", passed=passed, detail=detail)
+
+
+def _ranges_overlap(item: CounterevidenceView, citation: CitationRange) -> bool:
+    """Do a counterevidence item and a counterclaim citation cover shared lines?"""
+    return (
+        item.source_name == citation.source_name
+        and item.line_start <= citation.line_end
+        and citation.line_start <= item.line_end
+    )
+
+
+def check_counterevidence_coverage(snapshot: RunOutputSnapshot) -> CheckResult:
+    """The falsifier must surface every declared known counterevidence item (PRD #38).
+
+    Falsification quality is testable, not assumed: each declared counterevidence is
+    cited to exact evidence lines, and a sound multi-pass run must raise a
+    Counterclaim citing those lines. Matching is by line-range overlap, so it does
+    not depend on generated wording (PRD story 83 / AC #4). A Builder-Only Baseline
+    raises no Counterclaims, so it cannot surface any known counterevidence — the
+    second signal, beside challenge coverage, that distinguishes the configurations.
+    A scenario that declares no counterevidence (or expects refusal) passes trivially.
+    """
+    exp = snapshot.causal_expectations
+    if exp is None or exp.expected_refusal or not exp.known_counterevidence:
+        return CheckResult(
+            name="counterevidence_coverage",
+            passed=True,
+            detail="no known counterevidence declared",
+        )
+    missing: list[str] = []
+    for item in exp.known_counterevidence:
+        if not any(
+            _ranges_overlap(item, citation) for citation in snapshot.counterclaim_citations
+        ):
+            missing.append(f"{item.source_name}:{item.line_start}-{item.line_end}")
+    surfaced = len(exp.known_counterevidence) - len(missing)
+    passed = not missing
+    detail = (
+        f"{surfaced}/{len(exp.known_counterevidence)} known counterevidence items "
+        "surfaced by challenges"
+        + ("" if passed else f"; missing {missing}")
+    )
+    return CheckResult(name="counterevidence_coverage", passed=passed, detail=detail)
+
+
+def check_unsupported_causal_claims(snapshot: RunOutputSnapshot) -> CheckResult:
+    """The advisory leader must not rest on unsupported evidence (PRD story 23).
+
+    A valid citation that does not semantically support its claim cannot be allowed
+    to top the ranking. Any hypothesis judged ``unsupported`` is counted for
+    visibility, but only an unsupported *advisory leader* fails the check.
+    """
+    if not snapshot.hypotheses:
+        return CheckResult(
+            name="unsupported_causal_claims",
+            passed=True,
+            detail="no causal claims",
+        )
+    unsupported = sum(1 for h in snapshot.hypotheses if h.support_status == "unsupported")
+    leader = next((h for h in snapshot.hypotheses if h.advisory_rank == 1), None)
+    leader_unsupported = leader is not None and leader.support_status == "unsupported"
+    passed = not leader_unsupported
+    detail = (
+        f"{unsupported} unsupported hypotheses; advisory leader "
+        + ("unsupported" if leader_unsupported else "supported/partial/assumption")
+    )
+    return CheckResult(name="unsupported_causal_claims", passed=passed, detail=detail)
+
+
+def check_causal_refusal(snapshot: RunOutputSnapshot) -> CheckResult:
+    """The run must refuse exactly when the expectations say it should (PRD #38).
+
+    Driven by the scenario's structured ``expected_refusal`` rather than the tag
+    heuristic. A refusal scenario must mark itself ``insufficient`` and produce no
+    evidence-backed hypotheses; any other scenario must not spuriously refuse.
+    """
+    exp = snapshot.causal_expectations
+    if exp is None:
+        return CheckResult(
+            name="causal_refusal",
+            passed=True,
+            detail="no causal expectations declared",
+        )
+    refused = snapshot.evidence_sufficiency == "insufficient"
+    if exp.expected_refusal:
+        evidence_backed = sum(1 for h in snapshot.hypotheses if h.citation_count > 0)
+        passed = refused and evidence_backed == 0
+        detail = (
+            "refused as expected (no evidence-backed hypotheses)"
+            if passed
+            else f"expected refusal but sufficiency={snapshot.evidence_sufficiency!r} "
+            f"with {evidence_backed} evidence-backed hypotheses"
+        )
+    else:
+        passed = not refused
+        detail = (
+            "did not spuriously refuse"
+            if passed
+            else "spuriously refused despite sufficient evidence"
+        )
+    return CheckResult(name="causal_refusal", passed=passed, detail=detail)
+
+
+def check_causal_role_constraints(snapshot: RunOutputSnapshot) -> CheckResult:
+    """A non-refusal scenario must yield a finalizable Failure Mechanism candidate.
+
+    A Root Cause Conclusion needs exactly one Failure Mechanism backed by verified,
+    semantically supported (or partial) evidence (ADR 0039 / 0042). At eval time —
+    before any human finalization — that means a non-refusal run must produce at
+    least one ``supported``/``partial`` hypothesis a reviewer could finalize as the
+    mechanism; a refusal run must produce no evidence-backed candidates at all.
+    """
+    exp = snapshot.causal_expectations
+    if exp is None:
+        return CheckResult(
+            name="causal_role_constraints",
+            passed=True,
+            detail="no causal expectations declared",
+        )
+    if exp.expected_refusal:
+        evidence_backed = sum(1 for h in snapshot.hypotheses if h.citation_count > 0)
+        passed = evidence_backed == 0
+        return CheckResult(
+            name="causal_role_constraints",
+            passed=passed,
+            detail=(
+                "no finalizable factors (refusal)"
+                if passed
+                else f"{evidence_backed} evidence-backed hypotheses in a refusal scenario"
+            ),
+        )
+    finalizable = sum(
+        1 for h in snapshot.hypotheses if h.support_status in _FINALIZABLE_SUPPORT
+    )
+    passed = finalizable >= 1
+    return CheckResult(
+        name="causal_role_constraints",
+        passed=passed,
+        detail=f"{finalizable} finalizable (supported/partial) Failure Mechanism candidate(s)",
+    )
+
+
+def check_unacceptable_overclaims(snapshot: RunOutputSnapshot) -> CheckResult:
+    """The generated narrative must not contain a declared unacceptable overclaim.
+
+    Penalizes confident-but-shallow output (PRD story 84): each declared overclaim
+    phrase is matched case-insensitively against the postmortem summary and every
+    hypothesis title/summary. With none declared the check passes trivially.
+    """
+    exp = snapshot.causal_expectations
+    if exp is None or not exp.unacceptable_overclaims:
+        return CheckResult(
+            name="unacceptable_overclaims",
+            passed=True,
+            detail="no overclaims declared",
+        )
+    parts = [snapshot.summary or ""]
+    parts.extend(f"{h.title} {h.summary}" for h in snapshot.hypotheses)
+    haystack = "\n".join(parts).lower()
+    found = [phrase for phrase in exp.unacceptable_overclaims if phrase.lower() in haystack]
+    passed = not found
+    detail = (
+        "no unacceptable overclaims present"
+        if passed
+        else f"found overclaim(s): {found}"
+    )
+    return CheckResult(name="unacceptable_overclaims", passed=passed, detail=detail)
+
+
 DETERMINISTIC_CHECKS = (
     check_citation_integrity,
     check_required_outputs,
@@ -207,6 +539,13 @@ DETERMINISTIC_CHECKS = (
     check_hypothesis_multiplicity,
     check_insufficient_evidence_refusal,
     check_advisory_ranking_coverage,
+    check_causal_challenge_coverage,
+    check_counterevidence_coverage,
+    check_alternative_consideration,
+    check_unsupported_causal_claims,
+    check_causal_refusal,
+    check_causal_role_constraints,
+    check_unacceptable_overclaims,
 )
 
 
@@ -237,6 +576,13 @@ class JudgeHypothesis:
     title: str
     summary: str
     support_status: str
+    # Falsification context (PRD #38): whether the bounded Falsification Round
+    # challenged this hypothesis, the Challenge Severity, and how many cited
+    # Counterclaims it raised. A Builder-Only Baseline hypothesis carries
+    # ``has_challenge=False`` so the judge can score its falsification quality low.
+    has_challenge: bool = False
+    challenge_severity: str | None = None
+    counterclaim_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -252,6 +598,13 @@ class JudgeInput:
     generated_summary: str
     generated_hypotheses: tuple[JudgeHypothesis, ...]
     ground_truth_postmortem: str
+    # The scenario's known counterevidence and critical Evidence Gaps (PRD #38).
+    # Surfaced to the judge so it can score falsification quality and explanatory
+    # coverage against what a sound analysis should have weighed — the prose Gaps
+    # in particular live here rather than in a brittle exact-match deterministic
+    # check (deterministic checks avoid generated wording, AC #4 / #6).
+    known_counterevidence: tuple[str, ...] = ()
+    critical_evidence_gaps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -278,7 +631,14 @@ class PostmortemJudge(Protocol):
 
 
 class JudgeScores(BaseModel):
-    """The four rubric dimensions, each scored 1-5 (ADR 0010 Judge Rubric)."""
+    """The six rubric dimensions, each scored 1-5 (ADR 0010 / 0044 Judge Rubric).
+
+    The first four measure postmortem quality against the ground truth; the last
+    two — added for the multi-pass-vs-baseline comparison (PRD #38, stories 86) —
+    measure the depth the bounded causal analysis is supposed to add: explanatory
+    coverage and falsification quality. The judge scores semantic quality only; it
+    never decides citation validity (ADR 0010).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -286,6 +646,8 @@ class JudgeScores(BaseModel):
     root_cause_quality: int = Field(ge=1, le=5)
     evidence_grounding: int = Field(ge=1, le=5)
     uncertainty_honesty: int = Field(ge=1, le=5)
+    explanatory_coverage: int = Field(ge=1, le=5)
+    falsification_quality: int = Field(ge=1, le=5)
 
 
 class JudgeOutput(BaseModel):
@@ -309,29 +671,58 @@ Rules:
   - root_cause_quality: are the ranked hypotheses sound and well reasoned?
   - evidence_grounding: are claims tied to evidence rather than asserted?
   - uncertainty_honesty: does it admit ambiguity instead of overclaiming?
+  - explanatory_coverage: do the hypotheses explain the observed impact and the
+    competing causal factors, rather than collapsing to one apparent winner?
+  - falsification_quality: were the hypotheses meaningfully challenged — real
+    counterevidence, evidence gaps, and falsification tests? Score this LOW when
+    the hypotheses carry no challenges at all.
 - Do NOT judge whether citations resolve to real lines; citation integrity is
   checked deterministically elsewhere and is not your responsibility.
 - Always include a one-to-two sentence rationale.
 
 The JSON object must match this shape:
 {"scores": {"timeline_accuracy": 1-5, "root_cause_quality": 1-5,
-"evidence_grounding": 1-5, "uncertainty_honesty": 1-5}, "rationale": "..."}
+"evidence_grounding": 1-5, "uncertainty_honesty": 1-5,
+"explanatory_coverage": 1-5, "falsification_quality": 1-5}, "rationale": "..."}
 """
+
+
+def _challenge_phrase(hypothesis: JudgeHypothesis) -> str:
+    """Describe a hypothesis's falsification status for the judge prompt (PRD #38)."""
+    if not hypothesis.has_challenge:
+        return "not challenged"
+    severity = hypothesis.challenge_severity or "unknown"
+    return f"{severity} severity, {hypothesis.counterclaim_count} counterclaim(s)"
 
 
 def build_judge_prompt(payload: JudgeInput) -> tuple[str, str]:
     """Assemble the (system, user) prompt scoring one generated postmortem."""
     if payload.generated_hypotheses:
         hypotheses = "\n".join(
-            f"{index}. [{h.support_status}] {h.title} — {h.summary}"
+            f"{index}. [{h.support_status}] {h.title} — {h.summary} "
+            f"(challenge: {_challenge_phrase(h)})"
             for index, h in enumerate(payload.generated_hypotheses, start=1)
         )
     else:
         hypotheses = "(no hypotheses were generated)"
+    counterevidence = (
+        "\n".join(f"- {item}" for item in payload.known_counterevidence)
+        if payload.known_counterevidence
+        else "(none recorded)"
+    )
+    gaps = (
+        "\n".join(f"- {item}" for item in payload.critical_evidence_gaps)
+        if payload.critical_evidence_gaps
+        else "(none recorded)"
+    )
     user = (
         f"GENERATED POSTMORTEM SUMMARY:\n{payload.generated_summary}\n\n"
         f"GENERATED HYPOTHESES:\n{hypotheses}\n\n"
         f"GROUND-TRUTH POSTMORTEM:\n{payload.ground_truth_postmortem}\n\n"
+        # Reference signals for the falsification_quality / explanatory_coverage
+        # dimensions: what a sound analysis should have weighed (PRD #38).
+        f"KNOWN COUNTEREVIDENCE THE ANALYSIS SHOULD ADDRESS:\n{counterevidence}\n\n"
+        f"CRITICAL EVIDENCE GAPS THE ANALYSIS SHOULD FLAG:\n{gaps}\n\n"
         "Score the generated postmortem and return the JSON object described in "
         "the system message."
     )

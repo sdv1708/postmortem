@@ -756,12 +756,20 @@ class EvaluationRunRead(BaseModel):
     scenario_title: str
     status: str
     analysis_run_status: RunStatus
+    # The configuration that produced the run (PRD #38): the product "multi_pass"
+    # or the "builder_only" baseline, compared side by side in the dashboard.
+    analysis_mode: str
     passed: bool
     experiment_metadata: ExperimentMetadata
     check_suite_version: str
     judge_version: str | None
     citation_total: int
     citation_verified: int
+    # Cost metrics recorded beside quality so improvement is not bought with
+    # unbounded cost (PRD #38 stories 87).
+    model_calls: int
+    total_tokens: int
+    latency_ms: int
     checks: list[EvaluationCheckRead]
     warning_code_counts: dict[str, int]
     judge_scores: JudgeScoresRead | None

@@ -151,8 +151,17 @@ class PipelineStageRunner:
         falsifier: Falsifier | None = None,
         advisory_ranker: AdvisoryRanker | None = None,
         reasoning_budget: ReasoningBudget | None = None,
+        falsification_enabled: bool = True,
     ) -> None:
         self._session = session
+        # Builder-Only Baseline switch (PRD #38, ADR 0044). When False the Causal
+        # Analysis Stage generates and ranks RCA Hypotheses but skips the bounded
+        # Falsification Round entirely, so the baseline can be measured against the
+        # multi-pass configuration under matched model and retrieval constraints.
+        # Never use this for a normal product run: a multi-pass run that *fails*
+        # falsification must fail the stage rather than degrade to builder-only
+        # output (CONTEXT "Reasoning Budget vs Targeted Repair").
+        self._falsification_enabled = falsification_enabled
         self._chunker = chunker or SourceAwareLineWindowChunker()
         # The Reasoning Budget bounding the Causal Analysis Stage (ADR 0043): the
         # per-role and stage limits for retrieval, tokens, and calls, with capacity
@@ -592,7 +601,13 @@ class PipelineStageRunner:
         # searches all run artifacts, so counterclaims and proposed-alternative
         # citations resolve against the full immutable evidence set, not just the
         # builder's retrieval subset.
-        self._run_falsification_round(run, hypotheses, timeline, warning_codes, ledger)
+        #
+        # The Builder-Only Baseline (PRD #38) skips the round so its weaker reasoning
+        # is measurable against the multi-pass configuration: with no challenges, the
+        # deterministic challenge-coverage check fails for the baseline, which is the
+        # comparison signal, not a run failure.
+        if self._falsification_enabled:
+            self._run_falsification_round(run, hypotheses, timeline, warning_codes, ledger)
 
         # Final substep of stage 3 (ADR 0037): incrementally verify the candidates'
         # citations, judge provisional semantic support, then produce one ordinal

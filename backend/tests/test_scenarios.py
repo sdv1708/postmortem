@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from postmortem.scenarios import (
     SCENARIOS_DIR,
@@ -222,4 +223,137 @@ def test_recursive_proposed_alternative_fails_validation(tmp_path):
     }
     falsification_path.write_text(json.dumps(replay), encoding="utf-8")
     with pytest.raises(ScenarioValidationError, match="no recursive expansion"):
+        load_scenario(CANONICAL, base)
+
+
+# --- Causal Evaluation Expectations (PRD #38 / ADR 0044) --------------------
+
+
+def _patch_causal_evaluation(base: Path, block: dict | None) -> None:
+    """Overwrite the cloned canonical manifest's ``causal_evaluation`` block."""
+    manifest_path = base / CANONICAL / "scenario.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    if block is None:
+        manifest.pop("causal_evaluation", None)
+    else:
+        manifest["causal_evaluation"] = block
+    manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+
+def test_canonical_scenario_carries_causal_expectations():
+    scenario = load_scenario(CANONICAL)
+    expectations = scenario.causal_evaluation
+    assert expectations is not None
+    # Exactly one Failure Mechanism is expected (ADR 0039 cardinality).
+    roles = [factor.role for factor in expectations.expected_factors]
+    assert roles.count("failure_mechanism") == 1
+    # Every expected factor family is one the scenario declared.
+    families = set(scenario.expected_hypothesis_families)
+    assert all(factor.family in families for factor in expectations.expected_factors)
+    # Known counterevidence is cited to real evidence lines.
+    assert expectations.known_counterevidence
+    assert expectations.expected_refusal is False
+
+
+def test_scenario_without_causal_block_loads_with_none(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(base, None)
+    scenario = load_scenario(CANONICAL, base)
+    assert scenario.causal_evaluation is None
+
+
+def test_unknown_expected_factor_family_fails_validation(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(
+        base,
+        {"expected_factors": [{"family": "ghost-family", "role": "failure_mechanism"}]},
+    )
+    with pytest.raises(ScenarioValidationError, match="unknown family"):
+        load_scenario(CANONICAL, base)
+
+
+def test_invalid_causal_role_fails_validation(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(
+        base,
+        {"expected_factors": [{"family": "connection-pool-capacity", "role": "root_cause"}]},
+    )
+    with pytest.raises(ScenarioValidationError, match="invalid role"):
+        load_scenario(CANONICAL, base)
+
+
+def test_counterevidence_missing_evidence_reference_fails_validation(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(
+        base,
+        {
+            "expected_factors": [
+                {"family": "connection-pool-capacity", "role": "failure_mechanism"}
+            ],
+            "known_counterevidence": [
+                {"description": "phantom", "source_name": "ghost.log", "line_start": 1, "line_end": 1}
+            ],
+        },
+    )
+    with pytest.raises(ScenarioValidationError, match="unknown evidence source"):
+        load_scenario(CANONICAL, base)
+
+
+def test_refusal_with_expected_factors_is_contradictory(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(
+        base,
+        {
+            "expected_refusal": True,
+            "expected_factors": [
+                {"family": "connection-pool-capacity", "role": "failure_mechanism"}
+            ],
+        },
+    )
+    with pytest.raises(ScenarioValidationError, match="refusal scenario cannot also expect"):
+        load_scenario(CANONICAL, base)
+
+
+def test_two_failure_mechanisms_is_contradictory(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(
+        base,
+        {
+            "expected_factors": [
+                {"family": "connection-pool-capacity", "role": "failure_mechanism"},
+                {"family": "deploy-regression", "role": "failure_mechanism"},
+            ]
+        },
+    )
+    with pytest.raises(ScenarioValidationError, match="exactly one Failure Mechanism"):
+        load_scenario(CANONICAL, base)
+
+
+def test_rejected_alternative_outside_declared_families_fails_validation(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(
+        base,
+        {
+            "expected_factors": [
+                {"family": "connection-pool-capacity", "role": "failure_mechanism"}
+            ],
+            "plausible_rejected_alternatives": ["a-family-not-declared"],
+        },
+    )
+    with pytest.raises(ScenarioValidationError, match="not in expected_hypothesis_families"):
+        load_scenario(CANONICAL, base)
+
+
+def test_family_both_expected_and_rejected_is_contradictory(tmp_path):
+    base = _clone_canonical(tmp_path)
+    _patch_causal_evaluation(
+        base,
+        {
+            "expected_factors": [
+                {"family": "connection-pool-capacity", "role": "failure_mechanism"}
+            ],
+            "plausible_rejected_alternatives": ["connection-pool-capacity"],
+        },
+    )
+    with pytest.raises(ScenarioValidationError, match="both expected causal factors and"):
         load_scenario(CANONICAL, base)
