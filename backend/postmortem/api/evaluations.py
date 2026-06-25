@@ -50,8 +50,10 @@ def run_evaluations(
     """
     runner = EvaluationRunner(db, judge=_resolve_judge(request))
     try:
+        # Each scenario records both the multi-pass and Builder-Only Baseline
+        # configurations (PRD #38), so both shapes return a list of rows.
         if payload.scenario_id is not None:
-            recorded = [runner.run_and_record(payload.scenario_id)]
+            recorded = runner.run_and_record(payload.scenario_id)
         else:
             recorded = runner.run_all()
     except ScenarioNotFoundError:

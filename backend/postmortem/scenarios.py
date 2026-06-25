@@ -60,6 +60,62 @@ class ClaimSupportOverride:
     rationale: str
 
 
+# The causal roles a Root Cause Conclusion assigns (ADR 0039): exactly one
+# Failure Mechanism, with optional repeatable Triggers and Amplifying Conditions.
+# Expected causal factors in a Scenario Manifest are scored against these roles.
+VALID_CAUSAL_ROLES: Final[frozenset[str]] = frozenset(
+    {"failure_mechanism", "trigger", "amplifying_condition"}
+)
+
+
+@dataclass(frozen=True)
+class ExpectedCausalFactor:
+    """A causal factor family + role the scenario expects a sound run to support.
+
+    ``family`` must be one of the scenario's ``expected_hypothesis_families`` so an
+    expectation can never reference a family the scenario did not declare; ``role``
+    must be a valid causal role (ADR 0039). Used by the deterministic
+    causal-role-constraints check, never by the judge.
+    """
+
+    family: str
+    role: str
+
+
+@dataclass(frozen=True)
+class CausalCounterevidence:
+    """Known counterevidence a falsifier should surface, cited to real evidence.
+
+    Counterevidence *is* evidence (CONTEXT "Counterclaim"), so each entry points
+    at an immutable Artifact line range in the scenario; the loader validates the
+    reference so a manifest can never name evidence that does not exist.
+    """
+
+    description: str
+    source_name: str
+    line_start: int
+    line_end: int
+
+
+@dataclass(frozen=True)
+class CausalEvaluationExpectations:
+    """Structured Causal Evaluation Expectations for a scenario (PRD #38, ADR 0044).
+
+    Enables deterministic causal checks without depending on exact generated
+    wording (CONTEXT "Causal Evaluation Expectations"): the expected causal factor
+    families and roles, known counterevidence, plausible rejected alternatives,
+    critical Evidence Gaps, whether the scenario should refuse, and the overclaims
+    a confident-but-shallow run must not make.
+    """
+
+    expected_factors: tuple[ExpectedCausalFactor, ...]
+    known_counterevidence: tuple[CausalCounterevidence, ...]
+    plausible_rejected_alternatives: tuple[str, ...]
+    critical_evidence_gaps: tuple[str, ...]
+    expected_refusal: bool
+    unacceptable_overclaims: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class LoadedScenario:
     """A validated scenario fixture ready to seed into product data.
@@ -80,6 +136,10 @@ class LoadedScenario:
     ambiguity_notes: str | None
     evaluation_tags: tuple[str, ...]
     expected_hypothesis_families: tuple[str, ...]
+    # Structured Causal Evaluation Expectations (PRD #38, ADR 0044); None when a
+    # scenario declares no ``causal_evaluation`` block, in which case the
+    # causal-specific deterministic checks degrade to trivial passes.
+    causal_evaluation: CausalEvaluationExpectations | None
     ground_truth_postmortem: str
     evidence: tuple[ScenarioEvidence, ...]
     rca_replay: dict
@@ -232,6 +292,13 @@ def load_scenario(scenario_id: str, base_dir: Path | None = None) -> LoadedScena
         for item in (replay.get("claim_support_overrides") or [])
     )
 
+    expected_families = tuple(
+        str(fam) for fam in manifest.get("expected_hypothesis_families", [])
+    )
+    causal_evaluation = _load_causal_evaluation(
+        scenario_id, manifest.get("causal_evaluation"), expected_families, bodies_by_name
+    )
+
     return LoadedScenario(
         id=scenario_id,
         title=str(_require(manifest, "title", scenario_dir)),
@@ -243,9 +310,8 @@ def load_scenario(scenario_id: str, base_dir: Path | None = None) -> LoadedScena
         resolved_at=_opt_str(manifest.get("resolved_at")),
         ambiguity_notes=_opt_str(manifest.get("ambiguity_notes")),
         evaluation_tags=tuple(str(tag) for tag in manifest.get("evaluation_tags", [])),
-        expected_hypothesis_families=tuple(
-            str(fam) for fam in manifest.get("expected_hypothesis_families", [])
-        ),
+        expected_hypothesis_families=expected_families,
+        causal_evaluation=causal_evaluation,
         ground_truth_postmortem=ground_truth,
         evidence=tuple(evidence),
         rca_replay=rca_replay,
@@ -334,6 +400,147 @@ def _load_falsification_replay(
     _validate_replay_refs(scenario_id, falsification_replay, bodies_by_name)
     _validate_falsification_schema(scenario_id, falsification_replay, bodies_by_name.keys())
     return dict(falsification_replay)
+
+
+def _load_causal_evaluation(
+    scenario_id: str,
+    block: object,
+    expected_families: tuple[str, ...],
+    bodies_by_name: Mapping[str, str],
+) -> CausalEvaluationExpectations | None:
+    """Load + validate the Causal Evaluation Expectations block (PRD #38, ADR 0044).
+
+    Fails fast (``ScenarioValidationError``) on the four contract violations the
+    PRD calls out so a malformed manifest can never reach the eval harness:
+
+    * **unknown families** — an expected factor (or rejected alternative collision)
+      references a family the scenario did not declare in
+      ``expected_hypothesis_families``;
+    * **invalid roles** — an expected factor's role is not a valid causal role;
+    * **missing evidence references** — a known-counterevidence entry cites an
+      evidence ``source_name``/line range that does not exist;
+    * **contradictory expectations** — a refusal scenario that also expects causal
+      factors, a non-refusal scenario with no Failure Mechanism (or more than one),
+      or a family listed as both expected and a plausible rejected alternative.
+    """
+    if block is None:
+        return None
+    if not isinstance(block, Mapping):
+        raise ScenarioValidationError(
+            f"{scenario_id}: 'causal_evaluation' must be a mapping"
+        )
+
+    family_set = set(expected_families)
+    expected_factors: list[ExpectedCausalFactor] = []
+    failure_mechanisms = 0
+    for entry in block.get("expected_factors") or []:
+        if not isinstance(entry, Mapping):
+            raise ScenarioValidationError(
+                f"{scenario_id}: each expected causal factor must be a mapping with family + role"
+            )
+        family = str(entry.get("family", "")).strip()
+        role = str(entry.get("role", "")).strip()
+        if family not in family_set:
+            raise ScenarioValidationError(
+                f"{scenario_id}: expected causal factor references unknown family {family!r} "
+                f"(not in expected_hypothesis_families {sorted(family_set)})"
+            )
+        if role not in VALID_CAUSAL_ROLES:
+            raise ScenarioValidationError(
+                f"{scenario_id}: expected causal factor {family!r} has invalid role {role!r} "
+                f"(must be one of {sorted(VALID_CAUSAL_ROLES)})"
+            )
+        if role == "failure_mechanism":
+            failure_mechanisms += 1
+        expected_factors.append(ExpectedCausalFactor(family=family, role=role))
+
+    expected_refusal = bool(block.get("expected_refusal", False))
+
+    # Contradictory-expectations gate (ADR 0039 cardinality + refusal honesty).
+    if expected_refusal and expected_factors:
+        raise ScenarioValidationError(
+            f"{scenario_id}: a refusal scenario cannot also expect causal factors"
+        )
+    if not expected_refusal:
+        if not expected_factors:
+            raise ScenarioValidationError(
+                f"{scenario_id}: a non-refusal scenario must expect at least one causal factor"
+            )
+        if failure_mechanisms != 1:
+            raise ScenarioValidationError(
+                f"{scenario_id}: a Root Cause Conclusion has exactly one Failure Mechanism, "
+                f"but the expectations declare {failure_mechanisms}"
+            )
+
+    rejected = tuple(
+        str(item).strip() for item in (block.get("plausible_rejected_alternatives") or [])
+    )
+    if any(not item for item in rejected):
+        raise ScenarioValidationError(
+            f"{scenario_id}: plausible_rejected_alternatives entries must be non-empty"
+        )
+    # A plausible rejected alternative must be a family the system is expected to be
+    # able to generate (and then rank down), so it is drawn from the declared
+    # hypothesis families — otherwise the alternative-consideration check could never
+    # be satisfied by a real run (PRD #38).
+    unknown_rejected = [family for family in rejected if family not in family_set]
+    if unknown_rejected:
+        raise ScenarioValidationError(
+            f"{scenario_id}: plausible rejected alternatives {sorted(unknown_rejected)} are not "
+            f"in expected_hypothesis_families {sorted(family_set)}"
+        )
+    overlap = {factor.family for factor in expected_factors} & set(rejected)
+    if overlap:
+        raise ScenarioValidationError(
+            f"{scenario_id}: families {sorted(overlap)} are listed as both expected causal "
+            "factors and plausible rejected alternatives"
+        )
+
+    counterevidence: list[CausalCounterevidence] = []
+    for entry in block.get("known_counterevidence") or []:
+        if not isinstance(entry, Mapping):
+            raise ScenarioValidationError(
+                f"{scenario_id}: each known_counterevidence entry must be a mapping "
+                "with description + source_name + line_start/line_end"
+            )
+        description = str(entry.get("description", "")).strip()
+        if not description:
+            raise ScenarioValidationError(
+                f"{scenario_id}: a known_counterevidence entry is missing its description"
+            )
+        # Reuse the replay reference validator so a counterevidence citation that
+        # names a missing evidence file or an out-of-range line fails fast here.
+        _validate_replay_refs(scenario_id, dict(entry), bodies_by_name)
+        counterevidence.append(
+            CausalCounterevidence(
+                description=description,
+                source_name=str(entry["source_name"]),
+                line_start=int(entry["line_start"]),
+                line_end=int(entry["line_end"]),
+            )
+        )
+
+    gaps = tuple(str(item).strip() for item in (block.get("critical_evidence_gaps") or []))
+    if any(not item for item in gaps):
+        raise ScenarioValidationError(
+            f"{scenario_id}: critical_evidence_gaps entries must be non-empty"
+        )
+    overclaims = tuple(
+        str(item).strip() for item in (block.get("unacceptable_overclaims") or [])
+    )
+    if any(not item for item in overclaims):
+        raise ScenarioValidationError(
+            f"{scenario_id}: unacceptable_overclaims entries must be non-empty"
+        )
+
+    return CausalEvaluationExpectations(
+        expected_factors=tuple(expected_factors),
+        known_counterevidence=tuple(counterevidence),
+        plausible_rejected_alternatives=rejected,
+        critical_evidence_gaps=gaps,
+        expected_refusal=expected_refusal,
+        unacceptable_overclaims=overclaims,
+    )
 
 
 def list_scenarios(base_dir: Path | None = None) -> list[LoadedScenario]:

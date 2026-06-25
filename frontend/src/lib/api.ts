@@ -467,19 +467,30 @@ export interface JudgeScores {
   rationale: string;
 }
 
-// A recorded Evaluation Run for the dev dashboard (ADR 0010 / 0025).
+// The configuration that produced an Evaluation Run (PRD #38): the product
+// "multi_pass" causal analysis, or the "builder_only" baseline that skips the
+// Falsification Round. The dashboard compares the two side by side.
+export type AnalysisMode = "multi_pass" | "builder_only";
+
+// A recorded Evaluation Run for the dev dashboard (ADR 0010 / 0025 / 0044).
 export interface EvaluationRun {
   id: string;
   scenario_id: string;
   scenario_title: string;
   status: string;
   analysis_run_status: RunStatus;
+  analysis_mode: AnalysisMode;
   passed: boolean;
   experiment_metadata: ExperimentMetadata;
   check_suite_version: string;
   judge_version: string | null;
   citation_total: number;
   citation_verified: number;
+  // Cost metrics recorded beside quality so better reasoning is not bought with
+  // unbounded cost (PRD #38 stories 87).
+  model_calls: number;
+  total_tokens: number;
+  latency_ms: number;
   checks: EvaluationCheck[];
   warning_code_counts: Record<string, number>;
   judge_scores: JudgeScores | null;

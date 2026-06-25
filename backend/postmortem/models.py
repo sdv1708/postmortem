@@ -979,6 +979,11 @@ class EvaluationRun(Base):
     # Evaluation execution status, distinct from the underlying run's status.
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="succeeded")
     analysis_run_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    # The configuration that produced the underlying run (PRD #38, ADR 0044):
+    # "multi_pass" (the product configuration) or "builder_only" (the Builder-Only
+    # Baseline that skips the Falsification Round). Existing rows predate the
+    # comparison and default to multi_pass.
+    analysis_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="multi_pass")
     # True when every deterministic check passed (the trust floor, ADR 0010).
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
@@ -995,6 +1000,13 @@ class EvaluationRun(Base):
 
     citation_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     citation_verified: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Cost metrics recorded beside quality so the multi-pass vs Builder-Only
+    # comparison shows that better reasoning is not bought with unbounded cost
+    # (PRD #38 stories 87): persisted Model Call Records, summed model token usage,
+    # and total Run Stage latency in milliseconds. Default 0 on older rows.
+    model_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Deterministic check results: [{"name", "passed", "detail"}].
     checks: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
     # Warning Code counts aggregated across the run's stage events: {code: count}.

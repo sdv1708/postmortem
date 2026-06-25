@@ -14,6 +14,17 @@ ambiguity_notes: >-
 evaluation_tags: [insufficient-evidence, refusal, no-time-anchors]
 expected_hypothesis_families: []
 
+# Causal Evaluation Expectations for a refusal scenario (PRD #38, ADR 0044): the
+# honest outcome is to refuse, so no causal factors are expected. The
+# causal-refusal and causal-role-constraints checks assert the run does not
+# manufacture a confident conclusion from sparse evidence.
+causal_evaluation:
+  expected_refusal: true
+  expected_factors: []
+  unacceptable_overclaims:
+    - the root cause was identified
+    - the incident was caused by
+
 ground_truth_postmortem: ground_truth_postmortem.md
 
 evidence:
