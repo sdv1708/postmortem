@@ -325,11 +325,13 @@ export interface Postmortem {
   evidence_sufficiency: "sufficient" | "insufficient";
   evidence_gaps: string[];
   next_validation_steps: string[];
-  // Lifecycle state (ADR 0035 / 0039 / 0040, PRD #26): an automated run is
+  // Lifecycle state (ADR 0035 / 0039 / 0040 / 0045, PRD #26): an automated run is
   // "provisional" until a human finalizes a Root Cause Conclusion, then
   // "finalized". "disputed" is derived: a finalized conclusion carrying an open
   // Conclusion Discrepancy is no longer authoritative and review is unresolved.
-  conclusion_status: "provisional" | "finalized" | "disputed";
+  // "superseded" is derived: this run's conclusion has been replaced by a
+  // Superseding Conclusion, so authority moved to the successor.
+  conclusion_status: "provisional" | "finalized" | "disputed" | "superseded";
   composer_version: string;
   timeline: TimelineEvent[];
   impact_claims: ImpactClaim[];
@@ -390,6 +392,22 @@ export interface ConclusionDiscrepancy {
   created_at: string;
 }
 
+// A summary-level link to another conclusion in a supersession chain (ADR 0045):
+// the disputed predecessor a conclusion replaced, the successor that replaced it,
+// or an entry in the predecessor `history`. Summary-level so the chain renders
+// without unbounded nesting, while preserving provenance and discrepancies.
+export interface SupersededLink {
+  id: string;
+  run_id: string;
+  incident_id: string;
+  summary: string;
+  finalized_by: string;
+  finalized_by_display: string | null;
+  finalized_at: string;
+  disputed: boolean;
+  discrepancies: ConclusionDiscrepancy[];
+}
+
 // The finalized human Root Cause Conclusion (ADR 0039). Distinct from the
 // Advisory Hypothesis Ranking: a ranking recommends candidates, this is the
 // human's decision. Immutable, with Conclusion Provenance. `disputed` is true
@@ -409,6 +427,14 @@ export interface RootCauseConclusion {
   human_assumptions: HumanAssumption[];
   disputed: boolean;
   discrepancies: ConclusionDiscrepancy[];
+  // Superseding-chain links (ADR 0045): the disputed predecessor this conclusion
+  // replaced, the successor that replaced it (null at the authoritative tail), the
+  // full predecessor chain oldest-first for audit, and whether this conclusion is
+  // the undisputed, un-superseded tail.
+  supersedes: SupersededLink | null;
+  superseded_by: SupersededLink | null;
+  history: SupersededLink[];
+  authoritative: boolean;
   created_at: string;
 }
 
@@ -760,6 +786,32 @@ export const api = {
   ): Promise<RootCauseConclusion> {
     return request<RootCauseConclusion>(
       `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  },
+
+  // Disputed, not-yet-superseded conclusions across the incident (ADR 0045): the
+  // candidates a new run can supersede (the new-Evidence path). 404 if the incident
+  // is unknown; an empty list when nothing is disputed.
+  listIncidentDisputedConclusions(incidentId: string): Promise<RootCauseConclusion[]> {
+    return request<RootCauseConclusion[]>(
+      `/api/incidents/${incidentId}/disputed-conclusions`,
+    );
+  },
+
+  supersedeRunConclusion(
+    incidentId: string,
+    runId: string,
+    payload: {
+      summary: string;
+      factors: CausalFactorInput[];
+      human_assumptions?: string[];
+      supersedes_conclusion_id: string;
+      discrepancy_id: string;
+    },
+  ): Promise<RootCauseConclusion> {
+    return request<RootCauseConclusion>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/conclusion/supersede`,
       { method: "POST", body: JSON.stringify(payload) },
     );
   },

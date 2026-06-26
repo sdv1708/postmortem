@@ -457,6 +457,22 @@ class RootCauseConclusionCreate(BaseModel):
     human_assumptions: list[str] = Field(default_factory=list)
 
 
+class SupersedingConclusionCreate(RootCauseConclusionCreate):
+    """Command payload to finalize a Superseding Conclusion (ADR 0045 / 0022).
+
+    Carries the same evidence-governed ``summary`` / ``factors`` / ``human_assumptions``
+    as an original finalization, plus the links that resolve a dispute: the disputed
+    ``supersedes_conclusion_id`` it replaces and the open ``discrepancy_id`` it answers
+    (PRD #26 stories 47-48). The path run is the run the successor is finalized against:
+    the predecessor's own run for reinterpretation, or a new Analysis Run when new
+    Evidence is used (stories 49-50). The service enforces predecessor state, chain
+    integrity, and the same trust floor as ``finalize``.
+    """
+
+    supersedes_conclusion_id: str
+    discrepancy_id: str
+
+
 class HumanAssumptionRead(BaseModel):
     """A labeled, unevidenced reviewer belief recorded with a conclusion (ADR 0042).
 
@@ -525,6 +541,27 @@ class ConclusionDiscrepancyRead(BaseModel):
     created_at: datetime
 
 
+class SupersededLinkRead(BaseModel):
+    """A summary-level link to another conclusion in a supersession chain (ADR 0045).
+
+    Used for both directions — the disputed predecessor a conclusion supersedes and the
+    successor that supersedes it — and for the full predecessor ``history`` an audit view
+    walks. Summary-level (no nested factors) so the chain renders without unbounded
+    recursion, while still carrying provenance and the predecessor's discrepancies so the
+    complete historical record stays visible (PRD #26 story 48).
+    """
+
+    id: str
+    run_id: str
+    incident_id: str
+    summary: str
+    finalized_by: str
+    finalized_by_display: str | None
+    finalized_at: datetime
+    disputed: bool
+    discrepancies: list[ConclusionDiscrepancyRead] = Field(default_factory=list)
+
+
 class RootCauseConclusionRead(BaseModel):
     """A finalized human Root Cause Conclusion for the Review Surface (ADR 0039).
 
@@ -537,6 +574,12 @@ class RootCauseConclusionRead(BaseModel):
     ``disputed`` is true when at least one append-only Conclusion Discrepancy has been
     raised against it (ADR 0040): the conclusion is then preserved for audit but is no
     longer authoritative, and the incident has returned to unresolved review.
+
+    Superseding-chain fields (ADR 0045): ``supersedes`` is the disputed predecessor this
+    conclusion replaced (null for an original); ``superseded_by`` is the successor that
+    replaced it (null at the tail of the chain); ``history`` is the full predecessor
+    chain oldest-first for audit; and ``authoritative`` is true only at the undisputed
+    tail — not disputed and not superseded (PRD #26 stories 47-50).
     """
 
     id: str
@@ -552,6 +595,10 @@ class RootCauseConclusionRead(BaseModel):
     human_assumptions: list[HumanAssumptionRead] = Field(default_factory=list)
     disputed: bool
     discrepancies: list[ConclusionDiscrepancyRead]
+    supersedes: SupersededLinkRead | None = None
+    superseded_by: SupersededLinkRead | None = None
+    history: list[SupersededLinkRead] = Field(default_factory=list)
+    authoritative: bool = True
     created_at: datetime
 
 
@@ -582,13 +629,15 @@ class PostmortemRead(BaseModel):
     evidence_sufficiency: Literal["sufficient", "insufficient"]
     evidence_gaps: list[str]
     next_validation_steps: list[str]
-    # Lifecycle state of the automated draft (ADR 0035 / 0039 / 0040, PRD #26).
+    # Lifecycle state of the automated draft (ADR 0035 / 0039 / 0040 / 0045, PRD #26).
     # 'provisional' means no human Root Cause Conclusion exists yet, so the Review
     # Surface and exports label it "Draft: Root cause not finalized". 'finalized'
     # means a human finalized one. 'disputed' is derived (ADR 0040): a finalized
     # conclusion carrying an open Conclusion Discrepancy is no longer authoritative
-    # and the incident has returned to unresolved review.
-    conclusion_status: Literal["provisional", "finalized", "disputed"]
+    # and the incident has returned to unresolved review. 'superseded' is derived
+    # (ADR 0045): this run's conclusion has been replaced by a Superseding Conclusion,
+    # so authority has moved to the successor.
+    conclusion_status: Literal["provisional", "finalized", "disputed", "superseded"]
     composer_version: str
     timeline: list[TimelineEventRead]
     impact_claims: list[ImpactClaimRead]

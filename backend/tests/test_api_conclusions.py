@@ -596,6 +596,312 @@ def test_raise_discrepancy_requires_auth(client: TestClient):
     assert resp.status_code == 401
 
 
+def _supersede_url(incident_id, run_id):
+    return f"/api/incidents/{incident_id}/analysis-runs/{run_id}/conclusion/supersede"
+
+
+def _seed_run_on_incident(app, client, auth_headers, incident_id, *, titles, source_name):
+    """Start and execute a second succeeded run on an existing incident (new Evidence)."""
+    app.state.run_scheduler = lambda background_tasks, session_factory, run_id: None
+    artifact_id = client.post(
+        f"/api/incidents/{incident_id}/artifacts",
+        json={"source_type": "logs", "source_name": source_name, "body": "p\nq\nr\ns"},
+        headers=auth_headers,
+    ).json()["id"]
+    run_id = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs", json={}, headers=auth_headers
+    ).json()["id"]
+    payload = json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "title": title,
+                    "summary": f"{title} explanation.",
+                    "supporting_evidence": [
+                        {"artifact_id": artifact_id, "line_start": i + 1, "line_end": i + 1}
+                    ],
+                }
+                for i, title in enumerate(titles)
+            ]
+        }
+    )
+    impact = [
+        FactsImpactClaim(
+            description="Customers errored",
+            evidence=[RcaEvidenceRef(artifact_id=artifact_id, line_start=1, line_end=1)],
+        )
+    ]
+    session = app.state.session_factory()
+    try:
+        run = AnalysisService(
+            session,
+            llm_client=FakeLLMClient([payload], label="fake-model"),
+            claim_support_verifier=FakeClaimSupportVerifier(),
+            incident_fact_extractor=FakeIncidentFactExtractor(impact),
+            falsifier=FakeFalsifier(),
+        ).execute_run(run_id, commit_progress=True)
+        assert run.status == "succeeded"
+        session.commit()
+    finally:
+        session.close()
+    return run_id
+
+
+def test_supersede_same_run_reinterpretation(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    hyps = _hypotheses(client, auth_headers, incident_id, run_id)
+    _accept(client, auth_headers, incident_id, run_id, hyps["Primary cause"]["id"])
+    _accept(client, auth_headers, incident_id, run_id, hyps["Alternative cause"]["id"])
+    first = _finalize(client, auth_headers, incident_id, run_id)
+    disc = client.post(
+        _discrepancy_url(incident_id, run_id),
+        json={"explanation": "The cited deploy postdates the spike."},
+        headers=auth_headers,
+    ).json()
+
+    resp = client.post(
+        _supersede_url(incident_id, run_id),
+        json={
+            "summary": "Reinterpreted: the alternative is the mechanism.",
+            "factors": [
+                {"hypothesis_id": hyps["Alternative cause"]["id"], "role": "failure_mechanism"}
+            ],
+            "supersedes_conclusion_id": first["id"],
+            "discrepancy_id": disc["id"],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["authoritative"] is True
+    assert body["supersedes"]["id"] == first["id"]
+    assert body["superseded_by"] is None
+    assert [c["id"] for c in body["history"]] == [first["id"]]
+
+    # The run now presents the successor as its finalized, authoritative conclusion.
+    pm = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem", headers=auth_headers
+    ).json()
+    assert pm["conclusion_status"] == "finalized"
+    assert pm["conclusion"]["id"] == body["id"]
+    # The GET resource returns the successor (the run's representative).
+    got = client.get(_conclusion_url(incident_id, run_id), headers=auth_headers).json()
+    assert got["id"] == body["id"]
+
+
+def test_supersede_new_evidence_uses_new_run(app, client: TestClient, auth_headers):
+    incident_id, run1 = _seed_succeeded_run(app, client, auth_headers)
+    hyps = _hypotheses(client, auth_headers, incident_id, run1)
+    _accept(client, auth_headers, incident_id, run1, hyps["Primary cause"]["id"])
+    first = _finalize(client, auth_headers, incident_id, run1)
+    disc = client.post(
+        _discrepancy_url(incident_id, run1),
+        json={"explanation": "Need fresh evidence."},
+        headers=auth_headers,
+    ).json()
+
+    run2 = _seed_run_on_incident(
+        app, client, auth_headers, incident_id, titles=("New mechanism",), source_name="b.log"
+    )
+    hyps2 = _hypotheses(client, auth_headers, incident_id, run2)
+    _accept(client, auth_headers, incident_id, run2, hyps2["New mechanism"]["id"])
+
+    resp = client.post(
+        _supersede_url(incident_id, run2),
+        json={
+            "summary": "New evidence shows a different mechanism.",
+            "factors": [
+                {"hypothesis_id": hyps2["New mechanism"]["id"], "role": "failure_mechanism"}
+            ],
+            "supersedes_conclusion_id": first["id"],
+            "discrepancy_id": disc["id"],
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["run_id"] == run2
+
+    # The predecessor's run is superseded and points to the successor's run.
+    pm1 = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run1}/postmortem", headers=auth_headers
+    ).json()
+    assert pm1["conclusion_status"] == "superseded"
+    assert pm1["conclusion"]["superseded_by"]["run_id"] == run2
+    assert pm1["conclusion"]["authoritative"] is False
+
+    # The new run holds the authoritative successor.
+    pm2 = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run2}/postmortem", headers=auth_headers
+    ).json()
+    assert pm2["conclusion_status"] == "finalized"
+    assert pm2["conclusion"]["authoritative"] is True
+
+
+def test_supersede_requires_disputed_predecessor(app, client: TestClient, auth_headers):
+    incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
+    hyps = _hypotheses(client, auth_headers, incident_id, run_id)
+    _accept(client, auth_headers, incident_id, run_id, hyps["Primary cause"]["id"])
+    _accept(client, auth_headers, incident_id, run_id, hyps["Alternative cause"]["id"])
+    first = _finalize(client, auth_headers, incident_id, run_id)
+
+    # No discrepancy raised → the predecessor is not disputed → 409 conflict.
+    resp = client.post(
+        _supersede_url(incident_id, run_id),
+        json={
+            "summary": "x",
+            "factors": [
+                {"hypothesis_id": hyps["Alternative cause"]["id"], "role": "failure_mechanism"}
+            ],
+            "supersedes_conclusion_id": first["id"],
+            "discrepancy_id": "anything",
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409, resp.text
+    assert "disputed" in resp.json()["detail"]
+
+
+def test_list_disputed_conclusions_surfaces_cross_run_candidates(
+    app, client: TestClient, auth_headers
+):
+    incident_id, run1 = _seed_succeeded_run(app, client, auth_headers)
+    hyps = _hypotheses(client, auth_headers, incident_id, run1)
+    _accept(client, auth_headers, incident_id, run1, hyps["Primary cause"]["id"])
+    first = _finalize(client, auth_headers, incident_id, run1)
+
+    # Not disputed yet → no candidates.
+    empty = client.get(
+        f"/api/incidents/{incident_id}/disputed-conclusions", headers=auth_headers
+    ).json()
+    assert empty == []
+
+    client.post(
+        _discrepancy_url(incident_id, run1),
+        json={"explanation": "Need fresh evidence."},
+        headers=auth_headers,
+    )
+    listed = client.get(
+        f"/api/incidents/{incident_id}/disputed-conclusions", headers=auth_headers
+    ).json()
+    assert [c["id"] for c in listed] == [first["id"]]
+    assert listed[0]["disputed"] is True
+
+
+def test_disputed_conclusions_requires_auth(client: TestClient):
+    resp = client.get("/api/incidents/whatever/disputed-conclusions")
+    assert resp.status_code == 401
+
+
+def test_superseded_export_does_not_claim_authority_when_successor_disputed(
+    app, client: TestClient, auth_headers
+):
+    # Defense for the adversarial finding: if the replacement conclusion is itself
+    # disputed, the predecessor's clean export must not point to it as authoritative.
+    incident_id, run1 = _seed_succeeded_run(app, client, auth_headers)
+    hyps = _hypotheses(client, auth_headers, incident_id, run1)
+    _accept(client, auth_headers, incident_id, run1, hyps["Primary cause"]["id"])
+    first = _finalize(client, auth_headers, incident_id, run1)
+    disc = client.post(
+        _discrepancy_url(incident_id, run1),
+        json={"explanation": "Need fresh evidence."},
+        headers=auth_headers,
+    ).json()
+    run2 = _seed_run_on_incident(
+        app, client, auth_headers, incident_id, titles=("New mechanism",), source_name="b.log"
+    )
+    hyps2 = _hypotheses(client, auth_headers, incident_id, run2)
+    _accept(client, auth_headers, incident_id, run2, hyps2["New mechanism"]["id"])
+    client.post(
+        _supersede_url(incident_id, run2),
+        json={
+            "summary": "New evidence shows a different mechanism.",
+            "factors": [
+                {"hypothesis_id": hyps2["New mechanism"]["id"], "role": "failure_mechanism"}
+            ],
+            "supersedes_conclusion_id": first["id"],
+            "discrepancy_id": disc["id"],
+        },
+        headers=auth_headers,
+    )
+    # Now dispute the successor too: the chain has no authoritative tail.
+    client.post(
+        _discrepancy_url(incident_id, run2),
+        json={"explanation": "The new mechanism is also unconfirmed."},
+        headers=auth_headers,
+    )
+
+    clean1 = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run1}/postmortem/export",
+        json={"mode": "clean"},
+        headers=auth_headers,
+    ).json()["markdown"]
+    assert "**Status:** superseded" in clean1
+    # It must NOT point at the disputed successor's run as authoritative.
+    assert f"finalized in analysis run `{run2}`" not in clean1
+    assert "no authoritative conclusion" in clean1
+
+
+def test_supersede_requires_auth(client: TestClient):
+    resp = client.post(
+        "/api/incidents/whatever/analysis-runs/whatever/conclusion/supersede",
+        json={"summary": "x", "factors": [], "supersedes_conclusion_id": "a", "discrepancy_id": "b"},
+    )
+    assert resp.status_code == 401
+
+
+def test_superseded_conclusion_export_behavior(app, client: TestClient, auth_headers):
+    incident_id, run1 = _seed_succeeded_run(app, client, auth_headers)
+    hyps = _hypotheses(client, auth_headers, incident_id, run1)
+    _accept(client, auth_headers, incident_id, run1, hyps["Primary cause"]["id"])
+    first = _finalize(client, auth_headers, incident_id, run1)
+    disc = client.post(
+        _discrepancy_url(incident_id, run1),
+        json={"explanation": "Need fresh evidence."},
+        headers=auth_headers,
+    ).json()
+    run2 = _seed_run_on_incident(
+        app, client, auth_headers, incident_id, titles=("New mechanism",), source_name="b.log"
+    )
+    hyps2 = _hypotheses(client, auth_headers, incident_id, run2)
+    _accept(client, auth_headers, incident_id, run2, hyps2["New mechanism"]["id"])
+    client.post(
+        _supersede_url(incident_id, run2),
+        json={
+            "summary": "New evidence shows a different mechanism.",
+            "factors": [
+                {"hypothesis_id": hyps2["New mechanism"]["id"], "role": "failure_mechanism"}
+            ],
+            "supersedes_conclusion_id": first["id"],
+            "discrepancy_id": disc["id"],
+        },
+        headers=auth_headers,
+    )
+
+    def export(run_id, mode):
+        return client.post(
+            f"/api/incidents/{incident_id}/analysis-runs/{run_id}/postmortem/export",
+            json={"mode": mode},
+            headers=auth_headers,
+        ).json()["markdown"]
+
+    # The superseded predecessor run: clean export withholds the stale causal account
+    # and points at the authoritative successor; audit preserves the chain.
+    clean1 = export(run1, "clean")
+    assert "**Status:** superseded" in clean1
+    assert "Superseded conclusion." in clean1
+    assert "withheld from this clean export" in clean1
+    assert "The deploy regressed connection handling." not in clean1
+    audit1 = export(run1, "audit")
+    assert "Superseding chain:" in audit1
+    assert "Superseded by" in audit1
+
+    # The successor run: clean export presents the new authoritative conclusion.
+    clean2 = export(run2, "clean")
+    assert "**Status:** finalized" in clean2
+    assert "New evidence shows a different mechanism." in clean2
+    assert "Supersedes an earlier disputed conclusion" in clean2
+
+
 def test_disputed_conclusion_export_behavior(app, client: TestClient, auth_headers):
     incident_id, run_id = _seed_succeeded_run(app, client, auth_headers)
     _finalize(client, auth_headers, incident_id, run_id)

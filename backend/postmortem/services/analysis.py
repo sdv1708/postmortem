@@ -317,12 +317,19 @@ class AnalysisService:
             )
         )
         hypotheses = list(self._session.scalars(_hypotheses_in_advisory_order(run_id)))
-        # The finalized human Root Cause Conclusion, if a reviewer has finalized one
-        # (ADR 0039). Null while the draft is provisional; rendered distinctly from
-        # the Advisory Hypothesis Ranking.
-        conclusion = self._session.scalar(
-            select(RootCauseConclusion).where(RootCauseConclusion.run_id == run_id)
+        # The run's representative Root Cause Conclusion, if a reviewer has finalized
+        # one (ADR 0039). A run can carry more than one once a same-run reinterpretation
+        # appends a Superseding Conclusion (ADR 0045); the shared helper picks the tail
+        # of the run's own chain. Null while the draft is provisional; rendered
+        # distinctly from the Advisory Hypothesis Ranking.
+        from .conclusions import representative_conclusion
+
+        run_conclusions = list(
+            self._session.scalars(
+                select(RootCauseConclusion).where(RootCauseConclusion.run_id == run_id)
+            )
         )
+        conclusion = representative_conclusion(run_conclusions, run_id)
         return postmortem_read(
             postmortem,
             postmortem.run.incident,
@@ -719,14 +726,20 @@ def postmortem_read(
     # run/hypothesis errors, while this read helper only needs the shaping function.
     from .conclusions import conclusion_read
 
-    # A Disputed Conclusion is derived from an open Conclusion Discrepancy, not a
-    # mutation of the immutable conclusion row (ADR 0040). When disputed, the draft
-    # is no longer authoritative and the incident has returned to unresolved review,
-    # so the read model reports "disputed" regardless of the stored lifecycle value.
-    disputed = conclusion is not None and len(conclusion.discrepancies) > 0
-    conclusion_status = (
-        "disputed" if disputed else (postmortem.conclusion_status or "provisional")
-    )
+    # Conclusion lifecycle is derived from the conclusion, never from mutating the
+    # immutable row (ADR 0040 / 0045). A conclusion superseded by a successor is no
+    # longer authoritative ("superseded"); an undisputed-but-superseded successor moved
+    # authority on. A Disputed Conclusion (open discrepancy) reports "disputed". Either
+    # way the run has returned to unresolved review, so the derived status overrides the
+    # stored lifecycle value.
+    if conclusion is None:
+        conclusion_status = postmortem.conclusion_status or "provisional"
+    elif conclusion.superseded_by is not None:
+        conclusion_status = "superseded"
+    elif len(conclusion.discrepancies) > 0:
+        conclusion_status = "disputed"
+    else:
+        conclusion_status = postmortem.conclusion_status or "provisional"
 
     return {
         "id": postmortem.id,

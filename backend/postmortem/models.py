@@ -759,18 +759,52 @@ class RootCauseConclusion(Base):
 
     __tablename__ = "root_cause_conclusions"
     __table_args__ = (
-        # Exactly one conclusion per run in this slice, enforced at the database
+        # At most one *original* conclusion per run, enforced at the database
         # boundary so a check-then-insert race cannot create two immutable
         # conclusions for one Analysis Run (PRD #26/#33 single-conclusion contract).
-        # The Superseding-Conclusion slice will relax this to a partial uniqueness
-        # keyed off a supersedes link; for now plain uniqueness is the invariant.
-        Index("ux_root_cause_conclusions_run_id", "run_id", unique=True),
+        # A Superseding Conclusion carries a non-null ``supersedes_id`` (ADR 0045), so
+        # the uniqueness is partial — keyed off ``supersedes_id IS NULL`` — which lets
+        # a same-run reinterpretation append a successor while still forbidding two
+        # originals for one run.
+        Index(
+            "ux_root_cause_conclusions_run_id",
+            "run_id",
+            unique=True,
+            sqlite_where=text("supersedes_id IS NULL"),
+            postgresql_where=text("supersedes_id IS NULL"),
+        ),
+        # The chain is linear, not a tree (ADR 0045): a predecessor may be superseded
+        # at most once. Unique where set so multiple originals (null) are unaffected.
+        Index(
+            "ux_root_cause_conclusions_supersedes_id",
+            "supersedes_id",
+            unique=True,
+            sqlite_where=text("supersedes_id IS NOT NULL"),
+            postgresql_where=text("supersedes_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    # The unique index in __table_args__ already covers run lookups.
+    # The partial unique index in __table_args__ covers original-conclusion run
+    # lookups; a plain index keeps successor/representative lookups fast too.
     run_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False
+        String(36), ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Superseding Conclusion links (ADR 0045, PRD #26 stories 47-50). ``supersedes_id``
+    # points at the disputed predecessor this conclusion replaces, and
+    # ``superseded_discrepancy_id`` at the open Conclusion Discrepancy it resolves.
+    # Both are null for an original conclusion. RESTRICT so a predecessor that has been
+    # superseded cannot be cascade-deleted out from under its chain — consistent with
+    # the immutability already accepted in ADR 0039.
+    supersedes_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("root_cause_conclusions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    superseded_discrepancy_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("conclusion_discrepancies.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     # The reviewer's structured causal narrative. Not a generated Major Claim — the
     # evidence trust floor lives on the linked hypotheses' citations — so it carries
@@ -787,6 +821,24 @@ class RootCauseConclusion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     run: Mapped[AnalysisRun] = relationship()
+    # The disputed predecessor this conclusion supersedes, and the inverse link to a
+    # successor that supersedes this one (ADR 0045). ``superseded_by`` is uselist=False
+    # because the chain is linear (the unique index on ``supersedes_id`` enforces it);
+    # an authoritative conclusion is the tail of its chain, with ``superseded_by`` None.
+    supersedes: Mapped["RootCauseConclusion | None"] = relationship(
+        remote_side="RootCauseConclusion.id",
+        foreign_keys="RootCauseConclusion.supersedes_id",
+        back_populates="superseded_by",
+    )
+    superseded_by: Mapped["RootCauseConclusion | None"] = relationship(
+        back_populates="supersedes",
+        foreign_keys="RootCauseConclusion.supersedes_id",
+        uselist=False,
+    )
+    # The Conclusion Discrepancy this conclusion was finalized to resolve (ADR 0045).
+    superseded_discrepancy: Mapped["ConclusionDiscrepancy | None"] = relationship(
+        foreign_keys="RootCauseConclusion.superseded_discrepancy_id",
+    )
     factors: Mapped[list["CausalFactor"]] = relationship(
         back_populates="conclusion",
         cascade="all, delete-orphan",
@@ -798,6 +850,10 @@ class RootCauseConclusion(Base):
     # being non-empty rather than from a mutable status flag on the immutable row.
     discrepancies: Mapped[list["ConclusionDiscrepancy"]] = relationship(
         back_populates="conclusion",
+        # Disambiguate from ``superseded_discrepancy_id`` (ADR 0045), the second FK
+        # path between these tables: a discrepancy belongs to a conclusion via
+        # ``conclusion_id`` only.
+        foreign_keys="ConclusionDiscrepancy.conclusion_id",
         cascade="all, delete-orphan",
         order_by="ConclusionDiscrepancy.created_at",
     )
@@ -922,7 +978,10 @@ class ConclusionDiscrepancy(Base):
     raised_by_display: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
-    conclusion: Mapped[RootCauseConclusion] = relationship(back_populates="discrepancies")
+    conclusion: Mapped[RootCauseConclusion] = relationship(
+        back_populates="discrepancies",
+        foreign_keys="ConclusionDiscrepancy.conclusion_id",
+    )
 
 
 class HumanAssumption(Base):

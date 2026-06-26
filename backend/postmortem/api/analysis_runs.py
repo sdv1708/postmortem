@@ -28,6 +28,7 @@ from ..schemas import (
     RootCauseConclusionCreate,
     RootCauseConclusionRead,
     RunDiagnosticsRead,
+    SupersedingConclusionCreate,
     TimelineEventRead,
 )
 from ..services import (
@@ -38,6 +39,7 @@ from ..services import (
     ConclusionNotFoundError,
     ConclusionNotReadyError,
     ConclusionService,
+    ConclusionSupersessionError,
     ConclusionValidationError,
     HypothesisNotFoundError,
     IncidentNotFoundError,
@@ -442,6 +444,51 @@ def raise_run_conclusion_discrepancy(
     except ConclusionValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     return ConclusionDiscrepancyRead.model_validate(discrepancy_read(discrepancy))
+
+
+@router.post(
+    "/{run_id}/conclusion/supersede",
+    response_model=RootCauseConclusionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def supersede_run_conclusion(
+    incident_id: str,
+    run_id: str,
+    payload: SupersedingConclusionCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+) -> RootCauseConclusionRead:
+    """Finalize a Superseding Conclusion that resolves a dispute (ADR 0045 / 0022).
+
+    Appends a new immutable conclusion linked to the disputed predecessor and the
+    discrepancy it answers; the predecessor is never edited (PRD #26 stories 47-48).
+    ``run_id`` is the run the successor is finalized against — the predecessor's own
+    run for reinterpretation, or a new Analysis Run when new Evidence is used (stories
+    49-50). Authority moves to the undisputed successor.
+    """
+    try:
+        conclusion = ConclusionService(db).supersede(incident_id, run_id, payload, principal)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    except HypothesisNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="hypothesis not found")
+    except ConclusionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="the conclusion to supersede was not found for this incident",
+        )
+    except ConclusionNotReadyError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="this run has not completed successfully, so it cannot finalize a conclusion",
+        )
+    except ConclusionSupersessionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except ConclusionValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    return RootCauseConclusionRead.model_validate(conclusion_read(conclusion))
 
 
 @router.get("/{run_id}/remediation", response_model=list[ActionItemRead])
