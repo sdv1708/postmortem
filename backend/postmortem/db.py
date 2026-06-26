@@ -463,6 +463,24 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         },
     )
 
+    # Superseding Conclusion links added in slice #39 (ADR 0045): a successor points
+    # at the disputed predecessor it replaces and the open discrepancy it resolves.
+    # Both nullable — an original conclusion carries neither — so existing rows need
+    # no backfill. Nullable self/cross FK ddl is valid on both SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "root_cause_conclusions",
+        {
+            "supersedes_id": (
+                "VARCHAR(36) REFERENCES root_cause_conclusions(id) ON DELETE RESTRICT"
+            ),
+            "superseded_discrepancy_id": (
+                "VARCHAR(36) REFERENCES conclusion_discrepancies(id) ON DELETE RESTRICT"
+            ),
+        },
+    )
+
     # Re-own Impact Claims from a hypothesis to the run (ADR 0033). Runs after the
     # support columns exist so the SQLite table rebuild can copy them.
     _migrate_impact_claims_to_run_level(engine, inspect(engine))
@@ -555,16 +573,31 @@ def ensure_schema_compatibility(engine: Engine) -> None:
     # Root Cause Conclusion tables are created by create_all; make them append-only
     # immutable at the database layer where supported (ADR 0039).
     _ensure_append_only_immutability(engine)
-    # Backstop the single-conclusion-per-run invariant at the DB boundary so a
-    # check-then-insert race cannot persist two immutable conclusions for one run
-    # (ADR 0039). create_all builds this for fresh databases; this idempotent index
-    # upgrades a dev database whose table predates the unique constraint.
+    # Backstop the conclusion-chain invariants at the DB boundary (ADR 0039 / 0045).
+    # ``ux_root_cause_conclusions_run_id`` enforces at most one *original* conclusion
+    # per run, so a check-then-insert race cannot persist two; it is now *partial*
+    # (only where ``supersedes_id IS NULL``) so a same-run Superseding Conclusion may
+    # share the run. ``ux_root_cause_conclusions_supersedes_id`` keeps the chain linear
+    # (a predecessor superseded at most once). create_all builds both partial indexes
+    # for fresh databases; here we upgrade a dev database whose run index predates the
+    # superseding slice, dropping the old plain unique index first so the partial one
+    # supersedes it. Both partial-index spellings are valid on SQLite and PostgreSQL.
     if "root_cause_conclusions" in inspect(engine).get_table_names():
         with engine.begin() as connection:
             connection.execute(
+                text("DROP INDEX IF EXISTS ux_root_cause_conclusions_run_id")
+            )
+            connection.execute(
                 text(
                     "CREATE UNIQUE INDEX IF NOT EXISTS ux_root_cause_conclusions_run_id "
-                    "ON root_cause_conclusions (run_id)"
+                    "ON root_cause_conclusions (run_id) WHERE supersedes_id IS NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "ux_root_cause_conclusions_supersedes_id "
+                    "ON root_cause_conclusions (supersedes_id) WHERE supersedes_id IS NOT NULL"
                 )
             )
 

@@ -34,6 +34,7 @@ import {
   type RankingRationale,
   type RetrievalTrace,
   type RootCauseConclusion,
+  type SupersededLink,
   type RunDiagnostics,
   type RunStage,
   type RunStageEvent,
@@ -999,6 +1000,7 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
   const insufficient = postmortem.evidence_sufficiency === "insufficient";
   const provisional = postmortem.conclusion_status === "provisional";
   const disputed = postmortem.conclusion_status === "disputed";
+  const superseded = postmortem.conclusion_status === "superseded";
 
   return (
     <div className="border-t border-slate-200 bg-slate-50/40">
@@ -1013,6 +1015,11 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
           {disputed && (
             <span className="badge bg-rose-50 text-rose-700 ring-rose-200">
               Disputed — not authoritative
+            </span>
+          )}
+          {superseded && (
+            <span className="badge bg-violet-50 text-violet-700 ring-violet-200">
+              Superseded — not authoritative
             </span>
           )}
           {insufficient && (
@@ -1777,6 +1784,13 @@ function RunConclusion({
     queryKey: ["run-hypotheses", incidentId, runId],
     queryFn: () => api.listRunHypotheses(incidentId, runId),
   });
+  // Disputed conclusions elsewhere in the incident can be superseded from this run
+  // (the new-Evidence path, ADR 0045). Only relevant while this run has no conclusion
+  // of its own; the finalize form offers them as supersede targets.
+  const disputedQuery = useQuery<RootCauseConclusion[]>({
+    queryKey: ["incident-disputed-conclusions", incidentId],
+    queryFn: () => api.listIncidentDisputedConclusions(incidentId),
+  });
 
   if (conclusionQuery.isPending) {
     return (
@@ -1793,6 +1807,7 @@ function RunConclusion({
         incidentId={incidentId}
         runId={runId}
         conclusion={conclusion}
+        hypotheses={hypothesesQuery.data ?? []}
         onFocusEvidence={onFocusEvidence}
         onDisputed={() => {
           void queryClient.invalidateQueries({
@@ -1800,6 +1815,9 @@ function RunConclusion({
           });
           void queryClient.invalidateQueries({
             queryKey: ["run-postmortem", incidentId, runId],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["run-hypotheses", incidentId, runId],
           });
         }}
       />
@@ -1811,9 +1829,18 @@ function RunConclusion({
       incidentId={incidentId}
       runId={runId}
       hypotheses={hypothesesQuery.data ?? []}
+      // Cross-run supersede targets: other runs' disputed conclusions (ADR 0045).
+      supersedeCandidates={(disputedQuery.data ?? []).filter((c) => c.run_id !== runId)}
       onFinalized={() => {
         void queryClient.invalidateQueries({ queryKey: ["run-conclusion", incidentId, runId] });
         void queryClient.invalidateQueries({ queryKey: ["run-postmortem", incidentId, runId] });
+        // A cross-run supersede resolves another run's dispute, so refresh both the
+        // incident candidate list and the predecessor run's conclusion/postmortem.
+        void queryClient.invalidateQueries({
+          queryKey: ["incident-disputed-conclusions", incidentId],
+        });
+        void queryClient.invalidateQueries({ queryKey: ["run-conclusion", incidentId] });
+        void queryClient.invalidateQueries({ queryKey: ["run-postmortem", incidentId] });
       }}
     />
   );
@@ -2094,34 +2121,50 @@ function ConclusionPanel({
   incidentId,
   runId,
   conclusion,
+  hypotheses,
   onFocusEvidence,
   onDisputed,
 }: {
   incidentId: string;
   runId: string;
   conclusion: RootCauseConclusion;
+  hypotheses: Hypothesis[];
   onFocusEvidence: (ref: EvidenceRef) => void;
   onDisputed: () => void;
 }) {
   const who = conclusion.finalized_by_display || conclusion.finalized_by;
-  const disputed = conclusion.disputed;
+  // This conclusion has been replaced by a Superseding Conclusion (ADR 0045):
+  // authority moved to the successor, so it is no longer authoritative even though
+  // its own discrepancy is now resolved. Distinct from "disputed" (still open).
+  const superseded = conclusion.superseded_by !== null;
+  const disputed = conclusion.disputed && !superseded;
+  const headingTone = superseded
+    ? "text-violet-700"
+    : disputed
+      ? "text-rose-700"
+      : "text-emerald-700";
   return (
     <div
-      className={`border-t border-slate-200 ${disputed ? "bg-rose-50/30" : "bg-emerald-50/30"}`}
+      className={`border-t border-slate-200 ${
+        superseded ? "bg-violet-50/30" : disputed ? "bg-rose-50/30" : "bg-emerald-50/30"
+      }`}
     >
       <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
-        <p
-          className={`text-xs font-medium uppercase tracking-wide ${
-            disputed ? "text-rose-700" : "text-emerald-700"
-          }`}
-        >
+        <p className={`text-xs font-medium uppercase tracking-wide ${headingTone}`}>
           Root Cause Conclusion
         </p>
-        {disputed ? (
+        {superseded ? (
+          <span className="badge bg-violet-50 text-violet-700 ring-violet-200">superseded</span>
+        ) : disputed ? (
           <span className="badge bg-rose-50 text-rose-700 ring-rose-200">disputed</span>
         ) : (
           <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">
             finalized by human
+          </span>
+        )}
+        {conclusion.supersedes !== null && !superseded && (
+          <span className="badge bg-violet-50 text-violet-700 ring-violet-200">
+            superseding conclusion
           </span>
         )}
       </div>
@@ -2151,6 +2194,45 @@ function ConclusionPanel({
               preserved below for audit but is no longer authoritative. The immutable
               conclusion is never edited — disagreement is recorded as an append-only
               discrepancy.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {superseded && conclusion.superseded_by && (
+        <div className="mx-5 mt-3 flex items-start gap-2 rounded-lg border border-violet-300 bg-violet-50/80 p-4">
+          <svg
+            className="mt-0.5 shrink-0 text-violet-600"
+            width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+          >
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+            <path d="M21 3v5h-5" />
+          </svg>
+          <div>
+            <h4 className="text-sm font-semibold text-violet-900">
+              Superseded — replaced by a newer conclusion
+            </h4>
+            <p className="mt-0.5 text-xs leading-relaxed text-violet-800">
+              A reviewer resolved the dispute by finalizing a Superseding Conclusion.
+              This conclusion is preserved for audit but is no longer authoritative.{" "}
+              {conclusion.superseded_by.disputed ? (
+                // The successor is itself disputed (or further superseded): authority
+                // is the undisputed tail, so there is currently no authoritative
+                // conclusion (ADR 0045).
+                <>
+                  The replacement conclusion is itself disputed, so the incident has no
+                  authoritative conclusion and is under unresolved review.
+                </>
+              ) : (
+                <>
+                  The authoritative conclusion was finalized in analysis run{" "}
+                  <code className="rounded bg-violet-100 px-1">
+                    {conclusion.superseded_by.run_id}
+                  </code>
+                  .
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -2204,13 +2286,89 @@ function ConclusionPanel({
           </div>
         )}
 
-        <DiscrepancyForm
+        {/* The complete superseding chain for audit (ADR 0045, PRD #26 story 48):
+            the predecessors this conclusion replaced, and the successor that replaced
+            it (when this run's conclusion was the one superseded). */}
+        {(conclusion.history.length > 0 || conclusion.superseded_by) && (
+          <SupersedingChain
+            history={conclusion.history}
+            supersededBy={conclusion.superseded_by}
+          />
+        )}
+
+        {/* A disputed conclusion can be disputed further (append-only) or resolved by
+            superseding it. A superseded conclusion is already resolved — neither form
+            applies; review continues on the authoritative successor. */}
+        {!superseded && (
+          <DiscrepancyForm
+            incidentId={incidentId}
+            runId={runId}
+            disputed={disputed}
+            onRaised={onDisputed}
+          />
+        )}
+      </div>
+
+      {disputed && (
+        <ConclusionForm
           incidentId={incidentId}
           runId={runId}
-          disputed={disputed}
-          onRaised={onDisputed}
+          hypotheses={hypotheses}
+          onFinalized={onDisputed}
+          supersede={{
+            conclusionId: conclusion.id,
+            // Resolve the most recent open discrepancy; any of the predecessor's own
+            // discrepancies is a valid link, and the latest reflects the live concern.
+            discrepancyId:
+              conclusion.discrepancies[conclusion.discrepancies.length - 1].id,
+          }}
         />
-      </div>
+      )}
+    </div>
+  );
+}
+
+// The superseding chain for audit (ADR 0045): predecessors this conclusion replaced,
+// oldest first, and the authoritative successor when this conclusion was superseded.
+function SupersedingChain({
+  history,
+  supersededBy,
+}: {
+  history: SupersededLink[];
+  supersededBy: SupersededLink | null;
+}) {
+  const entries: Array<{ link: SupersededLink; label: string }> = [
+    ...history.map((link) => ({ link, label: "Earlier conclusion" })),
+    ...(supersededBy ? [{ link: supersededBy, label: "Superseded by" }] : []),
+  ];
+  return (
+    <div className="space-y-2 border-t border-violet-100 pt-3">
+      <p className="label text-violet-700">Superseding chain · {entries.length}</p>
+      <ul className="space-y-2">
+        {entries.map(({ link, label }) => (
+          <li
+            key={link.id}
+            className="rounded-lg border border-violet-200 bg-violet-50/50 px-3 py-2"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-violet-700">
+                {label}
+              </span>
+              {link.disputed && (
+                <span className="badge bg-rose-50 text-rose-700 ring-rose-200">disputed</span>
+              )}
+              <span className="text-xs text-slate-400">run {link.run_id}</span>
+            </div>
+            <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
+              {link.summary}
+            </p>
+            <p className="mt-0.5 text-xs text-slate-400">
+              Finalized by {link.finalized_by_display || link.finalized_by} on{" "}
+              {new Date(link.finalized_at).toLocaleString()}
+            </p>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -2390,11 +2548,19 @@ function ConclusionForm({
   runId,
   hypotheses,
   onFinalized,
+  supersede,
+  supersedeCandidates,
 }: {
   incidentId: string;
   runId: string;
   hypotheses: Hypothesis[];
   onFinalized: () => void;
+  // When present, the form always finalizes a Superseding Conclusion resolving the
+  // named discrepancy on the predecessor (the same-run panel forces this) (ADR 0045).
+  supersede?: { conclusionId: string; discrepancyId: string };
+  // Disputed conclusions elsewhere in the incident this run may supersede instead of
+  // finalizing an original — the new-Evidence path. Ignored when `supersede` is forced.
+  supersedeCandidates?: RootCauseConclusion[];
 }) {
   const [roles, setRoles] = useState<Record<string, CausalRole | "none">>({});
   const [acknowledgments, setAcknowledgments] = useState<Record<string, string>>({});
@@ -2402,6 +2568,22 @@ function ConclusionForm({
   const [summary, setSummary] = useState("");
   const [assumptionsText, setAssumptionsText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Cross-run supersede target chosen by the reviewer (empty = finalize an original).
+  const [selectedPredecessorId, setSelectedPredecessorId] = useState("");
+
+  const candidates = supersede === undefined ? (supersedeCandidates ?? []) : [];
+  const selectedCandidate = candidates.find((c) => c.id === selectedPredecessorId) ?? null;
+  // The effective supersede target: forced (same-run panel) or the chosen cross-run
+  // predecessor, resolving the latest open discrepancy on it.
+  const effectiveSupersede =
+    supersede ??
+    (selectedCandidate
+      ? {
+          conclusionId: selectedCandidate.id,
+          discrepancyId:
+            selectedCandidate.discrepancies[selectedCandidate.discrepancies.length - 1]?.id ?? "",
+        }
+      : undefined);
 
   const eligible = hypotheses.filter(hypothesisIsFinalizable);
   const byId = new Map(eligible.map((h) => [h.id, h]));
@@ -2445,40 +2627,95 @@ function ConclusionForm({
     }
     return true;
   });
+  const isSupersede = effectiveSupersede !== undefined;
   const canFinalize =
-    failureMechanismCount === 1 && summary.trim().length > 0 && qualificationsComplete;
+    failureMechanismCount === 1 &&
+    summary.trim().length > 0 &&
+    qualificationsComplete &&
+    // A chosen supersede target must carry a discrepancy to resolve.
+    (!isSupersede || (effectiveSupersede?.discrepancyId ?? "").length > 0);
 
   const finalizeMutation = useMutation({
-    mutationFn: () =>
-      api.finalizeRunConclusion(incidentId, runId, {
+    mutationFn: () => {
+      const base = {
         summary: summary.trim(),
         factors,
         human_assumptions: humanAssumptions,
-      }),
+      };
+      if (effectiveSupersede) {
+        return api.supersedeRunConclusion(incidentId, runId, {
+          ...base,
+          supersedes_conclusion_id: effectiveSupersede.conclusionId,
+          discrepancy_id: effectiveSupersede.discrepancyId,
+        });
+      }
+      return api.finalizeRunConclusion(incidentId, runId, base);
+    },
     onMutate: () => setError(null),
     onSuccess: () => onFinalized(),
     onError: (err) =>
-      setError(err instanceof Error ? err.message : "Conclusion could not be finalized."),
+      setError(
+        err instanceof Error
+          ? err.message
+          : isSupersede
+            ? "Superseding conclusion could not be finalized."
+            : "Conclusion could not be finalized.",
+      ),
   });
 
   return (
-    <div className="border-t border-slate-200 bg-slate-50/40">
+    <div
+      className={
+        isSupersede
+          ? "border-t border-violet-100 bg-violet-50/30"
+          : "border-t border-slate-200 bg-slate-50/40"
+      }
+    >
       <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
-        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-          Root Cause Conclusion
+        <p
+          className={`text-xs font-medium uppercase tracking-wide ${
+            isSupersede ? "text-violet-700" : "text-slate-500"
+          }`}
+        >
+          {isSupersede ? "Supersede this conclusion" : "Root Cause Conclusion"}
         </p>
-        <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
-          not finalized
-        </span>
+        {!isSupersede && (
+          <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
+            not finalized
+          </span>
+        )}
       </div>
       <p className="px-5 pt-1 text-xs text-slate-500">
-        Accepting a hypothesis keeps it as credible; it does not declare a root cause.
-        Finalize a conclusion from the accepted, evidence-backed hypotheses below by
-        assigning exactly one failure mechanism plus any triggers and amplifying
-        conditions. A finalized conclusion is immutable.
+        {isSupersede
+          ? "Resolve this dispute by finalizing a new conclusion from this run's accepted, evidence-backed hypotheses (reinterpretation of the same evidence). The disputed conclusion is preserved for audit; authority moves to the new one. For new evidence, start a new analysis run and supersede from there."
+          : "Accepting a hypothesis keeps it as credible; it does not declare a root cause. Finalize a conclusion from the accepted, evidence-backed hypotheses below by assigning exactly one failure mechanism plus any triggers and amplifying conditions. A finalized conclusion is immutable."}
       </p>
 
       <div className="space-y-4 p-5">
+        {candidates.length > 0 && (
+          <label className="block space-y-1.5">
+            <span className="text-sm font-medium text-slate-700">Finalize as</span>
+            <select
+              value={selectedPredecessorId}
+              onChange={(event) => setSelectedPredecessorId(event.target.value)}
+              aria-label="Conclusion target"
+            >
+              <option value="">New root cause conclusion</option>
+              {candidates.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  Supersede disputed conclusion (run {candidate.run_id.slice(0, 8)}):{" "}
+                  {candidate.summary}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-slate-500">
+              This run can resolve a disputed conclusion from earlier in the incident by
+              superseding it with this run&apos;s evidence, or finalize a fresh
+              conclusion. Authority moves to the superseding conclusion; the disputed
+              one is preserved for audit.
+            </p>
+          </label>
+        )}
         {eligible.length === 0 ? (
           <p className="rounded-lg border border-dashed border-slate-300 bg-white/70 px-3 py-3 text-xs text-slate-500">
             No hypothesis is ready to finalize yet. Accept a hypothesis that has
@@ -2633,7 +2870,13 @@ function ConclusionForm({
           disabled={!canFinalize || finalizeMutation.isPending}
           className="button-primary"
         >
-          {finalizeMutation.isPending ? "Finalizing…" : "Finalize root cause conclusion"}
+          {finalizeMutation.isPending
+            ? isSupersede
+              ? "Superseding…"
+              : "Finalizing…"
+            : isSupersede
+              ? "Finalize superseding conclusion"
+              : "Finalize root cause conclusion"}
         </button>
       </div>
     </div>

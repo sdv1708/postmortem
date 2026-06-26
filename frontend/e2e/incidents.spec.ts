@@ -341,6 +341,130 @@ test("seed the canonical demo scenario and review its multi-hypothesis postmorte
   );
 });
 
+// Superseding a disputed conclusion (ADR 0045, #39): a disputed Root Cause
+// Conclusion is resolved not by editing it but by finalizing a new immutable
+// Superseding Conclusion. This drives the same-run reinterpretation path end to
+// end — finalize, dispute, supersede — and checks that authority moves to the
+// successor while the disputed predecessor is preserved in the superseding chain.
+test("supersede a disputed conclusion with a reinterpretation", async ({ page }) => {
+  await page.goto(`${BASE}/incidents`);
+  const deployCard = page
+    .getByRole("listitem")
+    .filter({ hasText: "Ambiguous deploy-related API error spike" });
+  await deployCard.getByRole("button", { name: "Seed demo scenario" }).click();
+
+  await page.waitForURL(/\/incidents\/[0-9a-f-]{36}$/);
+  await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
+
+  // Finalize an original Root Cause Conclusion from the leading evidence-backed
+  // hypothesis (accepting is a separate decision from concluding).
+  await page.getByRole("button", { name: "Accept" }).first().click();
+  await page.getByLabel(/Causal role for Deploy v184/).selectOption("failure_mechanism");
+  await page
+    .getByPlaceholder(/Summarize the causal account/)
+    .fill("The v184 connection-pool refactor regressed connection handling.");
+  await page.getByRole("button", { name: "Finalize root cause conclusion" }).click();
+  await expect(page.getByText("finalized by human")).toBeVisible();
+
+  // Dispute it (append-only Conclusion Discrepancy, ADR 0040): it returns to
+  // unresolved review and is no longer authoritative.
+  await page
+    .getByPlaceholder(/Explain what is wrong with this conclusion/)
+    .fill("The cited deploy postdates the error spike by several minutes.");
+  await page.getByRole("button", { name: "Flag discrepancy" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Disputed — returned to unresolved review" }),
+  ).toBeVisible();
+
+  // Resolve the dispute by superseding it (reinterpretation, same run): authority
+  // moves to the new conclusion and the disputed predecessor enters the chain.
+  await expect(page.getByText("Supersede this conclusion")).toBeVisible();
+  await page.getByLabel(/Causal role for Deploy v184/).selectOption("failure_mechanism");
+  await page
+    .getByPlaceholder(/Summarize the causal account/)
+    .fill("On review, the deploy is the trigger; pool exhaustion is the mechanism.");
+  await page.getByRole("button", { name: "Finalize superseding conclusion" }).click();
+
+  await expect(page.getByText("superseding conclusion")).toBeVisible();
+  await expect(
+    page.getByText("On review, the deploy is the trigger; pool exhaustion is the mechanism."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Disputed — returned to unresolved review" }),
+  ).toBeHidden();
+  await expect(page.getByText(/Superseding chain ·/)).toBeVisible();
+
+  // A clean export presents the authoritative successor and notes the provenance.
+  const supersededClean = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export clean" }).click(),
+  ]).then(([d]) => d);
+  const supersededCleanMarkdown = await streamToString(await supersededClean.createReadStream());
+  expect(supersededCleanMarkdown).toContain("**Status:** finalized");
+  expect(supersededCleanMarkdown).toContain(
+    "On review, the deploy is the trigger; pool exhaustion is the mechanism.",
+  );
+  expect(supersededCleanMarkdown).toContain("Supersedes an earlier disputed conclusion");
+});
+
+// New-evidence supersession across runs (ADR 0045, #39): when new evidence is
+// needed, the reviewer starts a new analysis run and supersedes the disputed
+// predecessor from there. The new run's conclusion form offers the disputed
+// predecessor as a supersede target (it is not reachable any other way in the UI).
+test("supersede a disputed conclusion from a new analysis run", async ({ page }) => {
+  await page.goto(`${BASE}/incidents`);
+  const deployCard = page
+    .getByRole("listitem")
+    .filter({ hasText: "Ambiguous deploy-related API error spike" });
+  await deployCard.getByRole("button", { name: "Seed demo scenario" }).click();
+  await page.waitForURL(/\/incidents\/[0-9a-f-]{36}$/);
+  await expect(page.getByText("succeeded", { exact: true })).toBeVisible();
+
+  // Finalize then dispute an original conclusion on the first run.
+  await page.getByRole("button", { name: "Accept" }).first().click();
+  await page.getByLabel(/Causal role for Deploy v184/).selectOption("failure_mechanism");
+  await page
+    .getByPlaceholder(/Summarize the causal account/)
+    .fill("The v184 connection-pool refactor regressed connection handling.");
+  await page.getByRole("button", { name: "Finalize root cause conclusion" }).click();
+  await expect(page.getByText("finalized by human")).toBeVisible();
+  await page
+    .getByPlaceholder(/Explain what is wrong with this conclusion/)
+    .fill("Need new evidence: the deploy timing does not line up.");
+  await page.getByRole("button", { name: "Flag discrepancy" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Disputed — returned to unresolved review" }),
+  ).toBeVisible();
+
+  // Start a second analysis run (the new-evidence path) and wait for both runs to
+  // finish (the new run polls through the six stages; offline runs can take a while).
+  await page.getByRole("button", { name: "Start analysis run" }).click();
+  await expect(page.getByText("succeeded", { exact: true })).toHaveCount(2, {
+    timeout: 90_000,
+  });
+
+  // Reachability is the crux of the finding: the new run's conclusion form exposes a
+  // supersede target selector that offers the disputed predecessor, so the new-evidence
+  // path is driveable from the UI (not API-only). The full cross-run supersede
+  // submission and its export behavior are covered by the backend API tests.
+  const targetSelect = page.getByLabel("Conclusion target");
+  await expect(targetSelect).toBeVisible();
+  await expect(
+    targetSelect.getByRole("option", { name: /Supersede disputed conclusion/ }),
+  ).toHaveCount(1);
+
+  // Choosing it switches the form into superseding mode (resolves the dispute by
+  // appending a successor rather than finalizing another original conclusion).
+  await targetSelect.selectOption({ index: 1 });
+  const newRunCard = page
+    .locator("li")
+    .filter({ has: page.getByLabel("Conclusion target") })
+    .first();
+  await expect(
+    newRunCard.getByRole("button", { name: "Finalize superseding conclusion" }),
+  ).toBeVisible();
+});
+
 test("run the evaluation suite and review the deterministic dashboard", async ({ page }) => {
   await page.goto(`${BASE}/evaluations`);
   await expect(page.getByRole("heading", { name: "Evaluations" })).toBeVisible();

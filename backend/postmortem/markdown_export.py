@@ -55,6 +55,13 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
     # returned to unresolved review. Distinct from provisional (a conclusion *was*
     # finalized, then disputed), so it carries its own prominent banner.
     disputed = postmortem.conclusion_status == "disputed"
+    # A Superseded Conclusion has been replaced by a Superseding Conclusion (ADR 0045):
+    # authority moved to the successor, so this run's conclusion is also withheld from
+    # the clean export and points at the successor instead.
+    superseded = postmortem.conclusion_status == "superseded"
+    # Both disputed and superseded conclusions are non-authoritative: a clean export
+    # withholds the causal account so neither reads as current fact.
+    non_authoritative = disputed or superseded
 
     title = f"# Postmortem — {postmortem.incident_title}"
     if provisional:
@@ -77,6 +84,32 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
             "against the finalized Root Cause Conclusion. It is no longer "
             "authoritative and the incident has returned to unresolved review. The "
             "conclusion and the discrepancies are retained for audit below."
+        )
+        lines.append("")
+    if superseded:
+        # The successor only carries authority if it is itself undisputed. A
+        # superseded conclusion is always disputed (superseding requires a dispute),
+        # so ``superseded_by.disputed`` is true when the successor was in turn disputed
+        # (or further superseded) — in which case there is currently no authoritative
+        # conclusion and a clean export must not point responders at the successor as
+        # current fact (ADR 0045).
+        successor = postmortem.conclusion.superseded_by if postmortem.conclusion else None
+        if successor is None:
+            where = ""
+        elif successor.disputed:
+            where = (
+                " The replacement conclusion is itself disputed, so the incident has no "
+                "authoritative conclusion and is under unresolved review."
+            )
+        else:
+            where = (
+                f" The authoritative conclusion was finalized in analysis run "
+                f"`{successor.run_id}`."
+            )
+        lines.append(
+            "> **Superseded conclusion.** This finalized Root Cause Conclusion has "
+            f"been replaced by a newer Superseding Conclusion.{where} The superseded "
+            "conclusion is retained for audit below but is no longer authoritative."
         )
         lines.append("")
     lines.append(f"- **Severity:** {postmortem.incident_severity or '—'}")
@@ -120,7 +153,13 @@ def render_markdown(postmortem: PostmortemRead, mode: ExportMode) -> str:
 
     _impact_section(lines, postmortem.impact_claims, mode)
     if postmortem.conclusion is not None:
-        _conclusion_section(lines, postmortem.conclusion, mode, disputed=disputed)
+        _conclusion_section(
+            lines,
+            postmortem.conclusion,
+            mode,
+            disputed=disputed,
+            superseded=superseded,
+        )
     _hypotheses_section(lines, authoritative, mode)
     if mode is ExportMode.AUDIT and review_findings:
         _review_findings_section(lines, review_findings)
@@ -201,18 +240,19 @@ def _conclusion_section(
     mode: ExportMode,
     *,
     disputed: bool,
+    superseded: bool = False,
 ) -> None:
-    """Render the finalized human Root Cause Conclusion (ADR 0039 / 0040).
+    """Render the finalized human Root Cause Conclusion (ADR 0039 / 0040 / 0045).
 
     Distinct from the Advisory Hypothesis Ranking below: a ranking recommends
     plausible candidates, this is the human's decision (PRD #26 stories 30, 90).
     Shows the single Failure Mechanism, optional repeatable Triggers and Amplifying
     Conditions, and Conclusion Provenance.
 
-    A Disputed Conclusion is not authoritative (ADR 0040, PRD #26 stories 44-46): a
-    **clean** export withholds the disputed causal account so it cannot read as
-    current fact, while an **audit** export preserves the full conclusion and the
-    recorded discrepancies for the historical record.
+    A Disputed or Superseded Conclusion is not authoritative (ADR 0040 / 0045, PRD #26
+    stories 44-50): a **clean** export withholds the causal account so it cannot read
+    as current fact, while an **audit** export preserves the full conclusion, the
+    recorded discrepancies, and the superseding chain for the historical record.
     """
     lines.append("## Root Cause Conclusion")
     lines.append("")
@@ -221,6 +261,14 @@ def _conclusion_section(
             "_This conclusion has an open discrepancy and has returned to unresolved "
             "review, so it is withheld from this clean export. See the audit export "
             "for the disputed conclusion and the recorded discrepancies._"
+        )
+        lines.append("")
+        return
+    if superseded and mode is ExportMode.CLEAN:
+        lines.append(
+            "_This conclusion has been superseded by a newer conclusion, so it is "
+            "withheld from this clean export. See the audit export for the superseded "
+            "conclusion and the superseding chain._"
         )
         lines.append("")
         return
@@ -235,8 +283,20 @@ def _conclusion_section(
         finalized_note = (
             f"_Disputed — retained for audit, not authoritative. {finalized_note[1:]}"
         )
+    elif superseded:
+        finalized_note = (
+            f"_Superseded — retained for audit, not authoritative. {finalized_note[1:]}"
+        )
     lines.append(finalized_note)
     lines.append("")
+    # A successor that itself supersedes a disputed predecessor notes that provenance
+    # so the audit trail is legible wherever it renders (ADR 0045, PRD #26 story 48).
+    if conclusion.supersedes is not None:
+        lines.append(
+            f"_Supersedes an earlier disputed conclusion finalized in analysis run "
+            f"`{conclusion.supersedes.run_id}`._"
+        )
+        lines.append("")
     lines.append(conclusion.summary)
     lines.append("")
     lines.append("**Failure mechanism:**")
@@ -270,7 +330,28 @@ def _conclusion_section(
             lines.append(
                 f"- {discrepancy.explanation} _(raised by {raised_by} on {raised_at})_"
             )
+    # Audit-only: the complete superseding chain so no historical human judgment is
+    # lost (ADR 0045, PRD #26 story 48). ``history`` is the predecessor chain
+    # oldest-first; ``superseded_by`` is the authoritative successor when this run's
+    # conclusion was the one replaced.
+    if mode is ExportMode.AUDIT and (conclusion.history or conclusion.superseded_by):
+        lines.append("")
+        lines.append("**Superseding chain:**")
+        for predecessor in conclusion.history:
+            lines.append(f"- {_chain_line('Earlier conclusion', predecessor)}")
+        if conclusion.superseded_by is not None:
+            lines.append(
+                f"- {_chain_line('Superseded by', conclusion.superseded_by)}"
+            )
     lines.append("")
+
+
+def _chain_line(label: str, link) -> str:
+    """One line summarizing another conclusion in a supersession chain (ADR 0045)."""
+    who = link.finalized_by_display or link.finalized_by
+    when = link.finalized_at.isoformat().replace("+00:00", "Z")
+    state = " _(disputed)_" if link.disputed else ""
+    return f"{label}{state}: {link.summary} _(finalized by {who} on {when}, run `{link.run_id}`)_"
 
 
 def _emit_causal_factor(lines: list[str], factor: CausalFactorRead) -> None:

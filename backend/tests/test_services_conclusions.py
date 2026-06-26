@@ -15,6 +15,7 @@ from postmortem.schemas import (
     ConclusionDiscrepancyCreate,
     IncidentCreate,
     RootCauseConclusionCreate,
+    SupersedingConclusionCreate,
 )
 from postmortem.services import (
     AnalysisRunNotFoundError,
@@ -23,6 +24,7 @@ from postmortem.services import (
     ConclusionNotFoundError,
     ConclusionNotReadyError,
     ConclusionService,
+    ConclusionSupersessionError,
     HypothesisNotFoundError,
     IncidentService,
     ArtifactService,
@@ -819,3 +821,280 @@ def test_raise_discrepancy_rejects_cross_incident_run(fresh_session):
             ConclusionDiscrepancyCreate(explanation="Wrong incident."),
             PRINCIPAL,
         )
+
+
+# --- Superseding Conclusions (ADR 0045, PRD #26 stories 47-50) ---------------
+
+
+def _dispute(session, incident, run, explanation="The cited deploy postdates the spike."):
+    """Raise a discrepancy on a run's conclusion, returning the discrepancy."""
+    discrepancy = ConclusionService(session).raise_discrepancy(
+        incident.id, run.id, ConclusionDiscrepancyCreate(explanation=explanation), PRINCIPAL
+    )
+    session.commit()
+    return discrepancy
+
+
+def _additional_run(session, incident, *, titles=("New mechanism",), source_name="api2.log"):
+    """Start a second succeeded run on an existing incident (new Evidence path)."""
+    artifact = ArtifactService(session).create(
+        incident.id,
+        ArtifactCreate(
+            source_type="logs",
+            source_name=source_name,
+            body="new one\nnew two\nnew three\nnew four",
+        ),
+    )
+    session.commit()
+    hypotheses_payload = [
+        {
+            "title": title,
+            "summary": f"{title} explanation.",
+            "supporting_evidence": [
+                {"artifact_id": artifact.id, "line_start": index + 1, "line_end": index + 1}
+            ],
+        }
+        for index, title in enumerate(titles)
+    ]
+    impact = [
+        FactsImpactClaim(
+            description="Customers saw errors",
+            evidence=[RcaEvidenceRef(artifact_id=artifact.id, line_start=1, line_end=1)],
+        )
+    ]
+    service = AnalysisService(
+        session,
+        llm_client=FakeLLMClient([json.dumps({"hypotheses": hypotheses_payload})], label="fake-model"),
+        claim_support_verifier=FakeClaimSupportVerifier(),
+        incident_fact_extractor=FakeIncidentFactExtractor(impact),
+        falsifier=FakeFalsifier(),
+    )
+    run = service.start_run(incident.id, AnalysisRunCreate())
+    session.commit()
+    assert run.status == "succeeded"
+    return service, run
+
+
+def _supersede(session, incident, run, conclusion_id, discrepancy_id, hypothesis, *, summary="Reinterpreted.", principal=None):
+    return ConclusionService(session).supersede(
+        incident.id,
+        run.id,
+        SupersedingConclusionCreate(
+            summary=summary,
+            factors=[CausalFactorCreate(hypothesis_id=hypothesis.id, role="failure_mechanism")],
+            supersedes_conclusion_id=conclusion_id,
+            discrepancy_id=discrepancy_id,
+        ),
+        principal or Principal(id="reviewer-2", display="Reviewer Two"),
+    )
+
+
+def test_supersede_same_run_reinterpretation_transfers_authority(fresh_session):
+    # Reinterpretation of unchanged Evidence reuses the original run (PRD story 50) and
+    # moves authority to the successor while preserving the chain.
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, hyps["Primary cause"], hyps["Alternative cause"])
+    fresh_session.commit()
+    c1 = _finalize(fresh_session, incident, run, hyps["Primary cause"])
+    fresh_session.commit()
+    disc = _dispute(fresh_session, incident, run)
+
+    c2 = _supersede(fresh_session, incident, run, c1.id, disc.id, hyps["Alternative cause"])
+    fresh_session.commit()
+
+    assert c2.run_id == run.id
+    assert c2.supersedes_id == c1.id
+    assert c2.superseded_discrepancy_id == disc.id
+
+    # The successor is authoritative and links back to the disputed predecessor.
+    shaped2 = conclusion_read(c2)
+    assert shaped2["authoritative"] is True
+    assert shaped2["superseded_by"] is None
+    assert shaped2["supersedes"]["id"] == c1.id
+    assert shaped2["supersedes"]["disputed"] is True
+    assert [c["id"] for c in shaped2["history"]] == [c1.id]
+
+    # The predecessor is no longer authoritative and points forward.
+    fresh_session.refresh(c1)
+    shaped1 = conclusion_read(c1)
+    assert shaped1["authoritative"] is False
+    assert shaped1["superseded_by"]["id"] == c2.id
+
+    # The run now presents the successor as its finalized, authoritative conclusion.
+    document = service.get_postmortem_document(incident.id, run.id)
+    assert document["conclusion_status"] == "finalized"
+    assert document["conclusion"]["id"] == c2.id
+    assert ConclusionService(fresh_session).get_conclusion(incident.id, run.id).id == c2.id
+
+
+def test_supersede_new_evidence_uses_new_run_and_transfers_authority(fresh_session):
+    # New Evidence requires a new Analysis Run (PRD story 49); authority moves to the
+    # successor in that run while the predecessor's run is rendered superseded.
+    service, incident, run1 = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run1)
+    _accept(service, incident, run1, hyps["Primary cause"])
+    fresh_session.commit()
+    c1 = _finalize(fresh_session, incident, run1, hyps["Primary cause"])
+    fresh_session.commit()
+    disc = _dispute(fresh_session, incident, run1)
+
+    service2, run2 = _additional_run(fresh_session, incident)
+    hyps2 = _by_title(service2, incident, run2)
+    _accept(service2, incident, run2, hyps2["New mechanism"])
+    fresh_session.commit()
+
+    c2 = _supersede(
+        fresh_session, incident, run2, c1.id, disc.id, hyps2["New mechanism"],
+        summary="New evidence shows a different mechanism.",
+    )
+    fresh_session.commit()
+
+    assert c2.run_id == run2.id
+    assert c2.supersedes_id == c1.id
+
+    # The predecessor's run is superseded and points to the successor's run for audit.
+    doc1 = service.get_postmortem_document(incident.id, run1.id)
+    assert doc1["conclusion_status"] == "superseded"
+    assert doc1["conclusion"]["authoritative"] is False
+    assert doc1["conclusion"]["superseded_by"]["id"] == c2.id
+    assert doc1["conclusion"]["superseded_by"]["run_id"] == run2.id
+
+    # The new run holds the authoritative successor.
+    doc2 = service2.get_postmortem_document(incident.id, run2.id)
+    assert doc2["conclusion_status"] == "finalized"
+    assert doc2["conclusion"]["id"] == c2.id
+    assert doc2["conclusion"]["authoritative"] is True
+
+
+def test_supersede_requires_disputed_predecessor(fresh_session):
+    # Only a Disputed Conclusion can be superseded (invalid predecessor state).
+    service, incident, run, c1 = _finalized_conclusion(fresh_session)
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, hyps["Alternative cause"])
+    fresh_session.commit()
+    with pytest.raises(ConclusionSupersessionError, match="disputed"):
+        _supersede(fresh_session, incident, run, c1.id, "any", hyps["Alternative cause"])
+
+
+def test_supersede_rejects_already_superseded_predecessor(fresh_session):
+    # The chain is linear: a predecessor may be superseded at most once (chain integrity).
+    service, incident, run = _succeeded_run(
+        fresh_session, titles=("Primary cause", "Alt one", "Alt two")
+    )
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, *hyps.values())
+    fresh_session.commit()
+    c1 = _finalize(fresh_session, incident, run, hyps["Primary cause"])
+    fresh_session.commit()
+    disc = _dispute(fresh_session, incident, run)
+    _supersede(fresh_session, incident, run, c1.id, disc.id, hyps["Alt one"], summary="s2")
+    fresh_session.commit()
+
+    with pytest.raises(ConclusionSupersessionError, match="already been superseded"):
+        _supersede(fresh_session, incident, run, c1.id, disc.id, hyps["Alt two"], summary="s3")
+
+
+def test_supersede_rejects_discrepancy_from_another_conclusion(fresh_session):
+    # The named discrepancy must belong to the predecessor being superseded.
+    service_a, incident_a, run_a, c_a = _finalized_conclusion(fresh_session)
+    _dispute(fresh_session, incident_a, run_a, explanation="A is wrong.")
+    _service_b, incident_b, run_b, _c_b = _finalized_conclusion(fresh_session)
+    disc_b = _dispute(fresh_session, incident_b, run_b, explanation="B is wrong.")
+    hyps_a = _by_title(service_a, incident_a, run_a)
+    _accept(service_a, incident_a, run_a, hyps_a["Alternative cause"])
+    fresh_session.commit()
+    with pytest.raises(ConclusionValidationError, match="does not belong"):
+        _supersede(fresh_session, incident_a, run_a, c_a.id, disc_b.id, hyps_a["Alternative cause"])
+
+
+def test_supersede_reinterpretation_rejects_foreign_run_hypothesis(fresh_session):
+    # Reusing the old run with another run's hypothesis is rejected: to use new
+    # Evidence the successor must be finalized against the new run (new-run enforcement).
+    service, incident, run1 = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run1)
+    _accept(service, incident, run1, hyps["Primary cause"])
+    fresh_session.commit()
+    c1 = _finalize(fresh_session, incident, run1, hyps["Primary cause"])
+    fresh_session.commit()
+    disc = _dispute(fresh_session, incident, run1)
+
+    service2, run2 = _additional_run(fresh_session, incident)
+    hyps2 = _by_title(service2, incident, run2)
+    _accept(service2, incident, run2, hyps2["New mechanism"])
+    fresh_session.commit()
+
+    # Superseding against run1 (reinterpretation) but citing run2's hypothesis fails.
+    with pytest.raises(HypothesisNotFoundError):
+        _supersede(fresh_session, incident, run1, c1.id, disc.id, hyps2["New mechanism"])
+
+
+def test_supersede_cross_run_rejects_run_with_existing_conclusion(fresh_session):
+    # A cross-run successor must target a run with no conclusion of its own, so each
+    # run's conclusion story stays unambiguous.
+    service, incident, run1 = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run1)
+    _accept(service, incident, run1, hyps["Primary cause"])
+    fresh_session.commit()
+    c1 = _finalize(fresh_session, incident, run1, hyps["Primary cause"])
+    fresh_session.commit()
+    disc = _dispute(fresh_session, incident, run1)
+
+    service2, run2 = _additional_run(fresh_session, incident, titles=("New mechanism", "Other"))
+    hyps2 = _by_title(service2, incident, run2)
+    _accept(service2, incident, run2, hyps2["New mechanism"], hyps2["Other"])
+    fresh_session.commit()
+    # run2 gets its own original conclusion first.
+    _finalize(fresh_session, incident, run2, hyps2["New mechanism"])
+    fresh_session.commit()
+
+    with pytest.raises(ConclusionSupersessionError, match="already has its own conclusion"):
+        _supersede(fresh_session, incident, run2, c1.id, disc.id, hyps2["Other"])
+
+
+def test_supersede_enforces_evidence_trust_floor(fresh_session):
+    # A successor clears the same trust floor as an original finalization: an
+    # unaccepted hypothesis cannot be a Causal Factor.
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, hyps["Primary cause"])  # "Alternative cause" left proposed
+    fresh_session.commit()
+    c1 = _finalize(fresh_session, incident, run, hyps["Primary cause"])
+    fresh_session.commit()
+    disc = _dispute(fresh_session, incident, run)
+    with pytest.raises(ConclusionValidationError, match="accepted"):
+        _supersede(fresh_session, incident, run, c1.id, disc.id, hyps["Alternative cause"])
+
+
+def test_list_supersedable_tracks_disputed_untail_conclusions(fresh_session):
+    # Incident-wide candidates for superseding: disputed and not yet superseded.
+    service, incident, run = _succeeded_run(fresh_session)
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, hyps["Primary cause"], hyps["Alternative cause"])
+    fresh_session.commit()
+    svc = ConclusionService(fresh_session)
+
+    # Nothing disputed yet.
+    assert svc.list_supersedable(incident.id) == []
+
+    c1 = _finalize(fresh_session, incident, run, hyps["Primary cause"])
+    fresh_session.commit()
+    assert svc.list_supersedable(incident.id) == []  # finalized but not disputed
+
+    disc = _dispute(fresh_session, incident, run)
+    assert [c.id for c in svc.list_supersedable(incident.id)] == [c1.id]
+
+    # Once superseded, the predecessor is no longer a candidate and the (undisputed)
+    # successor is not one either.
+    _supersede(fresh_session, incident, run, c1.id, disc.id, hyps["Alternative cause"])
+    fresh_session.commit()
+    assert ConclusionService(fresh_session).list_supersedable(incident.id) == []
+
+
+def test_supersede_rejects_unknown_predecessor(fresh_session):
+    service, incident, run, _c1 = _finalized_conclusion(fresh_session)
+    hyps = _by_title(service, incident, run)
+    _accept(service, incident, run, hyps["Alternative cause"])
+    fresh_session.commit()
+    with pytest.raises(ConclusionNotFoundError):
+        _supersede(fresh_session, incident, run, "no-such-conclusion", "x", hyps["Alternative cause"])
