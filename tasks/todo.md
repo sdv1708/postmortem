@@ -1,51 +1,22 @@
-# Issue #33 — Finalize a supported human Root Cause Conclusion
+# Incident Deletion
 
-Vertical slice across the whole stack. PRD #26 user stories 29-37, 42-43, 90.
-Branch: feature/33-finalize-root-cause-conclusion (from main).
+## Plan
+- [x] Add a backend incident delete command that returns 204 for draft incidents and a clear conflict once analysis history exists.
+- [x] Add API/client coverage so the frontend can call `DELETE /api/incidents/{id}` safely.
+- [x] Add frontend delete controls for created incidents, with loading and failure states.
+- [x] Verify with focused backend tests and frontend type checking.
 
-## Backend
-- [ ] db.py: CAUSAL_FACTOR_ROLE_CHECK; append-only immutability triggers for
-      root_cause_conclusions + causal_factors (SQLite + Postgres); wire into
-      ensure_schema_compatibility.
-- [ ] models.py: RootCauseConclusion (provenance + run link, immutable) and
-      CausalFactor (role, hypothesis link, exactly-one-failure-mechanism index,
-      unique hypothesis per conclusion).
-- [ ] config.py + auth.py: single-user Principal (id + display) and
-      require_principal dependency for Conclusion Provenance.
-- [ ] schemas.py: CausalFactorCreate, RootCauseConclusionCreate,
-      CausalFactorRead, RootCauseConclusionRead; add conclusion to PostmortemRead.
-- [ ] services/conclusions.py: ConclusionService.finalize/get + read shaping
-      + errors. Trust floor: accepted + supported/partial + verified citations;
-      cross-run rejection; exactly one failure mechanism.
-- [ ] services/analysis.py: include conclusion in get_postmortem_document.
-- [ ] services/__init__.py: exports.
-- [ ] api/analysis_runs.py: POST finalize (201/409/422/404) + GET conclusion.
-- [ ] markdown_export.py: render finalized human conclusion section, distinct
-      from advisory ranking; drop provisional banner when finalized.
-
-## Frontend
-- [ ] lib/api.ts: types + getRunConclusion / finalizeRunConclusion.
-- [ ] incidents/[id]/page.tsx: RunConclusion panel.
-
-## Docs
-- [ ] ADR 0039-human-root-cause-conclusion-finalization.md.
-
-## Tests
-- [ ] test_services_conclusions.py (deep module).
-- [ ] test_api_conclusions.py.
-- [ ] postmortem + markdown finalized rendering.
-- [ ] test_db_compatibility.py: new tables + immutability triggers.
-- [ ] e2e: finalize a conclusion, separate from ranking.
-- [ ] Backend regression + frontend typecheck.
-
-## Review (done)
-All backend + frontend done and green.
-- Backend full suite: exit 0, 0 failures (added test_services_conclusions, test_api_conclusions, db-compat immutability tests).
-- Frontend: tsc --noEmit clean.
-- App builds; GET+POST /conclusion routes register; OpenAPI builds.
-- e2e finalization steps added to the deploy-scenario spec (run with live servers via `npm run e2e`).
-
-Scope notes: Partial-Support Acknowledgment, Critical-Challenge Override, Human
-Assumptions, Discrepancies, Superseding, Remediation Proposals are later #26
-slices (not #33). Immutability enforced via service (409 on re-finalize), no
-PUT/DELETE endpoints, and SQLite/Postgres append-only triggers.
+## Review
+- Added `DELETE /api/incidents/{id}`. Draft incidents delete with 204; analyzed incidents without finalized human conclusions now delete with their run outputs and evidence. Incidents with finalized human conclusions still return 409 because those conclusion rows are append-only.
+- Added frontend delete actions on the incident list and incident detail page. The detail-page action covers the create redirect path immediately after POST.
+- Added backend API tests for successful delete, missing incident, and analysis-run conflict.
+- Added a Playwright create/delete scenario.
+- Verification run:
+  - `pytest test_delete_created_incident` passed.
+  - `pytest test_delete_unknown_incident_returns_404` passed.
+  - `pytest test_delete_incident_with_analysis_run` passed.
+  - Focused delete group (`created`, `unknown`, `with analysis run`) passed.
+  - `npm run typecheck` passed.
+  - Local server smoke test passed: create incident, add evidence, start analysis to `succeeded`, delete incident returned 204.
+  - Full `test_api_incidents.py` run timed out in this Windows environment after pytest temp/stdout handling; the new tests were verified individually.
+  - `npm run lint` did not run because the existing `next lint` script resolves `lint` as an invalid project directory.

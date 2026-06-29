@@ -13,6 +13,9 @@ export default function IncidentsPage() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [seeding, setSeeding] = useState<string | null>(null);
   const [seedError, setSeedError] = useState<string | null>(null);
+  const [deletingIncidentId, setDeletingIncidentId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [demoOpen, setDemoOpen] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -58,6 +61,22 @@ export default function IncidentsPage() {
     }
   }
 
+  async function deleteIncident(incident: Incident) {
+    if (!window.confirm(`Delete "${incident.title}"?`)) {
+      return;
+    }
+    setDeletingIncidentId(incident.id);
+    setDeleteError(null);
+    try {
+      await api.deleteIncident(incident.id);
+      setIncidents((items) => items?.filter((item) => item.id !== incident.id) ?? null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete incident");
+    } finally {
+      setDeletingIncidentId(null);
+    }
+  }
+
   return (
     <div className="space-y-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
@@ -89,8 +108,25 @@ export default function IncidentsPage() {
                 postmortem — without using real production logs.
               </p>
             </div>
+            <button
+              type="button"
+              onClick={() => setDemoOpen((value) => !value)}
+              aria-expanded={demoOpen}
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-indigo-700 hover:text-indigo-900"
+            >
+              <svg
+                className={`transition-transform ${demoOpen ? "rotate-90" : ""}`}
+                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m9 18 6-6-6-6" />
+              </svg>
+              {demoOpen ? "Hide" : `Show ${scenarios.length}`}
+            </button>
           </div>
           {seedError && <p className="mt-3 text-sm text-rose-600">{seedError}</p>}
+          {demoOpen && (
           <ul className="mt-4 grid gap-3 sm:grid-cols-2">
             {scenarios.map((scenario) => (
               <li
@@ -122,6 +158,7 @@ export default function IncidentsPage() {
               </li>
             ))}
           </ul>
+          )}
         </section>
       )}
 
@@ -138,18 +175,25 @@ export default function IncidentsPage() {
 
       {incidents && incidents.length === 0 && <EmptyState />}
 
+      {deleteError && (
+        <div className="card-padded border-rose-200 bg-rose-50/40">
+          <h3 className="text-sm font-semibold text-rose-700">Could not delete incident</h3>
+          <p className="mt-1 text-sm text-rose-600">{deleteError}</p>
+        </div>
+      )}
+
       {incidents && incidents.length > 0 && (
-        <ul className="grid gap-3 sm:grid-cols-2">
+        <ul className="grid gap-4 sm:grid-cols-2">
           {incidents.map((incident) => (
             <li key={incident.id}>
-              <Link
-                href={`/incidents/${incident.id}`}
-                className="group flex h-full flex-col gap-3 rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md focus:outline-none focus:ring-4 focus:ring-slate-900/10"
-              >
+              <article className="flex h-full flex-col gap-3 rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
                 <div className="flex items-start justify-between gap-3">
-                  <h2 className="line-clamp-2 text-base font-semibold text-slate-900 group-hover:text-indigo-700">
-                    {incident.title}
-                  </h2>
+                  <Link
+                    href={`/incidents/${incident.id}`}
+                    className="line-clamp-2 text-base font-semibold text-slate-900 hover:text-indigo-700 focus:outline-none focus:ring-4 focus:ring-slate-900/10"
+                  >
+                    <h2>{incident.title}</h2>
+                  </Link>
                   <SeverityBadge severity={incident.severity} />
                 </div>
                 {incident.summary && (
@@ -157,11 +201,28 @@ export default function IncidentsPage() {
                     {incident.summary}
                   </p>
                 )}
-                <div className="mt-auto flex items-center justify-between gap-3 text-xs text-slate-500">
-                  <StatusBadge status={incident.status} />
-                  <span>{formatRelative(incident.created_at)}</span>
+                <div className="mt-auto flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 text-xs text-slate-500">
+                    <StatusBadge status={incident.status} />
+                    <span>{formatRelative(incident.created_at)}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Link href={`/incidents/${incident.id}`} className="button-secondary">
+                      Open
+                    </Link>
+                    <button
+                      type="button"
+                      className="button-danger"
+                      disabled={deletingIncidentId !== null}
+                      onClick={() => {
+                        void deleteIncident(incident);
+                      }}
+                    >
+                      {deletingIncidentId === incident.id ? "Deleting..." : "Delete"}
+                    </button>
+                  </div>
                 </div>
-              </Link>
+              </article>
             </li>
           ))}
         </ul>

@@ -583,6 +583,14 @@ export interface IncidentCreate {
   severity?: Severity | null;
 }
 
+// Partial update of a human-managed incident field set (status lifecycle, severity,
+// summary). Every field is optional; only the provided ones change.
+export interface IncidentUpdate {
+  status?: IncidentStatus;
+  severity?: Severity | null;
+  summary?: string | null;
+}
+
 export interface ArtifactInput {
   source_type: ArtifactSourceType;
   source_name: string;
@@ -662,6 +670,19 @@ export const api = {
     return request<Incident>("/api/incidents", {
       method: "POST",
       body: JSON.stringify(payload),
+    });
+  },
+
+  updateIncident(id: string, payload: IncidentUpdate): Promise<Incident> {
+    return request<Incident>(`/api/incidents/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteIncident(id: string): Promise<void> {
+    return request<void>(`/api/incidents/${id}`, {
+      method: "DELETE",
     });
   },
 

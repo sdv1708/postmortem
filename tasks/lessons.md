@@ -48,6 +48,11 @@
 - Treat incident lifecycle and evidence locking as separate concerns. Locking an
   artifact preserves run citations; it does not answer whether an entire
   incident should be archived or deleted from the workspace dashboard.
+- Do not equate "incident has analysis runs" with "incident cannot be deleted".
+  Analysis Run outputs and locked Artifacts are subordinate to the incident for
+  workspace cleanup unless a human-finalized append-only conclusion exists.
+  Deleting an analyzed, unfinalized incident must remove run outputs in dependency
+  order before deleting the incident and its evidence.
 - A schema-compatibility helper that inspects columns before issuing DDL still
   races across process startups. Isolate each `ALTER TABLE` in its own
   transaction and ignore only the database's duplicate-column error.
