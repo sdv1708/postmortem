@@ -52,7 +52,7 @@ from .artifacts import (
     canonicalize_body,
 )
 from .evaluation import EvaluationRunner, evaluation_run_read
-from .incidents import IncidentService, IncidentNotFoundError
+from .incidents import IncidentHasFinalizedConclusionsError, IncidentService, IncidentNotFoundError
 from .scenarios import ScenarioNotFoundError, ScenarioSeedService
 from .run_executor import (
     PlaceholderRunExecutor,
@@ -108,6 +108,7 @@ __all__ = [
     "artifact_lines",
     "canonicalize_body",
     "IncidentService",
+    "IncidentHasFinalizedConclusionsError",
     "IncidentNotFoundError",
     "EvaluationRunner",
     "evaluation_run_read",

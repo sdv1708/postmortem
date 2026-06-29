@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from ..auth import require_user
-from ..schemas import IncidentCreate, IncidentRead, RootCauseConclusionRead
+from ..schemas import IncidentCreate, IncidentRead, IncidentUpdate, RootCauseConclusionRead
 from ..services import (
     ConclusionService,
+    IncidentHasFinalizedConclusionsError,
     IncidentNotFoundError,
     IncidentService,
     conclusion_read,
@@ -36,6 +37,31 @@ def get_incident(incident_id: str, db: Session = Depends(get_db)) -> IncidentRea
     except IncidentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     return IncidentRead.model_validate(incident)
+
+
+@router.patch("/{incident_id}", response_model=IncidentRead)
+def update_incident(
+    incident_id: str, payload: IncidentUpdate, db: Session = Depends(get_db)
+) -> IncidentRead:
+    try:
+        incident = IncidentService(db).update(incident_id, payload)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    return IncidentRead.model_validate(incident)
+
+
+@router.delete("/{incident_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_incident(incident_id: str, db: Session = Depends(get_db)) -> Response:
+    try:
+        IncidentService(db).delete(incident_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except IncidentHasFinalizedConclusionsError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="incident has finalized conclusions and cannot be deleted",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

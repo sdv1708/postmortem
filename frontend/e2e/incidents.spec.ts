@@ -99,9 +99,38 @@ test("create incident and view it in the workflow hub", async ({ page }) => {
   await expect(page.getByText("Locked · in analysis")).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete" })).toBeDisabled();
 
+  // Manage the incident lifecycle by hand: advancing the status persists through
+  // the new PATCH endpoint and the header badge reflects the new state, so an
+  // incident no longer stays stuck on "open" after work has progressed.
+  await page.getByLabel("Incident status").selectOption("resolved");
+  await expect(page.getByLabel("Incident status")).toHaveValue("resolved");
+  await page.reload();
+  await expect(page.getByLabel("Incident status")).toHaveValue("resolved");
+
   await page.getByRole("link", { name: "Back to all incidents" }).click();
   await expect(page).toHaveURL(/\/incidents$/);
   await expect(page.getByText(title)).toBeVisible();
+});
+
+test("create incident and delete it from the detail page", async ({ page }) => {
+  await page.goto(`${BASE}/incidents/new`);
+
+  const title = `Discarded incident ${Date.now()}`;
+  await page.getByLabel("Title").fill(title);
+  await page.getByLabel("Summary").fill("Created only to verify deletion.");
+  await page.getByRole("button", { name: "Create incident" }).click();
+
+  await page.waitForURL(/\/incidents\/[0-9a-f-]{36}$/);
+  await expect(page.getByRole("heading", { name: title })).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain(title);
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Delete incident" }).click();
+
+  await expect(page).toHaveURL(/\/incidents$/);
+  await expect(page.getByText(title)).toBeHidden();
 });
 
 test("seed the canonical demo scenario and review its multi-hypothesis postmortem", async ({

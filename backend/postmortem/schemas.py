@@ -31,6 +31,20 @@ class IncidentCreate(BaseModel):
     resolved_at: datetime | None = None
 
 
+class IncidentUpdate(BaseModel):
+    """Partial update of an Incident's human-managed fields.
+
+    Lets a reviewer advance the incident lifecycle (e.g. open -> investigating ->
+    resolved) independently of the analysis pipeline. Every field is optional; only
+    those provided are changed. Status/severity are validated against the same
+    Literals as creation, so an invalid value is rejected with 422.
+    """
+
+    status: IncidentStatus | None = None
+    severity: Severity | None = None
+    summary: str | None = None
+
+
 class IncidentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

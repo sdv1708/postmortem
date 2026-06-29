@@ -1,8 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import {
+  ChangeEvent,
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -29,6 +37,7 @@ import {
   type HypothesisReviewStatus,
   type ImpactClaim,
   type Incident,
+  type IncidentStatus,
   type ModelCallRecord,
   type Postmortem,
   type RankingRationale,
@@ -60,6 +69,7 @@ type FocusedEvidence = {
 
 export default function IncidentOverviewPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const id = params.id;
   const [incident, setIncident] = useState<Incident | null>(null);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -68,6 +78,8 @@ export default function IncidentOverviewPage() {
   const [error, setError] = useState<Error | null>(null);
   const [artifactError, setArtifactError] = useState<Error | null>(null);
   const [isLoadingArtifacts, setIsLoadingArtifacts] = useState(false);
+  const [isDeletingIncident, setIsDeletingIncident] = useState(false);
+  const [deleteIncidentError, setDeleteIncidentError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) {
@@ -171,6 +183,22 @@ export default function IncidentOverviewPage() {
     }
   }
 
+  async function deleteIncident() {
+    if (!incident || !window.confirm(`Delete "${incident.title}"?`)) {
+      return;
+    }
+    setIsDeletingIncident(true);
+    setDeleteIncidentError(null);
+    try {
+      await api.deleteIncident(incident.id);
+      router.push("/incidents");
+    } catch (err) {
+      setDeleteIncidentError(err instanceof Error ? err.message : "Failed to delete incident");
+    } finally {
+      setIsDeletingIncident(false);
+    }
+  }
+
   function focusEvidence(ref: EvidenceRef) {
     setSelectedArtifactId(ref.artifact_id);
     setFocusedEvidence({
@@ -219,13 +247,29 @@ export default function IncidentOverviewPage() {
             <h1 className="text-3xl font-semibold tracking-tight text-slate-900">{incident.title}</h1>
             <div className="flex flex-wrap items-center gap-2">
               <SeverityBadge severity={incident.severity} />
-              <StatusBadge status={incident.status} />
+              <StatusControl incident={incident} onUpdated={setIncident} />
               <span className="text-xs text-slate-500">
                 Created {new Date(incident.created_at).toLocaleString()}
               </span>
             </div>
           </div>
+          <button
+            type="button"
+            className="button-danger"
+            disabled={isDeletingIncident}
+            onClick={() => {
+              void deleteIncident();
+            }}
+          >
+            {isDeletingIncident ? "Deleting..." : "Delete incident"}
+          </button>
         </div>
+
+        {deleteIncidentError && (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+            {deleteIncidentError}
+          </div>
+        )}
 
         {incident.summary && (
           <div className="card-padded">
@@ -278,6 +322,65 @@ export default function IncidentOverviewPage() {
         </div>
       </Section>
     </div>
+  );
+}
+
+// The incident lifecycle a reviewer manages by hand (ADR-independent of the
+// analysis pipeline). An incident no longer auto-sticks on "open": finalizing a
+// conclusion or making any progress, the reviewer advances it here.
+const INCIDENT_STATUS_OPTIONS: IncidentStatus[] = [
+  "open",
+  "investigating",
+  "mitigated",
+  "resolved",
+  "closed",
+];
+
+function StatusControl({
+  incident,
+  onUpdated,
+}: {
+  incident: Incident;
+  onUpdated: (incident: Incident) => void;
+}) {
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function changeStatus(status: IncidentStatus) {
+    if (status === incident.status) {
+      return;
+    }
+    setIsSaving(true);
+    setError(null);
+    try {
+      const updated = await api.updateIncident(incident.id, { status });
+      onUpdated(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update status");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <StatusBadge status={incident.status} />
+      <select
+        aria-label="Incident status"
+        value={incident.status}
+        disabled={isSaving}
+        onChange={(event) => void changeStatus(event.target.value as IncidentStatus)}
+        className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-700 disabled:opacity-60"
+      >
+        {INCIDENT_STATUS_OPTIONS.map((status) => (
+          <option key={status} value={status}>
+            {status}
+          </option>
+        ))}
+      </select>
+      {isSaving && <Spinner />}
+      {error && <span className="text-xs text-rose-600">{error}</span>}
+    </span>
   );
 }
 
@@ -838,6 +941,14 @@ function RunStatusCard({
   }
   const isPolling = !isTerminalRunStatus(run.status);
 
+  // Drive Expand-all / Collapse-all across every collapsible review section below.
+  const [toggleCommand, setToggleCommand] = useState<ToggleCommand>(null);
+  const toggleNonce = useRef(0);
+  const setAllSections = (open: boolean) => {
+    toggleNonce.current += 1;
+    setToggleCommand({ open, nonce: toggleNonce.current });
+  };
+
   return (
     <div className="card overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/60 px-5 py-3">
@@ -923,25 +1034,32 @@ function RunStatusCard({
       </ol>
 
       {run.status === "succeeded" && (
-        <RunTimeline incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
-      )}
-      {run.status === "succeeded" && (
-        <RunImpact incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
-      )}
-      {run.status === "succeeded" && (
-        <RunHypotheses incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
-      )}
-      {run.status === "succeeded" && (
-        <RunConclusion incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
-      )}
-      {run.status === "succeeded" && (
-        <RunRemediation incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
-      )}
-      {run.status === "succeeded" && (
-        <RunPostmortem incidentId={incidentId} runId={run.id} />
-      )}
-      {run.status === "succeeded" && (
-        <RunDiagnosticsPanel incidentId={incidentId} runId={run.id} />
+        <SectionToggleContext.Provider value={toggleCommand}>
+          <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/40 px-5 py-2">
+            <button
+              type="button"
+              onClick={() => setAllSections(true)}
+              className="text-xs font-medium text-slate-500 transition hover:text-slate-800"
+            >
+              Expand all
+            </button>
+            <span className="text-slate-300">·</span>
+            <button
+              type="button"
+              onClick={() => setAllSections(false)}
+              className="text-xs font-medium text-slate-500 transition hover:text-slate-800"
+            >
+              Collapse all
+            </button>
+          </div>
+          <RunTimeline incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+          <RunImpact incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+          <RunHypotheses incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+          <RunConclusion incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+          <RunRemediation incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
+          <RunPostmortem incidentId={incidentId} runId={run.id} />
+          <RunDiagnosticsPanel incidentId={incidentId} runId={run.id} />
+        </SectionToggleContext.Provider>
       )}
     </div>
   );
@@ -1003,10 +1121,9 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
   const superseded = postmortem.conclusion_status === "superseded";
 
   return (
-    <div className="border-t border-slate-200 bg-slate-50/40">
+    <CollapsibleSection title="Postmortem">
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 pt-3">
-        <div className="flex items-center gap-2">
-          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Postmortem</p>
+        <div className="flex flex-wrap items-center gap-2">
           {provisional && (
             <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
               Draft: Root cause not finalized
@@ -1119,7 +1236,7 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
           <BulletGroup label="Open questions" items={postmortem.lessons_learned} />
         )}
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1152,29 +1269,20 @@ function RunDiagnosticsPanel({
   }, [diagnosticsQuery.data]);
 
   return (
-    <div className="border-t border-slate-200 bg-slate-50/40">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center justify-between gap-2 px-5 py-3 text-left"
-        aria-expanded={open}
-      >
-        <span className="flex items-center gap-2">
-          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Run diagnostics
-          </span>
-          <span
-            className="badge bg-slate-100 text-slate-600 ring-slate-200"
-            title="Restricted reasoning and retrieval provenance — versions, token usage, hashes, and retrieved evidence. No prompts, raw responses, or artifact text."
-          >
-            restricted
-          </span>
+    <CollapsibleSection
+      title="Run diagnostics"
+      defaultOpen={false}
+      onOpenChange={setOpen}
+      right={
+        <span
+          className="badge bg-slate-100 text-slate-600 ring-slate-200"
+          title="Restricted reasoning and retrieval provenance — versions, token usage, hashes, and retrieved evidence. No prompts, raw responses, or artifact text."
+        >
+          restricted
         </span>
-        <span className="text-xs text-slate-500">{open ? "Hide" : "Show"}</span>
-      </button>
-
-      {open && (
-        <div className="space-y-4 px-5 pb-5">
+      }
+    >
+      <div className="space-y-4 px-5 pb-5 pt-1">
           <p className="text-xs text-slate-500">
             How the causal analysis reasoned: one record per reasoning-role call and
             the evidence each role retrieved. References and hashes only — no
@@ -1227,8 +1335,7 @@ function RunDiagnosticsPanel({
             </>
           )}
         </div>
-      )}
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1500,7 +1607,7 @@ function RunHypotheses({
   );
 
   return (
-    <div className="border-t border-slate-200">
+    <CollapsibleSection title={`Hypotheses · ${hypotheses.length}`}>
       {reviewError && (
         <p className="mx-5 mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
           {reviewError}
@@ -1526,7 +1633,7 @@ function RunHypotheses({
           <ol className="space-y-4 p-5">{findings.map(renderHypothesis)}</ol>
         </div>
       )}
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1625,7 +1732,9 @@ function HypothesisCard({
         </div>
       </div>
 
-      <div className="space-y-4 px-4 py-3">
+      <div className="px-4 py-3">
+        <CollapsibleSection variant="inline" title="Details">
+        <div className="space-y-4">
         {hypothesis.supporting_evidence.length > 0 && (
           <EvidenceGroup
             label="Supporting evidence"
@@ -1730,6 +1839,8 @@ function HypothesisCard({
             </button>
           </form>
         </div>
+        </div>
+        </CollapsibleSection>
       </div>
     </div>
   );
@@ -1961,11 +2072,8 @@ function RunRemediation({
   const proposals = proposalsQuery.data ?? [];
 
   return (
-    <div className="border-t border-slate-200">
-      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
-        Remediation review · {proposals.length}
-      </p>
-      <p className="px-5 pt-1 text-xs text-slate-500">
+    <CollapsibleSection title={`Remediation review · ${proposals.length}`}>
+      <p className="px-5 pt-3 text-xs text-slate-500">
         Generated remediation is a proposal, not committed work. Accept, reject, or
         defer each one; accepting requires linking it to a finalized causal factor or
         a documented evidence gap.
@@ -1999,7 +2107,7 @@ function RunRemediation({
           ))}
         </ul>
       )}
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -3236,11 +3344,8 @@ function RunTimeline({
   }
 
   return (
-    <div className="border-t border-slate-200">
-      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
-        Timeline candidates · {events.length}
-      </p>
-      <ol className="divide-y divide-slate-100 px-2 py-1">
+    <CollapsibleSection title={`Timeline candidates · ${events.length}`}>
+      <ol className="divide-y divide-slate-100 px-2 pb-3 pt-1">
         {events.map((event) => (
           <li key={event.id} className="flex items-start gap-3 px-3 py-2.5">
             <span className="mt-0.5 w-40 shrink-0 text-xs tabular-nums text-slate-500">
@@ -3274,7 +3379,7 @@ function RunTimeline({
           </li>
         ))}
       </ol>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -3320,11 +3425,8 @@ function RunImpact({
   }
 
   return (
-    <div className="border-t border-slate-200">
-      <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
-        Impact · {claims.length}
-      </p>
-      <ul className="space-y-2 px-5 py-3">
+    <CollapsibleSection title={`Impact · ${claims.length}`}>
+      <ul className="space-y-2 px-5 pb-3 pt-1">
         {claims.map((claim) => (
           <li key={claim.id} className="text-sm text-slate-700">
             <span className="flex flex-wrap items-center gap-2">
@@ -3349,7 +3451,7 @@ function RunImpact({
           </li>
         ))}
       </ul>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -3410,6 +3512,106 @@ function StageTiming({ event }: { event: RunStageEvent | undefined }) {
     return <>{event.duration_ms} ms</>;
   }
   return <>{event.status}</>;
+}
+
+// Broadcast an Expand-all / Collapse-all command to every CollapsibleSection below a
+// provider. The nonce makes each click a fresh command even when the target state is
+// unchanged, so a section the user toggled by hand still snaps back on the next "all".
+type ToggleCommand = { open: boolean; nonce: number } | null;
+const SectionToggleContext = createContext<ToggleCommand>(null);
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      className={`shrink-0 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`}
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m9 18 6-6-6-6" />
+    </svg>
+  );
+}
+
+// A disclosure that declutters the long Review Surface: each heavy block collapses
+// behind its own header so a reviewer can fold away what they're not reading. The
+// full count stays in the single-node `title` so it remains scannable while
+// collapsed. Subscribes to SectionToggleContext for Expand-all / Collapse-all.
+function CollapsibleSection({
+  title,
+  defaultOpen = true,
+  variant = "section",
+  right,
+  onOpenChange,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  variant?: "section" | "inline";
+  right?: React.ReactNode;
+  onOpenChange?: (open: boolean) => void;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const command = useContext(SectionToggleContext);
+  const seenNonce = useRef(0);
+
+  useEffect(() => {
+    if (command && command.nonce !== seenNonce.current) {
+      seenNonce.current = command.nonce;
+      setOpen(command.open);
+    }
+  }, [command]);
+
+  useEffect(() => {
+    onOpenChange?.(open);
+  }, [open, onOpenChange]);
+
+  if (variant === "inline") {
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+          className="flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+        >
+          <Chevron open={open} />
+          {title}
+        </button>
+        {open && <div className="mt-3">{children}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-slate-200">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 px-5 py-3 text-left transition hover:bg-slate-50/60 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500/30"
+      >
+        <span className="flex items-center gap-2">
+          <Chevron open={open} />
+          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            {title}
+          </span>
+        </span>
+        <span className="flex items-center gap-2">
+          {right}
+          <span className="text-xs text-slate-400">{open ? "Hide" : "Show"}</span>
+        </span>
+      </button>
+      {open && children}
+    </div>
+  );
 }
 
 function Section({
