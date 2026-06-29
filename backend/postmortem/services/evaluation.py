@@ -26,6 +26,7 @@ from ..evaluation import (
     aggregate_warning_codes,
     citation_tally,
     run_deterministic_checks,
+    run_floor_checks,
 )
 from ..logging import log_event
 from ..models import (
@@ -35,6 +36,7 @@ from ..models import (
     EvidenceRef,
     Hypothesis,
     ImpactClaim,
+    Incident,
     ModelCallRecord,
     Postmortem,
     RunStageEvent,
@@ -53,6 +55,20 @@ logger = logging.getLogger("postmortem.evaluation")
 ANALYSIS_MODE_MULTI_PASS: str = "multi_pass"
 ANALYSIS_MODE_BUILDER_ONLY: str = "builder_only"
 ANALYSIS_MODES: tuple[str, ...] = (ANALYSIS_MODE_MULTI_PASS, ANALYSIS_MODE_BUILDER_ONLY)
+
+# Evaluation kinds (EvaluationRun.evaluation_kind): a bundled demo scenario graded
+# against ground truth, or a real product incident's Analysis Run graded only on
+# the ground-truth-free deterministic floor (no judge, no expectation checks).
+EVALUATION_KIND_SCENARIO: str = "scenario"
+EVALUATION_KIND_INCIDENT: str = "incident"
+
+# The analysis_mode recorded for a real-incident evaluation: it is not one of the
+# scenario A/B configurations, so it stands on its own.
+ANALYSIS_MODE_INCIDENT: str = "incident"
+
+
+class IncidentEvaluationError(Exception):
+    """A real-incident evaluation could not be run (run missing or not finished)."""
 
 
 @dataclass(frozen=True)
@@ -131,6 +147,122 @@ class EvaluationRunner:
         """
         log_event(logger, logging.INFO, "evaluation_record_started", scenario_id=scenario_id)
         return [self._record_mode(scenario_id, mode) for mode in ANALYSIS_MODES]
+
+    def latest_incident_evaluation(
+        self, incident_id: str, analysis_run_id: str
+    ) -> EvaluationRun | None:
+        """The most recent recorded floor evaluation of one incident Analysis Run."""
+        return self._session.scalars(
+            select(EvaluationRun)
+            .where(
+                EvaluationRun.evaluation_kind == EVALUATION_KIND_INCIDENT,
+                EvaluationRun.incident_id == incident_id,
+                EvaluationRun.analysis_run_id == analysis_run_id,
+            )
+            .order_by(EvaluationRun.created_at.desc())
+        ).first()
+
+    def evaluate_incident_run(self, incident_id: str, analysis_run_id: str) -> EvaluationRun:
+        """Evaluate a real product incident's Analysis Run on the deterministic floor.
+
+        Unlike scenario evaluation, this reads the *product* session directly — the
+        run already exists with persisted outputs — and grades only the
+        ground-truth-free checks (``run_floor_checks``). A real incident ships no
+        reference postmortem, so no judge runs and the expectation-driven checks are
+        not applicable; recording them as passes would be a misleading green (ADR
+        0010). The result is persisted as an ``evaluation_kind='incident'`` row.
+
+        Raises ``IncidentEvaluationError`` when the run does not exist under the
+        incident or has not finished successfully (no outputs to evaluate).
+        """
+        run = self._session.scalar(
+            select(AnalysisRun).where(
+                AnalysisRun.id == analysis_run_id,
+                AnalysisRun.incident_id == incident_id,
+            )
+        )
+        if run is None:
+            raise IncidentEvaluationError("analysis run not found for incident")
+        if run.status != "succeeded":
+            raise IncidentEvaluationError(
+                f"analysis run is {run.status!r}; only a succeeded run can be evaluated"
+            )
+        incident = self._session.scalar(select(Incident).where(Incident.id == incident_id))
+        if incident is None:
+            raise IncidentEvaluationError("incident not found")
+
+        log_event(
+            logger,
+            logging.INFO,
+            "incident_evaluation_started",
+            incident_id=incident_id,
+            analysis_run_id=analysis_run_id,
+        )
+        # A genuine refusal run carries no evidence-backed hypotheses; deriving the
+        # refusal expectation from the run's own sufficiency keeps the multiplicity
+        # and citation floor checks correct for both confident and refused runs.
+        run_postmortem = self._session.scalar(
+            select(Postmortem).where(Postmortem.run_id == run.id)
+        )
+        refused = (
+            run_postmortem is not None
+            and run_postmortem.evidence_sufficiency == "insufficient"
+        )
+        snapshot, _postmortem, _hypotheses = self._build_snapshot(
+            self._session,
+            run,
+            analysis_mode=ANALYSIS_MODE_INCIDENT,
+            expectations=None,
+            expected_hypothesis_count=0,
+            insufficient_evidence_expected=refused,
+        )
+        checks = tuple(run_floor_checks(snapshot))
+        total, verified = citation_tally(snapshot)
+        model_calls, total_tokens, latency_ms = self._cost_metrics(self._session, run)
+        passed = all(check.passed for check in checks)
+
+        row = EvaluationRun(
+            evaluation_kind=EVALUATION_KIND_INCIDENT,
+            incident_id=incident_id,
+            analysis_run_id=analysis_run_id,
+            # Mirror the incident id/title into the scenario columns so the existing
+            # grouping and dashboard read paths work unchanged for incident rows.
+            scenario_id=incident_id,
+            scenario_title=incident.title,
+            status="succeeded",
+            analysis_run_status=run.status,
+            analysis_mode=ANALYSIS_MODE_INCIDENT,
+            passed=passed,
+            judge_version=None,
+            citation_total=total,
+            citation_verified=verified,
+            model_calls=model_calls,
+            total_tokens=total_tokens,
+            latency_ms=latency_ms,
+            checks=[{"name": c.name, "passed": c.passed, "detail": c.detail} for c in checks],
+            warning_code_counts=aggregate_warning_codes(snapshot),
+            judge_scores=None,
+            pipeline_version=run.pipeline_version,
+            prompt_version=run.prompt_version,
+            model_provider=run.model_provider,
+            retrieval_strategy=run.retrieval_strategy,
+            chunking_strategy=run.chunking_strategy,
+            verifier_version=run.verifier_version,
+        )
+        self._session.add(row)
+        self._session.flush()
+        log_event(
+            logger,
+            logging.INFO,
+            "incident_evaluation_completed",
+            incident_id=incident_id,
+            analysis_run_id=analysis_run_id,
+            evaluation_run_id=row.id,
+            passed=passed,
+            citation_verified=verified,
+            citation_total=total,
+        )
+        return row
 
     def _record_mode(self, scenario_id: str, analysis_mode: str) -> EvaluationRun:
         result = self.evaluate(scenario_id, analysis_mode=analysis_mode)
@@ -283,14 +415,23 @@ class EvaluationRunner:
         )
         return len(records), total_tokens, latency_ms
 
-    def _distill(
+    def _build_snapshot(
         self,
         session: Session,
         run: AnalysisRun,
-        scenario: LoadedScenario,
+        *,
         analysis_mode: str,
-    ) -> tuple[RunOutputSnapshot, JudgeInput]:
-        """Reduce a run's persisted outputs to the ORM-free snapshot + judge input."""
+        expectations: CausalEvaluationExpectations | None,
+        expected_hypothesis_count: int,
+        insufficient_evidence_expected: bool,
+    ) -> tuple[RunOutputSnapshot, Postmortem | None, list[Hypothesis]]:
+        """Reduce a run's persisted outputs to the ORM-free deterministic snapshot.
+
+        Shared by scenario evaluation (which supplies the scenario's expectations)
+        and real-incident evaluation (which has none). Also returns the run's
+        Postmortem and ordered Hypotheses so the caller can build a judge input
+        without re-querying when a ground-truth reference is available.
+        """
         postmortem = session.scalar(select(Postmortem).where(Postmortem.run_id == run.id))
         timeline = list(
             session.scalars(
@@ -348,7 +489,6 @@ class EvaluationRunner:
             for counterclaim in h.challenge.counterclaims
             for ref in counterclaim.evidence_refs
         )
-        expectations = scenario.causal_evaluation
 
         snapshot = RunOutputSnapshot(
             summary=postmortem.summary if postmortem is not None else None,
@@ -359,14 +499,33 @@ class EvaluationRunner:
             hypotheses=hypothesis_views,
             citation_statuses=tuple(ref.verifier_status for ref in refs),
             warning_codes=tuple(warning_codes),
-            expected_hypothesis_count=len(scenario.expected_hypothesis_families),
-            insufficient_evidence_expected="insufficient-evidence" in scenario.evaluation_tags,
+            expected_hypothesis_count=expected_hypothesis_count,
+            insufficient_evidence_expected=insufficient_evidence_expected,
             evidence_sufficiency=(
                 postmortem.evidence_sufficiency if postmortem is not None else "sufficient"
             ),
             analysis_mode=analysis_mode,
             causal_expectations=_causal_expectations_view(expectations),
             counterclaim_citations=counterclaim_citations,
+        )
+        return snapshot, postmortem, hypotheses
+
+    def _distill(
+        self,
+        session: Session,
+        run: AnalysisRun,
+        scenario: LoadedScenario,
+        analysis_mode: str,
+    ) -> tuple[RunOutputSnapshot, JudgeInput]:
+        """Reduce a run's persisted outputs to the ORM-free snapshot + judge input."""
+        expectations = scenario.causal_evaluation
+        snapshot, postmortem, hypotheses = self._build_snapshot(
+            session,
+            run,
+            analysis_mode=analysis_mode,
+            expectations=expectations,
+            expected_hypothesis_count=len(scenario.expected_hypothesis_families),
+            insufficient_evidence_expected="insufficient-evidence" in scenario.evaluation_tags,
         )
         judge_input = JudgeInput(
             scenario_id=scenario.id,
@@ -480,6 +639,9 @@ def evaluation_run_read(row: EvaluationRun) -> dict:
     """Shape an EvaluationRun for the EvaluationRunRead schema (ADR 0025)."""
     return {
         "id": row.id,
+        "evaluation_kind": row.evaluation_kind,
+        "incident_id": row.incident_id,
+        "analysis_run_id": row.analysis_run_id,
         "scenario_id": row.scenario_id,
         "scenario_title": row.scenario_title,
         "status": row.status,

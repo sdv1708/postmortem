@@ -15,6 +15,7 @@ from ..schemas import (
     AnalysisRunRead,
     ConclusionDiscrepancyCreate,
     ConclusionDiscrepancyRead,
+    EvaluationRunRead,
     HypothesisRead,
     HypothesisReviewCreate,
     ImpactClaimRead,
@@ -41,7 +42,9 @@ from ..services import (
     ConclusionService,
     ConclusionSupersessionError,
     ConclusionValidationError,
+    EvaluationRunner,
     HypothesisNotFoundError,
+    IncidentEvaluationError,
     IncidentNotFoundError,
     NoArtifactsError,
     PostmortemNotFoundError,
@@ -52,6 +55,7 @@ from ..services import (
     analysis_run_read,
     conclusion_read,
     discrepancy_read,
+    evaluation_run_read,
     hypothesis_read,
     impact_claim_read,
     remediation_proposal_read,
@@ -176,6 +180,56 @@ def get_analysis_run(
     except AnalysisRunNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
     return AnalysisRunRead.model_validate(analysis_run_read(run))
+
+
+@router.get("/{run_id}/evaluation", response_model=EvaluationRunRead | None)
+def get_run_evaluation(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> EvaluationRunRead | None:
+    """The latest deterministic floor evaluation of this incident run, or null.
+
+    A real-incident evaluation grades only the ground-truth-free checks and never
+    runs a judge (ADR 0010). Returns null when the run has not been evaluated yet.
+    """
+    try:
+        AnalysisService(db).get_run(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    row = EvaluationRunner(db).latest_incident_evaluation(incident_id, run_id)
+    if row is None:
+        return None
+    return EvaluationRunRead.model_validate(evaluation_run_read(row))
+
+
+@router.post(
+    "/{run_id}/evaluation",
+    response_model=EvaluationRunRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def run_run_evaluation(
+    incident_id: str, run_id: str, db: Session = Depends(get_db)
+) -> EvaluationRunRead:
+    """Run the deterministic floor evaluation over this incident's Analysis Run.
+
+    Grades the run against the ground-truth-free trust floor (citations, required
+    sections, timeline ordering, hypothesis multiplicity, advisory-ranking
+    coverage, challenge coverage, supported leader). No judge runs and the
+    expectation-driven checks are not applicable — a real incident ships no
+    reference postmortem (ADR 0010).
+    """
+    try:
+        AnalysisService(db).get_run(incident_id, run_id)
+    except IncidentNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
+    except AnalysisRunNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    try:
+        row = EvaluationRunner(db).evaluate_incident_run(incident_id, run_id)
+    except IncidentEvaluationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return EvaluationRunRead.model_validate(evaluation_run_read(row))
 
 
 @router.get("/{run_id}/timeline", response_model=list[TimelineEventRead])

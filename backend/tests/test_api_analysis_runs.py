@@ -323,3 +323,80 @@ def test_timeline_endpoint_unknown_run_returns_404(client: TestClient, auth_head
 def test_timeline_endpoint_requires_auth(client: TestClient):
     resp = client.get("/api/incidents/x/analysis-runs/y/timeline")
     assert resp.status_code == 401
+
+
+def seed_scenario_incident(client: TestClient, auth_headers, scenario_id: str = "config-drift"):
+    """Seed a real product incident + succeeded run from a demo scenario fixture."""
+    resp = client.post(f"/api/scenarios/{scenario_id}/seed", headers=auth_headers)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["run_status"] == "succeeded"
+    return body["incident_id"], body["run_id"]
+
+
+def test_incident_evaluation_runs_floor_only(client: TestClient, auth_headers):
+    incident_id, run_id = seed_scenario_incident(client, auth_headers)
+
+    resp = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/evaluation",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    # A real incident is graded on the ground-truth-free floor only: no judge, and
+    # the incident/run links are populated.
+    assert body["evaluation_kind"] == "incident"
+    assert body["incident_id"] == incident_id
+    assert body["analysis_run_id"] == run_id
+    assert body["judge_scores"] is None
+    assert body["passed"] is True
+
+    names = {check["name"] for check in body["checks"]}
+    assert "citation_integrity" in names
+    assert "causal_challenge_coverage" in names
+    # Expectation-driven checks need a scenario reference, so they are not run.
+    assert "counterevidence_coverage" not in names
+    assert "unacceptable_overclaims" not in names
+
+    # The latest evaluation is now retrievable.
+    latest = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/evaluation",
+        headers=auth_headers,
+    )
+    assert latest.status_code == 200
+    assert latest.json()["id"] == body["id"]
+
+
+def test_incident_evaluation_is_null_before_first_run(client: TestClient, auth_headers):
+    incident_id, run_id = seed_scenario_incident(client, auth_headers)
+    resp = client.get(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/evaluation",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+def test_incident_evaluation_unknown_run_returns_404(client: TestClient, auth_headers):
+    incident_id = create_incident(client, auth_headers)
+    resp = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/nope/evaluation", headers=auth_headers
+    )
+    assert resp.status_code == 404
+
+
+def test_incident_evaluation_appears_in_aggregate_list(client: TestClient, auth_headers):
+    incident_id, run_id = seed_scenario_incident(client, auth_headers)
+    client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/evaluation",
+        headers=auth_headers,
+    )
+    rows = client.get("/api/evaluations", headers=auth_headers).json()
+    incident_rows = [r for r in rows if r["evaluation_kind"] == "incident"]
+    assert any(r["incident_id"] == incident_id for r in incident_rows)
+
+
+def test_incident_evaluation_requires_auth(client: TestClient):
+    resp = client.post("/api/incidents/x/analysis-runs/y/evaluation")
+    assert resp.status_code == 401

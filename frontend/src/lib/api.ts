@@ -496,11 +496,21 @@ export interface JudgeScores {
 // The configuration that produced an Evaluation Run (PRD #38): the product
 // "multi_pass" causal analysis, or the "builder_only" baseline that skips the
 // Falsification Round. The dashboard compares the two side by side.
-export type AnalysisMode = "multi_pass" | "builder_only";
+export type AnalysisMode = "multi_pass" | "builder_only" | "incident";
+
+// Whether an Evaluation Run graded a bundled demo *scenario* fixture (against
+// ground truth, with a judge) or a real product *incident* analysis run (the
+// ground-truth-free deterministic floor only, no judge).
+export type EvaluationKind = "scenario" | "incident";
 
 // A recorded Evaluation Run for the dev dashboard (ADR 0010 / 0025 / 0044).
 export interface EvaluationRun {
   id: string;
+  // "scenario" for a demo fixture, "incident" for a real incident's analysis run.
+  evaluation_kind: EvaluationKind;
+  // Populated only for an incident evaluation; null for a scenario evaluation.
+  incident_id: string | null;
+  analysis_run_id: string | null;
   scenario_id: string;
   scenario_title: string;
   status: string;
@@ -664,6 +674,24 @@ export const api = {
       method: "POST",
       body: JSON.stringify(scenarioId ? { scenario_id: scenarioId } : {}),
     });
+  },
+
+  // The latest deterministic floor evaluation of a real incident's analysis run,
+  // or null when it has not been evaluated yet (no ground truth, so no judge).
+  getIncidentEvaluation(
+    incidentId: string,
+    runId: string,
+  ): Promise<EvaluationRun | null> {
+    return request<EvaluationRun | null>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/evaluation`,
+    );
+  },
+
+  runIncidentEvaluation(incidentId: string, runId: string): Promise<EvaluationRun> {
+    return request<EvaluationRun>(
+      `/api/incidents/${incidentId}/analysis-runs/${runId}/evaluation`,
+      { method: "POST" },
+    );
   },
 
   createIncident(payload: IncidentCreate): Promise<Incident> {

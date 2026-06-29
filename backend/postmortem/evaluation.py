@@ -553,6 +553,38 @@ def run_deterministic_checks(snapshot: RunOutputSnapshot) -> list[CheckResult]:
     return [check(snapshot) for check in DETERMINISTIC_CHECKS]
 
 
+# The deterministic checks that are meaningful *without* a ground-truth reference,
+# used to evaluate a real product incident's Analysis Run (which ships no scenario
+# fixture). These need only the run's own outputs — exact citations, required
+# sections, chronological timeline, competing hypotheses, a complete advisory
+# ranking, every hypothesis challenged, and a supported advisory leader. The
+# expectation-driven checks (alternative_consideration, counterevidence_coverage,
+# causal_refusal, causal_role_constraints, unacceptable_overclaims) and the
+# refusal-correctness check are deliberately excluded: with no declared
+# expectations they degrade to a trivial pass, which would be a misleading green.
+GROUND_TRUTH_FREE_CHECKS: tuple[str, ...] = (
+    "citation_integrity",
+    "required_outputs",
+    "timeline_ordering",
+    "hypothesis_multiplicity",
+    "advisory_ranking_coverage",
+    "causal_challenge_coverage",
+    "unsupported_causal_claims",
+)
+
+
+def run_floor_checks(snapshot: RunOutputSnapshot) -> list[CheckResult]:
+    """The ground-truth-free deterministic floor for a real-incident evaluation.
+
+    A subset of ``run_deterministic_checks`` restricted to checks that grade a run
+    against its own outputs rather than a scenario's declared expectations (ADR
+    0010). No judge runs for an incident evaluation: there is no reference
+    postmortem to score semantic quality against.
+    """
+    by_name = {check.name: check for check in run_deterministic_checks(snapshot)}
+    return [by_name[name] for name in GROUND_TRUTH_FREE_CHECKS if name in by_name]
+
+
 def aggregate_warning_codes(snapshot: RunOutputSnapshot) -> dict[str, int]:
     """Count Warning Codes across the run for experiment tracking (ADR 0025)."""
     counts: dict[str, int] = {}
