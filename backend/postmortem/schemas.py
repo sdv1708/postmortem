@@ -815,6 +815,13 @@ class EvaluationRunRead(BaseModel):
     """
 
     id: str
+    # "scenario" (a demo fixture graded against ground truth) or "incident" (a real
+    # product Analysis Run graded only on the ground-truth-free deterministic floor,
+    # with no judge). Incident rows mirror the incident id/title into the scenario
+    # columns and populate ``incident_id`` / ``analysis_run_id``.
+    evaluation_kind: str
+    incident_id: str | None
+    analysis_run_id: str | None
     scenario_id: str
     scenario_title: str
     status: str

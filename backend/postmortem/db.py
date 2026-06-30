@@ -396,6 +396,21 @@ def ensure_schema_compatibility(engine: Engine) -> None:
         },
     )
 
+    # Real-incident floor evaluation columns. Existing rows are all scenario
+    # evaluations and predate the distinction, so default the kind to 'scenario'
+    # and leave the incident/run links null. VARCHAR ddl with a DEFAULT and NOT
+    # NULL is valid on both SQLite and PostgreSQL.
+    _add_columns_if_missing(
+        engine,
+        inspector,
+        "evaluation_runs",
+        {
+            "evaluation_kind": "VARCHAR(16) NOT NULL DEFAULT 'scenario'",
+            "incident_id": "VARCHAR(36)",
+            "analysis_run_id": "VARCHAR(36)",
+        },
+    )
+
     _add_columns_if_missing(
         engine,
         inspector,

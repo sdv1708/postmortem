@@ -500,24 +500,34 @@ test("run the evaluation suite and review the deterministic dashboard", async ({
 
   await page.getByRole("button", { name: "Run all evaluations" }).click();
 
-  // Each scenario family is scored (ADR 0006): deploy, dependency, config drift.
+  // Each scenario family is a collapsible demo card (ADR 0006): deploy,
+  // dependency, config drift. Titles live in the always-visible toggle row.
   await expect(
-    page.getByRole("heading", { name: "Ambiguous deploy-related API error spike" }),
+    page.getByRole("button", { name: /Ambiguous deploy-related API error spike/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Checkout failures from a degraded payments provider" }),
+    page.getByRole("button", { name: /Checkout failures from a degraded payments provider/ }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Latency spike from a drifted cache configuration" }),
-  ).toBeVisible();
+  const configDriftCard = page.getByRole("button", {
+    name: /Latency spike from a drifted cache configuration/,
+  });
+  await expect(configDriftCard).toBeVisible();
+
+  // Expand one scenario to inspect its comparison (collapsed by default so the
+  // page opens as a short list, not a wall of detail).
+  await configDriftCard.click();
 
   // The deterministic floor passes and citation validity is reported mechanically.
   await expect(page.getByText("passing").first()).toBeVisible();
   await expect(page.getByText(/\d+\/\d+ verified/).first()).toBeVisible();
-  await expect(page.getByText("✓ citation_integrity").first()).toBeVisible();
   // No model configured in e2e, so the judge is honestly not scored — but the
   // deterministic floor still stands (ADR 0010).
   await expect(page.getByText("not scored (no model)").first()).toBeVisible();
+
+  // Checks are summarized by default and explained behind an info toggle, which
+  // names each deterministic check.
+  await page.getByRole("button", { name: "Explain checks" }).first().click();
+  await expect(page.getByText("citation_integrity").first()).toBeVisible();
 });
 
 test("seed the insufficient-evidence scenario and see a refusal, not a confident postmortem", async ({

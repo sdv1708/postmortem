@@ -26,6 +26,7 @@ import {
   type ChallengeSeverity,
   type ConclusionDiscrepancy,
   type ClaimSupportStatus,
+  type EvaluationRun,
   type EvidenceRef,
   type ExportMode,
   type HumanAssumption,
@@ -1058,6 +1059,7 @@ function RunStatusCard({
           <RunConclusion incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
           <RunRemediation incidentId={incidentId} runId={run.id} onFocusEvidence={onFocusEvidence} />
           <RunPostmortem incidentId={incidentId} runId={run.id} />
+          <RunEvaluationPanel incidentId={incidentId} runId={run.id} />
           <RunDiagnosticsPanel incidentId={incidentId} runId={run.id} />
         </SectionToggleContext.Provider>
       )}
@@ -1246,6 +1248,187 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
 // each role saw — component versions, token usage, hashes, and ordered retrieved
 // chunk references including retrieved-but-uncited ones — without exposing any
 // prompt, raw response, or artifact text (PRD #26 user stories 69-73, 88-89).
+// Deterministic floor evaluation of this incident's analysis run (ADR 0010). A
+// real incident has no ground-truth reference, so this grades the ground-truth-free
+// checks and, when a model is configured, a reference-free judge scored against the
+// incident's own evidence — never a gold answer. The panel says so explicitly so a
+// green result is never mistaken for full, correctness-graded evaluation.
+function RunEvaluationPanel({ incidentId, runId }: { incidentId: string; runId: string }) {
+  const [open, setOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const evalQuery = useQuery<EvaluationRun | null>({
+    queryKey: ["run-evaluation", incidentId, runId],
+    queryFn: () => api.getIncidentEvaluation(incidentId, runId),
+    enabled: open,
+  });
+
+  const runEval = useMutation({
+    mutationFn: () => api.runIncidentEvaluation(incidentId, runId),
+    onSuccess: (row) => {
+      queryClient.setQueryData(["run-evaluation", incidentId, runId], row);
+    },
+  });
+
+  const evaluation = evalQuery.data ?? null;
+
+  return (
+    <CollapsibleSection
+      title="Evaluation"
+      defaultOpen={false}
+      onOpenChange={setOpen}
+      right={
+        <span
+          className="badge bg-slate-100 text-slate-600 ring-slate-200"
+          title="Grades the ground-truth-free deterministic trust floor. A real incident has no reference postmortem, so the scenario-expectation checks do not run; a reference-free judge runs only when a model is configured."
+        >
+          floor + reference-free
+        </span>
+      }
+    >
+      <div className="space-y-4 px-5 pb-5 pt-1">
+        <p className="text-xs text-slate-500">
+          Grades this run against the deterministic trust floor — exact citations, required
+          sections, chronological timeline, competing hypotheses, a complete advisory ranking,
+          every hypothesis challenged, and a supported leader. There is no ground-truth reference
+          for a real incident, so the scenario-expectation checks do not run; when a model is
+          configured a reference-free judge scores groundedness, consistency, and honesty against
+          this run&apos;s own cited evidence — never whether the root cause is objectively correct.
+        </p>
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            className="button-secondary h-8 px-3 text-xs"
+            disabled={runEval.isPending}
+            onClick={() => runEval.mutate()}
+          >
+            {runEval.isPending ? (
+              <>
+                <Spinner /> Evaluating…
+              </>
+            ) : evaluation ? (
+              "Re-run evaluation"
+            ) : (
+              "Run evaluation"
+            )}
+          </button>
+          {evaluation && (
+            <span className="text-xs text-slate-500">
+              Last evaluated {new Date(evaluation.created_at).toLocaleString()}
+            </span>
+          )}
+        </div>
+
+        {runEval.isError && (
+          <p className="text-xs text-rose-600">
+            {runEval.error instanceof Error ? runEval.error.message : "Evaluation failed."}
+          </p>
+        )}
+
+        {evalQuery.isPending && open && (
+          <p className="text-xs text-slate-500">
+            <Spinner /> Loading evaluation…
+          </p>
+        )}
+
+        {!evaluation && !evalQuery.isPending && !runEval.isPending && (
+          <p className="text-xs text-slate-500">
+            Not evaluated yet. Run the evaluation to grade this run against the trust floor.
+          </p>
+        )}
+
+        {evaluation && (
+          <div className="space-y-3 rounded-lg border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold text-slate-900">
+                Deterministic floor
+              </span>
+              {evaluation.passed ? (
+                <span className="badge bg-emerald-50 text-emerald-700 ring-emerald-200">
+                  passing
+                </span>
+              ) : (
+                <span className="badge bg-rose-50 text-rose-700 ring-rose-200">failing</span>
+              )}
+            </div>
+
+            <ul className="space-y-1.5">
+              {evaluation.checks.map((check) => (
+                <li key={check.name} className="flex items-baseline gap-1.5 text-xs">
+                  <span className={check.passed ? "text-emerald-600" : "text-rose-600"}>
+                    {check.passed ? "✓" : "✗"}
+                  </span>
+                  <span className="font-mono font-medium text-slate-800">{check.name}</span>
+                  <span className="text-slate-500">— {check.detail}</span>
+                </li>
+              ))}
+            </ul>
+
+            <div className="grid grid-cols-2 gap-3 border-t border-slate-200 pt-3 sm:grid-cols-3">
+              <div>
+                <p className="label">Citation validity</p>
+                <p
+                  className={`mt-0.5 text-sm font-medium ${
+                    evaluation.citation_total > 0 &&
+                    evaluation.citation_verified === evaluation.citation_total
+                      ? "text-emerald-700"
+                      : "text-slate-600"
+                  }`}
+                >
+                  {evaluation.citation_verified}/{evaluation.citation_total} verified
+                </p>
+              </div>
+              <div>
+                <p className="label">Model calls</p>
+                <p className="mt-0.5 text-sm font-medium text-slate-900">
+                  {evaluation.model_calls}
+                </p>
+              </div>
+              <div>
+                <p className="label">Judge (reference-free)</p>
+                {evaluation.judge_scores ? (
+                  <p className="mt-0.5 text-sm font-medium text-slate-900">
+                    {evaluation.judge_scores.overall.toFixed(2)} / 5
+                  </p>
+                ) : (
+                  <p
+                    className="mt-0.5 cursor-help text-sm font-medium text-slate-500"
+                    title="No model configured, so the reference-free judge did not run. The deterministic floor still stands."
+                  >
+                    not scored
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {evaluation.judge_scores && (
+              <div className="space-y-2 border-t border-slate-200 pt-3">
+                <p className="text-xs text-slate-500">
+                  Reference-free judge — scored against this run&apos;s own cited evidence, not a
+                  gold answer (groundedness, consistency, honesty; not correctness).
+                </p>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600">
+                  {Object.entries(evaluation.judge_scores.scores).map(([key, score]) => (
+                    <div key={key} className="flex items-center justify-between gap-2">
+                      <span>{key.replace(/_/g, " ")}</span>
+                      <span className="font-semibold text-slate-900">{score}/5</span>
+                    </div>
+                  ))}
+                </div>
+                {evaluation.judge_scores.rationale && (
+                  <p className="text-xs italic leading-relaxed text-slate-600">
+                    “{evaluation.judge_scores.rationale}”
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </CollapsibleSection>
+  );
+}
+
 function RunDiagnosticsPanel({
   incidentId,
   runId,

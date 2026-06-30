@@ -51,7 +51,7 @@ from .artifacts import (
     artifact_lines,
     canonicalize_body,
 )
-from .evaluation import EvaluationRunner, evaluation_run_read
+from .evaluation import EvaluationRunner, IncidentEvaluationError, evaluation_run_read
 from .incidents import IncidentHasFinalizedConclusionsError, IncidentService, IncidentNotFoundError
 from .scenarios import ScenarioNotFoundError, ScenarioSeedService
 from .run_executor import (
@@ -111,6 +111,7 @@ __all__ = [
     "IncidentHasFinalizedConclusionsError",
     "IncidentNotFoundError",
     "EvaluationRunner",
+    "IncidentEvaluationError",
     "evaluation_run_read",
     "ScenarioNotFoundError",
     "ScenarioSeedService",

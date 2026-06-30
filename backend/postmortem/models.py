@@ -1035,6 +1035,16 @@ class EvaluationRun(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     scenario_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     scenario_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Whether this evaluation graded a bundled demo *scenario* fixture (the default,
+    # against ground truth) or a real product *incident* analysis run. An incident
+    # evaluation has no ground-truth reference, so it runs only the ground-truth-free
+    # deterministic floor and never a judge. For an incident row, ``scenario_id`` /
+    # ``scenario_title`` hold the incident id / title so existing grouping keeps
+    # working, and ``incident_id`` / ``analysis_run_id`` below are populated.
+    evaluation_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="scenario")
+    # Set only for an incident evaluation: the evaluated Incident and Analysis Run.
+    incident_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    analysis_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # Evaluation execution status, distinct from the underlying run's status.
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="succeeded")
     analysis_run_status: Mapped[str] = mapped_column(String(16), nullable=False)
