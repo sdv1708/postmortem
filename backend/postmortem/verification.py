@@ -7,6 +7,7 @@ from typing import Final, Literal, Mapping, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .llm import LLMClient
+from .provenance import ROLE_SUPPORT_VERIFIER, output_token_cap_for
 
 # Versioned verifier identity recorded in Experiment Metadata (ADR 0025). Bump
 # when the integrity contract or its outcomes change so runs stay comparable.
@@ -219,7 +220,9 @@ class LLMClaimSupportVerifier:
 
     def verify(self, claim: ClaimToVerify) -> ClaimSupportJudgment:
         system, user = build_claim_support_prompt(claim)
-        response = self._llm.complete(system=system, user=user)
+        response = self._llm.complete(
+            system=system, user=user, max_output_tokens=output_token_cap_for(ROLE_SUPPORT_VERIFIER)
+        )
         try:
             output = ClaimSupportOutput.model_validate_json(response.text)
         except ValidationError as exc:

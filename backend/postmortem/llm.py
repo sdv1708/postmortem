@@ -47,7 +47,9 @@ class LLMClient(Protocol):
     @property
     def label(self) -> str: ...
 
-    def complete(self, *, system: str, user: str) -> LLMResponse: ...
+    def complete(
+        self, *, system: str, user: str, max_output_tokens: int | None = None
+    ) -> LLMResponse: ...
 
 
 class FakeLLMClient:
@@ -76,7 +78,11 @@ class FakeLLMClient:
     def label(self) -> str:
         return self._label
 
-    def complete(self, *, system: str, user: str) -> LLMResponse:
+    def complete(
+        self, *, system: str, user: str, max_output_tokens: int | None = None
+    ) -> LLMResponse:
+        # The fake records prompts for assertions; the output cap is a live-provider
+        # concern only, so it is accepted for interface parity and ignored here.
         self.calls.append((system, user))
         logger.debug("fake_llm_completion label=%s call=%s", self._label, len(self.calls))
         if callable(self._responses):
@@ -104,7 +110,9 @@ class OfflineLLMClient:
     def label(self) -> str:
         return "offline"
 
-    def complete(self, *, system: str, user: str) -> LLMResponse:
+    def complete(
+        self, *, system: str, user: str, max_output_tokens: int | None = None
+    ) -> LLMResponse:
         logger.info("offline_llm_completion")
         return LLMResponse(text=json.dumps({}))
 
@@ -142,13 +150,15 @@ class OpenAICompatibleLLMClient:
     def label(self) -> str:
         return f"openai-compatible:{self._provider}:{self._model}"
 
-    def complete(self, *, system: str, user: str) -> LLMResponse:
+    def complete(
+        self, *, system: str, user: str, max_output_tokens: int | None = None
+    ) -> LLMResponse:
         logger.info(
             "llm_request_started provider=%s model=%s",
             self._provider,
             self._model,
         )
-        payload = {
+        payload: dict = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
@@ -160,6 +170,12 @@ class OpenAICompatibleLLMClient:
             "response_format": {"type": "json_object"},
             "temperature": 0.2,
         }
+        # Bound the completion length per role to cut output tokens (the role caps
+        # are sized above observed output with headroom so a valid JSON answer is
+        # never truncated into a schema-invalid result, which would cost a repair
+        # retry). A provider that ignores max_tokens still returns text we validate.
+        if max_output_tokens and max_output_tokens > 0:
+            payload["max_tokens"] = max_output_tokens
         request = urllib.request.Request(
             f"{self._base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),

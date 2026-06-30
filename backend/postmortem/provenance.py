@@ -17,6 +17,36 @@ ROLE_FALSIFIER: Final[str] = "falsifier"
 ROLE_SUPPORT_VERIFIER: Final[str] = "support_verifier"
 ROLE_RANKER: Final[str] = "ranker"
 
+# Per-role output-token caps passed to the live provider as ``max_tokens`` to bound
+# completion size and cost (PRD user stories 65-67). Sized from measured per-role
+# output with generous headroom so a valid JSON answer is never truncated into a
+# schema-invalid result (which would cost a Targeted Repair retry, ADR 0043). A
+# role absent from this map (or mapped to 0) sends no cap. These are a proactive
+# provider-side cap, distinct from the ReasoningBudget output ceiling, which only
+# *aborts* an over-budget run after the fact (ADR 0043).
+ROLE_OUTPUT_TOKEN_CAPS: Final[dict[str, int]] = {
+    ROLE_INCIDENT_FACTS: 384,
+    # The builder emits the largest, most variable output (multiple ranked
+    # hypotheses with split evidence); cap it as a runaway guard with wide headroom
+    # over observed peaks so a busy multi-hypothesis answer is never truncated into
+    # a schema-invalid result (which would cost a Targeted Repair retry, ADR 0043).
+    ROLE_BUILDER: 1280,
+    ROLE_FALSIFIER: 448,
+    ROLE_SUPPORT_VERIFIER: 256,
+    # Reference-based and reference-free judges emit a bounded rubric of scores +
+    # short rationales; capped generously since they are advisory and never gate
+    # pass/fail (ADR 0010).
+    "judge": 1024,
+    "incident_judge": 1024,
+}
+
+
+def output_token_cap_for(role: str) -> int | None:
+    """The provider-side ``max_tokens`` cap for a role, or None when uncapped."""
+    cap = ROLE_OUTPUT_TOKEN_CAPS.get(role)
+    return cap if cap and cap > 0 else None
+
+
 # The falsifier performs Falsification Retrieval across ALL immutable run
 # artifacts rather than the builder's retrieval subset (ADR 0034, PRD user story
 # 13), so its Retrieval Trace records this strategy label instead of the builder's
@@ -91,8 +121,12 @@ class RecordingLLMClient:
     def label(self) -> str:
         return self._inner.label
 
-    def complete(self, *, system: str, user: str) -> LLMResponse:
-        response = self._inner.complete(system=system, user=user)
+    def complete(
+        self, *, system: str, user: str, max_output_tokens: int | None = None
+    ) -> LLMResponse:
+        response = self._inner.complete(
+            system=system, user=user, max_output_tokens=max_output_tokens
+        )
         self._buffer.append(
             CapturedModelCall(
                 model_identity=self._inner.label,

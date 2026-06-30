@@ -690,7 +690,11 @@ class ScenarioReplayLLMClient:
     def label(self) -> str:
         return f"scenario-replay:{self._scenario_id}"
 
-    def complete(self, *, system: str, user: str) -> LLMResponse:
+    def complete(
+        self, *, system: str, user: str, max_output_tokens: int | None = None
+    ) -> LLMResponse:
+        # Replay is offline and deterministic, so the live-provider output cap is
+        # accepted for interface parity and ignored.
         self.calls.append((system, user))
         return LLMResponse(text=self._rca_json, usage={"replay": True})
 
