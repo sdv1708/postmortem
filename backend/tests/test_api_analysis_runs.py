@@ -4,6 +4,7 @@ from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
 
 from postmortem.api.analysis_runs import execute_analysis_run_background, schedule_analysis_run
+from tests._fakes import FakeIncidentJudge
 
 
 def create_incident(client: TestClient, auth_headers) -> str:
@@ -366,6 +367,42 @@ def test_incident_evaluation_runs_floor_only(client: TestClient, auth_headers):
     )
     assert latest.status_code == 200
     assert latest.json()["id"] == body["id"]
+
+
+def test_incident_evaluation_runs_reference_free_judge_when_configured(
+    client: TestClient, app, auth_headers
+):
+    # With a (fake) model configured, an incident evaluation also runs the
+    # reference-free judge — grounded in the incident's own cited evidence, not a
+    # ground-truth reference — alongside the deterministic floor.
+    app.state.incident_evaluation_judge = FakeIncidentJudge()
+    incident_id, run_id = seed_scenario_incident(client, auth_headers)
+
+    resp = client.post(
+        f"/api/incidents/{incident_id}/analysis-runs/{run_id}/evaluation",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    assert body["evaluation_kind"] == "incident"
+    assert body["judge_version"] == "fake-incident-judge-0"
+    scores = body["judge_scores"]["scores"]
+    # The reference-free rubric, none of which needs a gold answer.
+    assert set(scores) == {
+        "evidence_grounding",
+        "internal_consistency",
+        "uncertainty_honesty",
+        "explanatory_coverage",
+    }
+    # The ground-truth-only dimensions are deliberately absent.
+    assert "timeline_accuracy" not in scores
+    assert "root_cause_quality" not in scores
+    assert body["judge_scores"]["overall"] > 0
+
+    # The judge was grounded in the incident's own cited evidence, never a reference.
+    judge = app.state.incident_evaluation_judge
+    assert judge.calls and judge.calls[0].cited_evidence
 
 
 def test_incident_evaluation_is_null_before_first_run(client: TestClient, auth_headers):

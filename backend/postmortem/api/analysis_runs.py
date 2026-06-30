@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ..auth import Principal, require_principal, require_user
 from ..config import Settings
+from ..evaluation import IncidentPostmortemJudge, LLMIncidentJudge
 from ..llm import build_llm_client
 from ..logging import log_event
 from ..markdown_export import ExportMode, render_markdown
@@ -182,6 +183,24 @@ def get_analysis_run(
     return AnalysisRunRead.model_validate(analysis_run_read(run))
 
 
+def _resolve_incident_judge(request: Request) -> IncidentPostmortemJudge | None:
+    """Build the reference-free incident judge, or None when no model is configured.
+
+    Mirrors the scenario judge resolution (ADR 0011): a test/dev hook
+    (``app.state.incident_evaluation_judge``) takes precedence for deterministic
+    replay; otherwise the configured provider drives an ``LLMIncidentJudge``; an
+    offline environment scores no judge and the deterministic floor stands alone
+    (ADR 0010).
+    """
+    injected = getattr(request.app.state, "incident_evaluation_judge", None)
+    if injected is not None:
+        return injected
+    settings = request.app.state.settings
+    if settings.llm_api_key:
+        return LLMIncidentJudge(build_llm_client(settings))
+    return None
+
+
 @router.get("/{run_id}/evaluation", response_model=EvaluationRunRead | None)
 def get_run_evaluation(
     incident_id: str, run_id: str, db: Session = Depends(get_db)
@@ -209,15 +228,18 @@ def get_run_evaluation(
     status_code=status.HTTP_201_CREATED,
 )
 def run_run_evaluation(
-    incident_id: str, run_id: str, db: Session = Depends(get_db)
+    incident_id: str, run_id: str, request: Request, db: Session = Depends(get_db)
 ) -> EvaluationRunRead:
     """Run the deterministic floor evaluation over this incident's Analysis Run.
 
     Grades the run against the ground-truth-free trust floor (citations, required
     sections, timeline ordering, hypothesis multiplicity, advisory-ranking
-    coverage, challenge coverage, supported leader). No judge runs and the
-    expectation-driven checks are not applicable — a real incident ships no
-    reference postmortem (ADR 0010).
+    coverage, challenge coverage, supported leader). The expectation-driven checks
+    are not applicable — a real incident ships no reference postmortem. When a model
+    is configured, an additional *reference-free* judge scores the draft's
+    groundedness, consistency, and honesty against the incident's own cited evidence
+    (never a gold answer); offline, no judge runs and the floor stands alone (ADR
+    0010).
     """
     try:
         AnalysisService(db).get_run(incident_id, run_id)
@@ -225,8 +247,9 @@ def run_run_evaluation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     except AnalysisRunNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="analysis run not found")
+    runner = EvaluationRunner(db, incident_judge=_resolve_incident_judge(request))
     try:
-        row = EvaluationRunner(db).evaluate_incident_run(incident_id, run_id)
+        row = runner.evaluate_incident_run(incident_id, run_id)
     except IncidentEvaluationError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     return EvaluationRunRead.model_validate(evaluation_run_read(row))

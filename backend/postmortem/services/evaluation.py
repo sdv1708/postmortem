@@ -17,6 +17,8 @@ from ..evaluation import (
     CounterevidenceView,
     ExpectedFactorView,
     HypothesisView,
+    IncidentJudgeInput,
+    IncidentPostmortemJudge,
     JudgeHypothesis,
     JudgeInput,
     JudgeResult,
@@ -113,10 +115,15 @@ class EvaluationRunner:
         session: Session,
         judge: PostmortemJudge | None = None,
         base_dir: Path | None = None,
+        incident_judge: IncidentPostmortemJudge | None = None,
     ) -> None:
         self._session = session
         self._judge = judge
         self._base_dir = base_dir
+        # The reference-free judge used only for real-incident evaluation (no
+        # ground truth). Optional: an offline environment configures none and the
+        # incident evaluation stands on its deterministic floor alone (ADR 0010).
+        self._incident_judge = incident_judge
 
     def list_recorded(self) -> list[EvaluationRun]:
         return list(
@@ -208,7 +215,7 @@ class EvaluationRunner:
             run_postmortem is not None
             and run_postmortem.evidence_sufficiency == "insufficient"
         )
-        snapshot, _postmortem, _hypotheses = self._build_snapshot(
+        snapshot, postmortem, hypotheses = self._build_snapshot(
             self._session,
             run,
             analysis_mode=ANALYSIS_MODE_INCIDENT,
@@ -220,6 +227,16 @@ class EvaluationRunner:
         total, verified = citation_tally(snapshot)
         model_calls, total_tokens, latency_ms = self._cost_metrics(self._session, run)
         passed = all(check.passed for check in checks)
+
+        # Reference-free judge (optional): grades the draft's groundedness,
+        # consistency, and honesty against the incident's own cited evidence — never
+        # against a ground-truth reference, which a real incident does not have. It
+        # never decides the deterministic floor (ADR 0010).
+        judge = None
+        if self._incident_judge is not None:
+            judge = self._incident_judge.judge_incident(
+                self._build_incident_judge_input(run, postmortem, hypotheses, incident_id)
+            )
 
         row = EvaluationRun(
             evaluation_kind=EVALUATION_KIND_INCIDENT,
@@ -233,7 +250,7 @@ class EvaluationRunner:
             analysis_run_status=run.status,
             analysis_mode=ANALYSIS_MODE_INCIDENT,
             passed=passed,
-            judge_version=None,
+            judge_version=judge.version if judge is not None else None,
             citation_total=total,
             citation_verified=verified,
             model_calls=model_calls,
@@ -241,7 +258,15 @@ class EvaluationRunner:
             latency_ms=latency_ms,
             checks=[{"name": c.name, "passed": c.passed, "detail": c.detail} for c in checks],
             warning_code_counts=aggregate_warning_codes(snapshot),
-            judge_scores=None,
+            judge_scores=(
+                {
+                    "scores": judge.scores,
+                    "overall": judge.overall,
+                    "rationale": judge.rationale,
+                }
+                if judge is not None
+                else None
+            ),
             pipeline_version=run.pipeline_version,
             prompt_version=run.prompt_version,
             model_provider=run.model_provider,
@@ -261,8 +286,55 @@ class EvaluationRunner:
             passed=passed,
             citation_verified=verified,
             citation_total=total,
+            judge_ran=judge is not None,
         )
         return row
+
+    # Cap the cited evidence fed to the reference-free judge so a large incident
+    # cannot blow up the prompt; the floor's groundedness signal does not need every
+    # snippet, only a representative sample.
+    _MAX_JUDGE_EVIDENCE: Final[int] = 40
+
+    def _build_incident_judge_input(
+        self,
+        run: AnalysisRun,
+        postmortem: Postmortem | None,
+        hypotheses: list[Hypothesis],
+        incident_id: str,
+    ) -> IncidentJudgeInput:
+        """Assemble the reference-free judge input from a real run's own outputs.
+
+        The grounding is the exact text of the lines the analysis cited — there is
+        no ground-truth reference — plus the run's own honesty signals (declared
+        evidence sufficiency and gaps).
+        """
+        snippets = [
+            ref.snippet
+            for ref in self._run_evidence_refs(self._session, run)
+            if ref.snippet
+        ]
+        return IncidentJudgeInput(
+            incident_id=incident_id,
+            generated_summary=postmortem.summary if postmortem is not None else "",
+            generated_hypotheses=tuple(
+                JudgeHypothesis(
+                    title=h.title,
+                    summary=h.summary,
+                    support_status=h.support_status,
+                    has_challenge=h.challenge is not None,
+                    challenge_severity=h.challenge.severity if h.challenge is not None else None,
+                    counterclaim_count=(
+                        len(h.challenge.counterclaims) if h.challenge is not None else 0
+                    ),
+                )
+                for h in hypotheses
+            ),
+            cited_evidence=tuple(snippets[: self._MAX_JUDGE_EVIDENCE]),
+            evidence_sufficiency=(
+                postmortem.evidence_sufficiency if postmortem is not None else "sufficient"
+            ),
+            evidence_gaps=tuple(postmortem.evidence_gaps or ()) if postmortem is not None else (),
+        )
 
     def _record_mode(self, scenario_id: str, analysis_mode: str) -> EvaluationRun:
         result = self.evaluate(scenario_id, analysis_mode=analysis_mode)

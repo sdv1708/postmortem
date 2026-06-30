@@ -1249,9 +1249,10 @@ function RunPostmortem({ incidentId, runId }: { incidentId: string; runId: strin
 // chunk references including retrieved-but-uncited ones — without exposing any
 // prompt, raw response, or artifact text (PRD #26 user stories 69-73, 88-89).
 // Deterministic floor evaluation of this incident's analysis run (ADR 0010). A
-// real incident has no ground-truth reference, so this grades only the
-// ground-truth-free checks and never runs a judge — the panel says so explicitly
-// so a green result is never mistaken for full semantic evaluation.
+// real incident has no ground-truth reference, so this grades the ground-truth-free
+// checks and, when a model is configured, a reference-free judge scored against the
+// incident's own evidence — never a gold answer. The panel says so explicitly so a
+// green result is never mistaken for full, correctness-graded evaluation.
 function RunEvaluationPanel({ incidentId, runId }: { incidentId: string; runId: string }) {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
@@ -1278,9 +1279,9 @@ function RunEvaluationPanel({ incidentId, runId }: { incidentId: string; runId: 
       right={
         <span
           className="badge bg-slate-100 text-slate-600 ring-slate-200"
-          title="Grades only the ground-truth-free deterministic trust floor. A real incident has no reference postmortem, so no judge runs."
+          title="Grades the ground-truth-free deterministic trust floor. A real incident has no reference postmortem, so the scenario-expectation checks do not run; a reference-free judge runs only when a model is configured."
         >
-          floor only
+          floor + reference-free
         </span>
       }
     >
@@ -1289,7 +1290,9 @@ function RunEvaluationPanel({ incidentId, runId }: { incidentId: string; runId: 
           Grades this run against the deterministic trust floor — exact citations, required
           sections, chronological timeline, competing hypotheses, a complete advisory ranking,
           every hypothesis challenged, and a supported leader. There is no ground-truth reference
-          for a real incident, so the semantic judge and the scenario-expectation checks do not run.
+          for a real incident, so the scenario-expectation checks do not run; when a model is
+          configured a reference-free judge scores groundedness, consistency, and honesty against
+          this run&apos;s own cited evidence — never whether the root cause is objectively correct.
         </p>
 
         <div className="flex items-center gap-3">
@@ -1382,15 +1385,43 @@ function RunEvaluationPanel({ incidentId, runId }: { incidentId: string; runId: 
                 </p>
               </div>
               <div>
-                <p className="label">Judge</p>
-                <p
-                  className="mt-0.5 cursor-help text-sm font-medium text-slate-500"
-                  title="No ground-truth reference for a real incident, so the judge does not run."
-                >
-                  n/a
-                </p>
+                <p className="label">Judge (reference-free)</p>
+                {evaluation.judge_scores ? (
+                  <p className="mt-0.5 text-sm font-medium text-slate-900">
+                    {evaluation.judge_scores.overall.toFixed(2)} / 5
+                  </p>
+                ) : (
+                  <p
+                    className="mt-0.5 cursor-help text-sm font-medium text-slate-500"
+                    title="No model configured, so the reference-free judge did not run. The deterministic floor still stands."
+                  >
+                    not scored
+                  </p>
+                )}
               </div>
             </div>
+
+            {evaluation.judge_scores && (
+              <div className="space-y-2 border-t border-slate-200 pt-3">
+                <p className="text-xs text-slate-500">
+                  Reference-free judge — scored against this run&apos;s own cited evidence, not a
+                  gold answer (groundedness, consistency, honesty; not correctness).
+                </p>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600">
+                  {Object.entries(evaluation.judge_scores.scores).map(([key, score]) => (
+                    <div key={key} className="flex items-center justify-between gap-2">
+                      <span>{key.replace(/_/g, " ")}</span>
+                      <span className="font-semibold text-slate-900">{score}/5</span>
+                    </div>
+                  ))}
+                </div>
+                {evaluation.judge_scores.rationale && (
+                  <p className="text-xs italic leading-relaxed text-slate-600">
+                    “{evaluation.judge_scores.rationale}”
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

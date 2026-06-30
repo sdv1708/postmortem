@@ -792,3 +792,169 @@ class LLMPostmortemJudge:
             rationale=output.rationale,
             version=self.version,
         )
+
+
+# --- Reference-free judge for real incidents (no ground truth) ----------------
+#
+# A real product incident ships no human-written reference postmortem, so the
+# ground-truth dimensions (timeline_accuracy, root_cause_quality) cannot be scored
+# — judging against a gold answer would require hand-labelling every incident,
+# which does not scale. Instead this judge grades the output against *criteria*
+# using the incident's own cited evidence as grounding. It measures whether the
+# reasoning is well-supported, self-consistent, and honest — NOT whether the root
+# cause is objectively correct, which only a human or post-incident reality can
+# establish (so it never replaces the human conclusion, only flags weak drafts).
+
+REFERENCE_FREE_JUDGE_VERSION: Final[str] = "incident-judge-1"
+
+
+class ReferenceFreeJudgeScores(BaseModel):
+    """The four reference-free rubric dimensions, each scored 1-5.
+
+    All four are answerable from the generated postmortem plus its cited evidence
+    alone — none needs a ground-truth reference (ADR 0010).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_grounding: int = Field(ge=1, le=5)
+    internal_consistency: int = Field(ge=1, le=5)
+    uncertainty_honesty: int = Field(ge=1, le=5)
+    explanatory_coverage: int = Field(ge=1, le=5)
+
+
+class ReferenceFreeJudgeOutput(BaseModel):
+    """Strict structured output for the reference-free incident judge (ADR 0028)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scores: ReferenceFreeJudgeScores
+    rationale: str = Field(min_length=1)
+
+
+@dataclass(frozen=True)
+class IncidentJudgeInput:
+    """A real incident's generated postmortem and its own evidence, for scoring.
+
+    ORM-free (ADR 0009). There is no ground-truth reference: ``cited_evidence`` is
+    the exact text of the lines the analysis cited, used to judge groundedness;
+    ``evidence_sufficiency`` and ``evidence_gaps`` are the run's own honesty signals.
+    """
+
+    incident_id: str
+    generated_summary: str
+    generated_hypotheses: tuple[JudgeHypothesis, ...]
+    cited_evidence: tuple[str, ...]
+    evidence_sufficiency: str
+    evidence_gaps: tuple[str, ...]
+
+
+_INCIDENT_JUDGE_SYSTEM_PROMPT = """\
+You are a senior incident reviewer grading a generated postmortem WITHOUT a
+ground-truth reference. You only have the postmortem and the exact evidence it
+cited. You are scoring the quality of its reasoning, not rewriting it.
+
+Critically: you cannot and must not judge whether the root cause is objectively
+correct — you do not know the true cause. Judge only what the evidence in front
+of you supports.
+
+Rules:
+- Output ONLY a single JSON object. No prose, no markdown fences.
+- Score each dimension as an integer from 1 (poor) to 5 (excellent):
+  - evidence_grounding: does every substantive claim trace to the cited evidence,
+    rather than being asserted or going beyond what the evidence says?
+  - internal_consistency: are the summary, hypotheses, and stated uncertainty
+    mutually consistent, with no contradictions?
+  - uncertainty_honesty: does it hedge and flag gaps when the evidence is thin,
+    instead of overclaiming? A confident conclusion on sparse evidence scores LOW;
+    an honest "insufficient evidence" on sparse evidence scores HIGH.
+  - explanatory_coverage: do the hypotheses actually explain the cited evidence and
+    weigh competing factors, rather than ignoring evidence or collapsing to one
+    apparent winner?
+- Do NOT judge whether citations resolve to real lines; citation integrity is
+  checked deterministically elsewhere and is not your responsibility.
+- Always include a one-to-two sentence rationale.
+
+The JSON object must match this shape:
+{"scores": {"evidence_grounding": 1-5, "internal_consistency": 1-5,
+"uncertainty_honesty": 1-5, "explanatory_coverage": 1-5}, "rationale": "..."}
+"""
+
+
+def build_incident_judge_prompt(payload: IncidentJudgeInput) -> tuple[str, str]:
+    """Assemble the (system, user) prompt for the reference-free incident judge."""
+    if payload.generated_hypotheses:
+        hypotheses = "\n".join(
+            f"{index}. [{h.support_status}] {h.title} — {h.summary} "
+            f"(challenge: {_challenge_phrase(h)})"
+            for index, h in enumerate(payload.generated_hypotheses, start=1)
+        )
+    else:
+        hypotheses = "(no hypotheses were generated)"
+    evidence = (
+        "\n".join(f"- {snippet}" for snippet in payload.cited_evidence)
+        if payload.cited_evidence
+        else "(no evidence was cited)"
+    )
+    gaps = (
+        "\n".join(f"- {item}" for item in payload.evidence_gaps)
+        if payload.evidence_gaps
+        else "(none flagged)"
+    )
+    user = (
+        f"GENERATED POSTMORTEM SUMMARY:\n{payload.generated_summary}\n\n"
+        f"GENERATED HYPOTHESES:\n{hypotheses}\n\n"
+        f"EVIDENCE THE ANALYSIS CITED (the only grounding you have):\n{evidence}\n\n"
+        f"THE RUN'S OWN EVIDENCE SUFFICIENCY: {payload.evidence_sufficiency}\n"
+        f"EVIDENCE GAPS THE RUN FLAGGED:\n{gaps}\n\n"
+        "Score the generated postmortem and return the JSON object described in "
+        "the system message."
+    )
+    return _INCIDENT_JUDGE_SYSTEM_PROMPT, user
+
+
+def _reference_free_overall(scores: ReferenceFreeJudgeScores) -> float:
+    values = list(scores.model_dump().values())
+    return round(sum(values) / len(values), 2)
+
+
+@runtime_checkable
+class IncidentPostmortemJudge(Protocol):
+    """Swappable reference-free judge boundary for real-incident evaluation.
+
+    Distinct from ``PostmortemJudge`` because it grades without a ground-truth
+    reference. Tests inject a fake; an offline environment configures none and the
+    incident evaluation stands on its deterministic floor alone (ADR 0010).
+    """
+
+    version: str
+
+    def judge_incident(self, payload: IncidentJudgeInput) -> JudgeResult: ...
+
+
+class LLMIncidentJudge:
+    """Default reference-free incident judge: one configured LLM (ADR 0011).
+
+    Mirrors ``LLMPostmortemJudge`` but with the reference-free rubric/prompt and
+    schema. Schema-invalid or non-JSON output raises so an unscoreable verdict
+    never becomes an Evaluation Run score.
+    """
+
+    version: Final[str] = REFERENCE_FREE_JUDGE_VERSION
+
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+
+    def judge_incident(self, payload: IncidentJudgeInput) -> JudgeResult:
+        system, user = build_incident_judge_prompt(payload)
+        response = self._llm.complete(system=system, user=user)
+        try:
+            output = ReferenceFreeJudgeOutput.model_validate_json(response.text)
+        except ValidationError as exc:
+            raise ValueError(f"incident judge output failed schema validation: {exc}") from exc
+        return JudgeResult(
+            scores=output.scores.model_dump(),
+            overall=_reference_free_overall(output.scores),
+            rationale=output.rationale,
+            version=self.version,
+        )

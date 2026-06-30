@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from postmortem.drafting import PostmortemComposerContext, PostmortemDraft
-from postmortem.evaluation import JudgeInput, JudgeResult
+from postmortem.evaluation import IncidentJudgeInput, JudgeInput, JudgeResult
 from postmortem.falsification import (
     FalsificationCounterclaim,
     HypothesisChallengeOutput,
@@ -53,6 +53,43 @@ class FakePostmortemJudge:
         self.calls: list[JudgeInput] = []
 
     def judge(self, payload: JudgeInput) -> JudgeResult:
+        self.calls.append(payload)
+        overall = round(sum(self._scores.values()) / len(self._scores), 2)
+        return JudgeResult(
+            scores=dict(self._scores),
+            overall=overall,
+            rationale=self._rationale,
+            version=self.version,
+        )
+
+
+class FakeIncidentJudge:
+    """Deterministic reference-free incident judge for tests (ADR 0009 / 0010).
+
+    Proves the reference-free judge boundary is real without a live model. Records
+    the inputs it was handed so a test can assert what grounding the evaluation
+    runner fed it (the incident's own cited evidence, never a ground truth), and
+    returns fixed reference-free rubric scores by default.
+    """
+
+    version = "fake-incident-judge-0"
+
+    def __init__(
+        self,
+        *,
+        scores: dict[str, int] | None = None,
+        rationale: str = "Fake incident judge rationale.",
+    ) -> None:
+        self._scores = scores or {
+            "evidence_grounding": 4,
+            "internal_consistency": 5,
+            "uncertainty_honesty": 4,
+            "explanatory_coverage": 3,
+        }
+        self._rationale = rationale
+        self.calls: list[IncidentJudgeInput] = []
+
+    def judge_incident(self, payload: IncidentJudgeInput) -> JudgeResult:
         self.calls.append(payload)
         overall = round(sum(self._scores.values()) / len(self._scores), 2)
         return JudgeResult(

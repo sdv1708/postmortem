@@ -202,8 +202,9 @@ export default function EvaluationsPage() {
 
 // Aggregate review of real-incident floor evaluations (PRD: evaluate a real
 // incident). These are triggered from each incident's analysis run and collected
-// here. Unlike demo scenarios they have no ground truth — only the deterministic
-// trust floor, never a judge — so the card is deliberately plainer and says so.
+// here. Unlike demo scenarios they have no ground truth, so the deterministic trust
+// floor is the verdict; when a model is configured a reference-free judge adds a
+// semantic signal scored against the incident's own evidence (never a gold answer).
 function IncidentEvaluations({ evals }: { evals: EvaluationRun[] }) {
   const [open, setOpen] = useState(true);
   return (
@@ -219,7 +220,7 @@ function IncidentEvaluations({ evals }: { evals: EvaluationRun[] }) {
           <span className="text-sm font-semibold text-slate-900">Your incidents</span>
           <span className="badge bg-slate-100 text-slate-600 ring-slate-200">{evals.length}</span>
         </span>
-        <span className="label">deterministic floor only · no judge</span>
+        <span className="label">deterministic floor · reference-free judge (no ground truth)</span>
       </button>
 
       {open && (
@@ -279,14 +280,77 @@ function IncidentEvalCard({ run }: { run: EvaluationRun }) {
               {run.citation_verified}/{run.citation_total} verified
             </span>
           </Metric>
-          <Metric label="Judge (semantic)">
-            <span className="text-slate-500" title="No ground-truth reference for a real incident, so the judge does not run.">
-              n/a — no ground truth
-            </span>
+          <Metric label="Judge (reference-free)">
+            {run.judge_scores ? (
+              <span className="text-slate-800">{run.judge_scores.overall.toFixed(2)} / 5</span>
+            ) : (
+              <span
+                className="text-slate-500"
+                title="No model configured, so the reference-free judge did not run. The deterministic floor still stands."
+              >
+                not scored (no model)
+              </span>
+            )}
           </Metric>
         </div>
       </div>
+
+      {run.judge_scores && <ReferenceFreeJudgeBreakdown scores={run.judge_scores} />}
     </section>
+  );
+}
+
+// The reference-free rubric dimensions, in canonical order (backend
+// ReferenceFreeJudgeScores). All four are scored from the incident's own cited
+// evidence — none needs a ground-truth reference.
+const REFERENCE_FREE_DIMENSIONS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: "evidence_grounding", label: "Evidence grounding" },
+  { key: "internal_consistency", label: "Internal consistency" },
+  { key: "uncertainty_honesty", label: "Uncertainty honesty" },
+  { key: "explanatory_coverage", label: "Explanatory coverage" },
+];
+
+function ReferenceFreeJudgeBreakdown({
+  scores,
+}: {
+  scores: { scores: Record<string, number>; rationale: string };
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex items-center gap-1.5 text-xs font-medium text-slate-500 transition hover:text-slate-700"
+      >
+        <Chevron open={open} />
+        Reference-free judge breakdown
+      </button>
+      <p className="mt-1 pl-5 text-xs text-slate-400">
+        Scored against the incident&apos;s own cited evidence, not a gold answer: it measures
+        groundedness, consistency, and honesty — not whether the root cause is objectively correct.
+      </p>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600">
+            {REFERENCE_FREE_DIMENSIONS.map(({ key, label }) => {
+              const score = scores.scores[key];
+              if (score === undefined) return null;
+              return (
+                <div key={key} className="flex items-center justify-between gap-2">
+                  <span>{label}</span>
+                  <span className="font-semibold text-slate-900">{score}/5</span>
+                </div>
+              );
+            })}
+          </div>
+          {scores.rationale && (
+            <p className="text-xs italic leading-relaxed text-slate-600">“{scores.rationale}”</p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
