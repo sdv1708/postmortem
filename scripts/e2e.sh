@@ -41,8 +41,10 @@ BACKEND_PID=$!
 
 (
   cd "$REPO_ROOT/frontend"
-  NEXT_PUBLIC_POSTMORTEM_API_BASE="http://localhost:$BACKEND_PORT" \
-  NEXT_PUBLIC_POSTMORTEM_API_TOKEN="" \
+  # Server-only env for the BFF proxy; the browser talks same-origin to /bff. The
+  # backend runs with dev-bypass, so an empty token is fine (proxy sends no auth).
+  POSTMORTEM_API_ORIGIN="http://localhost:$BACKEND_PORT" \
+  POSTMORTEM_API_TOKEN="" \
   npx next dev -p "$FRONTEND_PORT" -H 0.0.0.0 \
     >"$LOG_DIR/frontend.log" 2>&1
 ) &

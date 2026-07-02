@@ -127,12 +127,26 @@ or reviewer notes.
 
 ```sh
 cd frontend
-cp .env.local.example .env.local   # set NEXT_PUBLIC_POSTMORTEM_API_TOKEN to match the backend
+cp .env.local.example .env.local   # set POSTMORTEM_API_ORIGIN + POSTMORTEM_API_TOKEN to match the backend
 npm install
 npm run dev
 ```
 
 The UI runs at `http://localhost:3000`.
+
+The browser never receives the API token. It calls a same-origin **BFF proxy**
+(`/bff/[...path]`, a Next.js server route) which attaches the bearer token
+server-side and forwards to the backend. Both variables are therefore
+**server-only** (no `NEXT_PUBLIC_` prefix, so nothing is inlined into the client
+bundle):
+
+| Variable | Purpose |
+|----------|---------|
+| `POSTMORTEM_API_ORIGIN` | Backend base URL the proxy forwards to (default `http://localhost:8000`) |
+| `POSTMORTEM_API_TOKEN` | Bearer token the proxy attaches; leave empty when the backend runs with `POSTMORTEM_DEV_BYPASS=1` |
+
+Because the proxy runs server-side, the frontend must be deployed as a **Node
+server** (`next start`), not a static export.
 
 ## Running the tests
 
