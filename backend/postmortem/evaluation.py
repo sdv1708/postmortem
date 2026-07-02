@@ -7,6 +7,7 @@ from typing import Final, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .llm import LLMClient
+from .provenance import output_token_cap_for
 
 # Versioned identity for the deterministic check floor and the judge, recorded in
 # Evaluation Run metadata (ADR 0025) so eval results stay comparable across runs.
@@ -781,7 +782,9 @@ class LLMPostmortemJudge:
 
     def judge(self, payload: JudgeInput) -> JudgeResult:
         system, user = build_judge_prompt(payload)
-        response = self._llm.complete(system=system, user=user)
+        response = self._llm.complete(
+            system=system, user=user, max_output_tokens=output_token_cap_for("judge")
+        )
         try:
             output = JudgeOutput.model_validate_json(response.text)
         except ValidationError as exc:
@@ -947,7 +950,9 @@ class LLMIncidentJudge:
 
     def judge_incident(self, payload: IncidentJudgeInput) -> JudgeResult:
         system, user = build_incident_judge_prompt(payload)
-        response = self._llm.complete(system=system, user=user)
+        response = self._llm.complete(
+            system=system, user=user, max_output_tokens=output_token_cap_for("incident_judge")
+        )
         try:
             output = ReferenceFreeJudgeOutput.model_validate_json(response.text)
         except ValidationError as exc:

@@ -232,8 +232,14 @@ class EvaluationRunner:
         # consistency, and honesty against the incident's own cited evidence — never
         # against a ground-truth reference, which a real incident does not have. It
         # never decides the deterministic floor (ADR 0010).
+        #
+        # Skip the judge when the floor already failed: the floor is the trust
+        # authority, so a floor-failed run is already rejected and an advisory score
+        # on it cannot change that outcome — spending a model call to grade it is
+        # waste. A correctly-refused run (insufficient evidence) still *passes* the
+        # floor, so it is judged like any other passing run.
         judge = None
-        if self._incident_judge is not None:
+        if passed and self._incident_judge is not None:
             judge = self._incident_judge.judge_incident(
                 self._build_incident_judge_input(run, postmortem, hypotheses, incident_id)
             )
@@ -292,8 +298,11 @@ class EvaluationRunner:
 
     # Cap the cited evidence fed to the reference-free judge so a large incident
     # cannot blow up the prompt; the floor's groundedness signal does not need every
-    # snippet, only a representative sample.
-    _MAX_JUDGE_EVIDENCE: Final[int] = 40
+    # snippet, only a representative sample. Bounded tighter than the original 40 to
+    # trim judge input tokens on large incidents — typical incidents cite far fewer
+    # than this, so the cap only bites on outliers (the floor, not the judge, remains
+    # the citation authority — ADR 0010).
+    _MAX_JUDGE_EVIDENCE: Final[int] = 24
 
     def _build_incident_judge_input(
         self,

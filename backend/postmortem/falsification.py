@@ -7,6 +7,7 @@ from typing import Final, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .llm import LLMClient
+from .provenance import ROLE_FALSIFIER, output_token_cap_for
 from .rca import RcaEvidenceRef, RcaHypothesis
 from .reasoning import append_repair_feedback
 
@@ -211,7 +212,17 @@ def build_falsification_prompt(
     cited = "\n".join(f"- {snippet}" for snippet in hypothesis.supporting_snippets) or "(none)"
     against = "\n".join(f"- {snippet}" for snippet in hypothesis.contradicting_snippets) or "(none)"
 
+    # Stable evidence first, the per-hypothesis challenge and instruction last. The
+    # falsifier challenges each hypothesis with the *same* system prompt and the same
+    # full evidence, so leading with that shared block lets a prefix-caching provider
+    # reuse it across the per-hypothesis calls (ADR 0021 usage). Only the hypothesis
+    # and the closing instruction vary, so they trail; this matches the builder and
+    # incident-facts prompts, which are already evidence-first.
     user = (
+        "ALL EVIDENCE (cite artifact_id + line numbers shown):\n"
+        f"{evidence}\n\n"
+        "TIMELINE CANDIDATES:\n"
+        f"{timeline}\n\n"
         "HYPOTHESIS TO CHALLENGE:\n"
         f"Title: {hypothesis.title}\n"
         f"Summary: {hypothesis.summary}\n\n"
@@ -219,10 +230,6 @@ def build_falsification_prompt(
         f"{cited}\n\n"
         "EVIDENCE ALREADY NOTED AGAINST IT:\n"
         f"{against}\n\n"
-        "ALL EVIDENCE (cite artifact_id + line numbers shown):\n"
-        f"{evidence}\n\n"
-        "TIMELINE CANDIDATES:\n"
-        f"{timeline}\n\n"
         "Falsify the hypothesis as the JSON object described in the system "
         "message. Look beyond the cited lines for overlooked counterevidence."
     )
@@ -285,7 +292,9 @@ class LLMFalsifier:
             allow_proposals=allow_proposals,
             repair_feedback=repair_feedback,
         )
-        response = self._llm.complete(system=system, user=user)
+        response = self._llm.complete(
+            system=system, user=user, max_output_tokens=output_token_cap_for(ROLE_FALSIFIER)
+        )
         try:
             output = HypothesisChallengeOutput.model_validate_json(response.text)
         except ValidationError as exc:

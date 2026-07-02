@@ -74,9 +74,11 @@ def test_llm_falsifier_passes_allow_proposals_into_its_prompt():
     captured: dict[str, str] = {}
 
     class _Client(FakeLLMClient):
-        def complete(self, *, system: str, user: str):
+        def complete(self, *, system: str, user: str, max_output_tokens: int | None = None):
             captured["system"] = system
-            return super().complete(system=system, user=user)
+            return super().complete(
+                system=system, user=user, max_output_tokens=max_output_tokens
+            )
 
     client = _Client(['{"challenged_claim": "x", "severity": "minor"}'])
     LLMFalsifier(client).challenge(

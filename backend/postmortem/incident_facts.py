@@ -6,6 +6,7 @@ from typing import Final, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .llm import LLMClient
+from .provenance import ROLE_INCIDENT_FACTS, output_token_cap_for
 from .rca import RcaEvidenceRef
 
 logger = logging.getLogger("postmortem.incident_facts")
@@ -141,7 +142,9 @@ class LLMIncidentFactExtractor:
 
     def extract(self, *, artifacts, timeline_events) -> IncidentFactsOutput:
         system, user = build_incident_facts_prompt(artifacts, timeline_events)
-        response = self._llm.complete(system=system, user=user)
+        response = self._llm.complete(
+            system=system, user=user, max_output_tokens=output_token_cap_for(ROLE_INCIDENT_FACTS)
+        )
         try:
             output = IncidentFactsOutput.model_validate_json(response.text)
         except ValidationError as exc:

@@ -54,6 +54,7 @@ from ..provenance import (
     ROLE_INCIDENT_FACTS,
     ROLE_RANKER,
     ROLE_SUPPORT_VERIFIER,
+    output_token_cap_for,
     STAGE2_ROLES,
     STAGE3_ROLES,
     SUPPORT_INPUT_STRATEGY,
@@ -487,7 +488,9 @@ class PipelineStageRunner:
 
         def build_builder(feedback: tuple[str, ...]) -> RcaGenerationOutput:
             response = self._llm.complete(
-                system=system, user=append_repair_feedback(user, feedback)
+                system=system,
+                user=append_repair_feedback(user, feedback),
+                max_output_tokens=output_token_cap_for(ROLE_BUILDER),
             )
             last_response["usage"] = response.usage
             try:
