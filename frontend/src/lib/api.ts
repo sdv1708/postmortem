@@ -607,17 +607,15 @@ export interface ArtifactInput {
   body: string;
 }
 
-const API_BASE = (
-  process.env.NEXT_PUBLIC_POSTMORTEM_API_BASE ?? "http://localhost:8000"
-).replace(/\/$/, "");
-const API_TOKEN = process.env.NEXT_PUBLIC_POSTMORTEM_API_TOKEN ?? "";
+// Same-origin BFF proxy prefix. The browser sends NO token; the Next.js server
+// route at /bff/[...path] attaches the secret bearer token and forwards to the
+// FastAPI backend, so the secret never ships in the client bundle. Existing
+// method paths (/api/incidents, …) become /bff/api/incidents.
+const API_BASE = "/bff";
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
-  if (API_TOKEN) {
-    headers.set("Authorization", `Bearer ${API_TOKEN}`);
-  }
 
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
 
