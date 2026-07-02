@@ -47,13 +47,23 @@ class IncidentService:
     Routes and the future CLI both call this — never the ORM directly (ADR 0004).
     """
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, workspace_id: str | None = None) -> None:
+        """``workspace_id`` scopes this service to one visitor's sandbox.
+
+        Request handlers pass the caller's workspace so create/list/get are
+        isolated per visitor (ADR 0017). Internal callers (nested-resource
+        existence checks, the ephemeral evaluation harness, tests) omit it and get
+        the prior unscoped behavior: create lands in the default workspace, list
+        returns every incident, and get is an existence check only. Tenancy for
+        nested routes is enforced separately by ``require_owned_incident``.
+        """
         self._session = session
+        self._workspace_id = workspace_id
 
     def create(self, payload: IncidentCreate) -> Incident:
-        workspace = ensure_default_workspace(self._session)
+        workspace_id = self._workspace_id or ensure_default_workspace(self._session).id
         incident = Incident(
-            workspace_id=workspace.id,
+            workspace_id=workspace_id,
             title=payload.title.strip(),
             summary=payload.summary.strip() if payload.summary else None,
             severity=payload.severity,
@@ -69,6 +79,10 @@ class IncidentService:
     def get(self, incident_id: str) -> Incident:
         incident = self._session.get(Incident, incident_id)
         if incident is None:
+            raise IncidentNotFoundError(incident_id)
+        # When scoped to a workspace, an incident in another sandbox is treated as
+        # not-found (no existence leak). Unscoped callers get an existence check.
+        if self._workspace_id is not None and incident.workspace_id != self._workspace_id:
             raise IncidentNotFoundError(incident_id)
         return incident
 
@@ -111,6 +125,8 @@ class IncidentService:
 
     def list(self) -> list[Incident]:
         stmt = select(Incident).order_by(Incident.created_at.desc())
+        if self._workspace_id is not None:
+            stmt = stmt.where(Incident.workspace_id == self._workspace_id)
         return list(self._session.scalars(stmt))
 
     def _delete_analysis_history(self, incident_id: str) -> None:
