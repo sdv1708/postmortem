@@ -1,0 +1,67 @@
+# Render blueprint — deploys the two services (FastAPI backend + Next.js frontend).
+# Database is external (Neon Postgres), so no database block here.
+#
+# One-time setup after importing this blueprint (values marked `sync: false` are
+# NOT in git and must be set in the Render dashboard):
+#   backend  POSTMORTEM_DATABASE_URL  -> your Neon connection string
+#            POSTMORTEM_LLM_API_KEY   -> your provider key (live LLM)
+#   frontend POSTMORTEM_API_ORIGIN    -> the backend service's URL, e.g.
+#                                        https://postmortem-backend.onrender.com
+#
+# POSTMORTEM_API_TOKEN is generated once in the shared env group and injected into
+# BOTH services, so the browser-hidden bearer token matches on each side.
+
+envVarGroups:
+  - name: postmortem-shared
+    envVars:
+      # The single-user gate secret. Generated once; the frontend BFF proxy attaches
+      # it server-side and the backend gate checks it. Never exposed to the browser.
+      - key: POSTMORTEM_API_TOKEN
+        generateValue: true
+
+services:
+  # ---- Backend: FastAPI on a persistent server (needed for background analysis runs) ----
+  - type: web
+    name: postmortem-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install .
+    startCommand: uvicorn postmortem.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - fromGroup: postmortem-shared
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      # dev-bypass MUST stay off in a hosted deploy so the token gate is enforced.
+      - key: POSTMORTEM_DEV_BYPASS
+        value: "false"
+      - key: POSTMORTEM_DATABASE_URL
+        sync: false
+      - key: POSTMORTEM_LLM_API_KEY
+        sync: false
+      - key: POSTMORTEM_LLM_BASE_URL
+        value: https://api.openai.com/v1
+      - key: POSTMORTEM_LLM_MODEL
+        value: gpt-4o-mini
+      # The browser reaches the backend only through the frontend's same-origin BFF,
+      # so CORS is not needed for the app; keep it tight to the frontend just in case.
+      - key: POSTMORTEM_CORS_ORIGINS
+        value: https://postmortem-frontend.onrender.com
+
+  # ---- Frontend: Next.js Node server (runs the BFF proxy at /bff/[...path]) ----
+  - type: web
+    name: postmortem-frontend
+    runtime: node
+    rootDir: frontend
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npx next start -p $PORT
+    envVars:
+      - fromGroup: postmortem-shared
+      - key: NODE_VERSION
+        value: "20"
+      # Server-only (no NEXT_PUBLIC_): read by the BFF route at request time, so the
+      # token is never inlined into the client bundle. Set to the backend's URL.
+      - key: POSTMORTEM_API_ORIGIN
+        sync: false
