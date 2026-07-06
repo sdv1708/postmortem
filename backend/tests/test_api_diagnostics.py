@@ -104,7 +104,7 @@ def test_diagnostics_exposes_model_calls_and_retrieval_traces(app, client, auth_
 
     builder = next(r for r in body["model_call_records"] if r["role"] == "builder")
     assert builder["model_identity"] == "fake-model"
-    assert builder["prompt_version"] == "rca-1"
+    assert builder["prompt_version"] == "rca-2"
     assert builder["schema_version"] == "rca-output-1"
     assert builder["input_hash"] and builder["output_hash"]
     assert builder["usage"] == {"total_tokens": 9}

@@ -24,7 +24,7 @@ MAX_PROPOSED_HYPOTHESES: Final[int] = 2
 # The falsifier is a separate Reasoning Role from RCA generation and incident-
 # facts extraction (PRD #26 / #28): it has its own prompt, schema, and version,
 # even when it is backed by the same configured model.
-FALSIFICATION_PROMPT_VERSION: Final[str] = "falsification-1"
+FALSIFICATION_PROMPT_VERSION: Final[str] = "falsification-2"
 FALSIFIER_VERSION: Final[str] = "llm-falsifier-1"
 # Versioned identity of the falsifier's strict output schema (ADR 0028 / 0038),
 # recorded on each falsifier Model Call Record. Bump when
@@ -123,6 +123,17 @@ Rules:
 - "evidence_gaps" name information that is MISSING and would help judge the
   hypothesis. "falsification_tests" are concrete investigations that could
   confirm or refute it. Neither asserts a new incident fact, so neither is cited.
+- Before asserting any TEMPORAL counterclaim (that one event preceded, followed,
+  or coincided with another), VERIFY the ordering against the actual timestamps
+  on the cited evidence lines. Only claim "X happened before Y" if the cited
+  timestamps genuinely show it. Do not manufacture a challenge by misreading event
+  order — a temporal counterclaim whose own citations contradict it is worse than
+  no counterclaim.
+- Distinguish "a RIVAL cause" from "a different LAYER of the same cause." A
+  co-occurring amplifying condition (a retry storm, a traffic surge) does not
+  refute the failure mechanism it accompanies — they are parts of one chain, not
+  competitors. Attack the hypothesis's CAUSAL ROLE (is it really the mechanism, or
+  only a trigger/amplifier?), not the mere existence of another contributor.
 - Pick ONE severity for the overall challenge:
   - "critical": if valid, this hypothesis cannot be the failure mechanism.
   - "material": reduces plausibility or limits it to a contributing role.

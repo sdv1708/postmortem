@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # Versioned prompt identity recorded in Experiment Metadata (ADR 0025). Bump when
 # the prompt or the expected output contract changes so runs stay comparable.
-PROMPT_VERSION: Final[str] = "rca-1"
+PROMPT_VERSION: Final[str] = "rca-2"
 
 # Versioned identity of the builder's strict output schema (ADR 0028 / 0038),
 # recorded on each builder Model Call Record. Bump when ``RcaGenerationOutput``
@@ -86,6 +86,34 @@ Rules:
   for each hypothesis. Tie remediation items to the hypothesis.
 - Do NOT restate observed incident impact here; impact is extracted separately as
   a run-level incident fact. Focus on the suspected cause.
+
+Reason in causal LAYERS, not a flat list of rivals:
+- Real incidents usually have ONE failure mechanism (what actually broke), a
+  trigger (what set it off), and amplifying conditions (what made it worse or
+  faster). BEGIN each hypothesis's `summary` by naming its layer explicitly — start
+  with "Failure mechanism:", "Trigger:", or "Amplifying condition:" — then state
+  how it connects to the others in the single mechanism -> trigger -> amplifier
+  chain. The output has no field for this, so it MUST live in the summary prose.
+- Do NOT emit different layers of one causal chain as competing hypotheses. If a
+  hypothesis is the mechanism BY WHICH another causes harm (e.g. a slow query is
+  how a feature flag exhausts a pool), it is the same chain — describe the chain,
+  do not argue a cause against its own sub-cause. Competing hypotheses are MUTUALLY
+  EXCLUSIVE explanations, not layers of one chain.
+- Before finishing, SWEEP the evidence for amplifying conditions and give EACH its
+  own hypothesis: retry storms or missing backoff/circuit-breaking (look for retry
+  rates, duplicate requests), missing backpressure, and traffic surges. Do not drop
+  an amplifier just because a trigger already explains the incident — an amplifier
+  visible in the evidence (e.g. an elevated retry rate) must appear as its own
+  cited hypothesis with matching remediation (add backoff / a circuit breaker).
+- Give remediation for EVERY layer you identify — fix the trigger, HARDEN the
+  mechanism (e.g. bulkhead / acquisition timeout, not merely "raise the limit"),
+  and tame each amplifier — rather than only addressing the trigger.
+- Surface the OBVIOUS-but-wrong explanations as their OWN explicit hypotheses and
+  rank them DOWN, each with the specific contradicting evidence that refutes it —
+  rather than only rebutting them inside a better hypothesis's reasoning. Give the
+  wrong framings a separate ranked-down hypothesis apiece (e.g. a deploy/rollback
+  regression AND an infrastructure/dependency fault), so a reviewer sees each red
+  herring named and sees why it was rejected.
 
 The JSON object must match this shape:
 {
