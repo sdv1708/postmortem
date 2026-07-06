@@ -17,33 +17,28 @@ ROLE_FALSIFIER: Final[str] = "falsifier"
 ROLE_SUPPORT_VERIFIER: Final[str] = "support_verifier"
 ROLE_RANKER: Final[str] = "ranker"
 
-# Per-role output-token caps passed to the live provider as ``max_tokens`` to bound
-# completion size and cost (PRD user stories 65-67). Sized from measured per-role
-# output with generous headroom so a valid JSON answer is never truncated into a
-# schema-invalid result (which would cost a Targeted Repair retry, ADR 0043). A
-# role absent from this map (or mapped to 0) sends no cap. These are a proactive
-# provider-side cap, distinct from the ReasoningBudget output ceiling, which only
-# *aborts* an over-budget run after the fact (ADR 0043).
+# Per-role output-token caps passed to the live provider as ``max_tokens``. These
+# are ONLY a runaway guard against a pathological non-terminating generation — not
+# a token-reduction lever (measured savings were ~0: the model naturally emits well
+# under any reasonable ceiling). So they are set far above any realistic valid
+# output: truncating a valid structured answer is a hard failure for stages without
+# a Targeted Repair path (incident-facts, verifier), which is strictly worse than
+# the negligible cost they save. Size for the worst legitimate case, not the median.
+# A role absent from this map (or mapped to 0) sends no cap. Distinct from the
+# ReasoningBudget output ceiling, which only *aborts* an over-budget run (ADR 0043).
 ROLE_OUTPUT_TOKEN_CAPS: Final[dict[str, int]] = {
-    # Sized with headroom over the richest observed run — the layered
-    # search-pool-cascade tutorial scenario, whose multi-artifact impact and
-    # causal-layer prose push these roles well past the earlier single-incident
-    # peaks (incident_facts ~616, falsifier ~500 observed). Too tight a cap
-    # truncates valid JSON into a schema-invalid result and a Targeted Repair
-    # retry (ADR 0043), so these round up generously rather than to the peak.
-    ROLE_INCIDENT_FACTS: 768,
+    # Impact-claim lists on evidence-heavy incidents can be long; no repair path, so
+    # keep well clear of any realistic output.
+    ROLE_INCIDENT_FACTS: 2048,
     # The builder emits the largest, most variable output (multiple ranked
-    # hypotheses with split evidence and per-layer causal prose); cap it as a
-    # runaway guard with wide headroom over observed peaks (~1241) so a busy
-    # multi-hypothesis answer is never truncated into a schema-invalid result.
-    ROLE_BUILDER: 1792,
-    ROLE_FALSIFIER: 768,
-    ROLE_SUPPORT_VERIFIER: 256,
-    # Reference-based and reference-free judges emit a bounded rubric of scores +
-    # short rationales; capped generously since they are advisory and never gate
-    # pass/fail (ADR 0010).
-    "judge": 1024,
-    "incident_judge": 1024,
+    # hypotheses with split supporting/contradicting evidence).
+    ROLE_BUILDER: 4096,
+    ROLE_FALSIFIER: 2048,
+    ROLE_SUPPORT_VERIFIER: 1024,
+    # Judges emit a bounded rubric of scores + short rationales; advisory, never gate
+    # pass/fail (ADR 0010), but keep generous headroom for the same no-truncation reason.
+    "judge": 2048,
+    "incident_judge": 2048,
 }
 
 

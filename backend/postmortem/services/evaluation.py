@@ -125,12 +125,23 @@ class EvaluationRunner:
         # incident evaluation stands on its deterministic floor alone (ADR 0010).
         self._incident_judge = incident_judge
 
-    def list_recorded(self) -> list[EvaluationRun]:
-        return list(
-            self._session.scalars(
-                select(EvaluationRun).order_by(EvaluationRun.created_at.desc())
+    def list_recorded(self, workspace_id: str | None = None) -> list[EvaluationRun]:
+        """Recorded Evaluation Runs, newest first.
+
+        When ``workspace_id`` is given (request path), scope to that visitor:
+        scenario benchmarks (``incident_id`` null) stay visible to everyone since
+        they grade bundled demos in ephemeral DBs and carry no user data, but
+        incident evaluations are limited to incidents in the caller's workspace.
+        Unscoped callers (tests) see everything.
+        """
+        stmt = select(EvaluationRun).order_by(EvaluationRun.created_at.desc())
+        if workspace_id is not None:
+            owned = select(Incident.id).where(Incident.workspace_id == workspace_id)
+            stmt = stmt.where(
+                (EvaluationRun.incident_id.is_(None))
+                | (EvaluationRun.incident_id.in_(owned))
             )
-        )
+        return list(self._session.scalars(stmt))
 
     def run_all(self) -> list[EvaluationRun]:
         """Record both configurations for every scenario (PRD #38).

@@ -9,7 +9,7 @@ from ..llm import build_llm_client
 from ..scenarios import ScenarioNotFoundError, ScenarioValidationError
 from ..schemas import EvaluationRunCreate, EvaluationRunRead
 from ..services.evaluation import EvaluationRunner, evaluation_run_read
-from .deps import get_db
+from .deps import get_db, get_workspace_id
 
 
 router = APIRouter(prefix="/api/evaluations", tags=["evaluations"], dependencies=[Depends(require_user)])
@@ -33,9 +33,15 @@ def _resolve_judge(request: Request) -> PostmortemJudge | None:
 
 
 @router.get("", response_model=list[EvaluationRunRead])
-def list_evaluations(db: Session = Depends(get_db)) -> list[EvaluationRunRead]:
-    """Past Evaluation Runs for the dev dashboard, newest first (ADR 0010)."""
-    runs = EvaluationRunner(db).list_recorded()
+def list_evaluations(
+    db: Session = Depends(get_db), workspace_id: str = Depends(get_workspace_id)
+) -> list[EvaluationRunRead]:
+    """Past Evaluation Runs for the dev dashboard, newest first (ADR 0010).
+
+    Scoped to the caller: shared scenario benchmarks plus this visitor's own
+    incident evaluations.
+    """
+    runs = EvaluationRunner(db).list_recorded(workspace_id)
     return [EvaluationRunRead.model_validate(evaluation_run_read(run)) for run in runs]
 
 

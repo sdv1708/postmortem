@@ -11,7 +11,7 @@ from ..scenarios import (
 )
 from ..schemas import ScenarioSeedRead, ScenarioSummaryRead
 from ..services.scenarios import ScenarioSeedService
-from .deps import get_db
+from .deps import get_db, get_workspace_id
 
 
 router = APIRouter(prefix="/api/scenarios", tags=["scenarios"], dependencies=[Depends(require_user)])
@@ -37,15 +37,20 @@ def list_demo_scenarios(db: Session = Depends(get_db)) -> list[ScenarioSummaryRe
 
 
 @router.post("/{scenario_id}/seed", response_model=ScenarioSeedRead, status_code=status.HTTP_201_CREATED)
-def seed_demo_scenario(scenario_id: str, db: Session = Depends(get_db)) -> ScenarioSeedRead:
+def seed_demo_scenario(
+    scenario_id: str,
+    db: Session = Depends(get_db),
+    workspace_id: str = Depends(get_workspace_id),
+) -> ScenarioSeedRead:
     """Seed a scenario into product data and run it with its bundled replay.
 
     A Command Endpoint (ADR 0022): it creates the Incident + Artifacts and starts
     a deterministic Analysis Run so the operator can open the Review Surface on a
-    populated, multi-hypothesis postmortem without a live model (ADR 0011).
+    populated, multi-hypothesis postmortem without a live model (ADR 0011). The
+    seeded incident lands in the caller's per-visitor workspace.
     """
     try:
-        incident, run = ScenarioSeedService(db).seed_and_run(scenario_id)
+        incident, run = ScenarioSeedService(db).seed_and_run(scenario_id, workspace_id=workspace_id)
     except ScenarioNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="scenario not found")
     except ScenarioValidationError as exc:

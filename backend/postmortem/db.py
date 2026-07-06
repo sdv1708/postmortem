@@ -60,9 +60,40 @@ class Base(DeclarativeBase):
     pass
 
 
+def normalize_database_url(database_url: str) -> str:
+    """Coerce a plain Postgres URL onto the installed psycopg3 driver.
+
+    Managed Postgres providers (Neon, Render, Heroku, …) hand out URLs like
+    ``postgres://`` or ``postgresql://``. SQLAlchemy maps both to the psycopg2
+    dialect, which is not installed — this project ships ``psycopg`` (v3). Rewrite
+    the scheme to ``postgresql+psycopg://`` so a provider connection string works
+    verbatim in ``POSTMORTEM_DATABASE_URL`` without hand-editing. SQLite and any
+    URL that already names a driver are left untouched.
+    """
+    for prefix in ("postgresql+", "sqlite"):
+        if database_url.startswith(prefix):
+            return database_url
+    if database_url.startswith("postgres://"):
+        return "postgresql+psycopg://" + database_url[len("postgres://") :]
+    if database_url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + database_url[len("postgresql://") :]
+    return database_url
+
+
 def make_engine(database_url: str) -> Engine:
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    return create_engine(database_url, connect_args=connect_args, future=True)
+    url = normalize_database_url(database_url)
+    if url.startswith("sqlite"):
+        # Local dev: SQLite needs cross-thread access for the background executor.
+        return create_engine(url, connect_args={"check_same_thread": False}, future=True)
+    # Managed Postgres (Neon) autosuspends and drops idle connections; pre_ping
+    # validates a pooled connection before use and recycle caps its lifetime, so a
+    # request after an idle period reconnects instead of failing on a dead socket.
+    return create_engine(
+        url,
+        future=True,
+        pool_pre_ping=True,
+        pool_recycle=300,
+    )
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
