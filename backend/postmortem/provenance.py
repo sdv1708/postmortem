@@ -25,13 +25,19 @@ ROLE_RANKER: Final[str] = "ranker"
 # provider-side cap, distinct from the ReasoningBudget output ceiling, which only
 # *aborts* an over-budget run after the fact (ADR 0043).
 ROLE_OUTPUT_TOKEN_CAPS: Final[dict[str, int]] = {
-    ROLE_INCIDENT_FACTS: 384,
+    # Sized with headroom over the richest observed run — the layered
+    # search-pool-cascade tutorial scenario, whose multi-artifact impact and
+    # causal-layer prose push these roles well past the earlier single-incident
+    # peaks (incident_facts ~616, falsifier ~500 observed). Too tight a cap
+    # truncates valid JSON into a schema-invalid result and a Targeted Repair
+    # retry (ADR 0043), so these round up generously rather than to the peak.
+    ROLE_INCIDENT_FACTS: 768,
     # The builder emits the largest, most variable output (multiple ranked
-    # hypotheses with split evidence); cap it as a runaway guard with wide headroom
-    # over observed peaks so a busy multi-hypothesis answer is never truncated into
-    # a schema-invalid result (which would cost a Targeted Repair retry, ADR 0043).
-    ROLE_BUILDER: 1280,
-    ROLE_FALSIFIER: 448,
+    # hypotheses with split evidence and per-layer causal prose); cap it as a
+    # runaway guard with wide headroom over observed peaks (~1241) so a busy
+    # multi-hypothesis answer is never truncated into a schema-invalid result.
+    ROLE_BUILDER: 1792,
+    ROLE_FALSIFIER: 768,
     ROLE_SUPPORT_VERIFIER: 256,
     # Reference-based and reference-free judges emit a bounded rubric of scores +
     # short rationales; capped generously since they are advisory and never gate
