@@ -69,6 +69,8 @@ cover/
 # Scenario fixture evidence is source, not transient logs: keep .log evidence
 # files tracked so the canonical demo seeds from a clean checkout (ADR 0007).
 !backend/scenarios/**/*.log
+# The tutorial scenario's evidence is authored source too, not transient logs.
+!tutorial/**/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

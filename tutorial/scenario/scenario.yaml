@@ -1,0 +1,116 @@
+# Tutorial scenario — a deliberately LAYERED incident used to tune reasoning depth.
+#
+# The obvious explanations (a deploy, a traffic surge, an Elasticsearch fault) are
+# all present as red herrings. A shallow run picks one and stops. A deep run must
+# separate the failure MECHANISM from its TRIGGER and its AMPLIFYING CONDITIONS,
+# reject the red herrings with specific counter-evidence, and name the evidence it
+# still lacks. See ../EXPECTED_REASONING.md for the depth bar this encodes.
+id: search-pool-cascade
+title: Search 503s during a flash sale from connection-pool exhaustion
+severity: sev2
+status: resolved
+summary: >-
+  Search returned 503s during a flash sale. A feature flag enabled at 14:02 sent an
+  unindexed facet aggregation on every query, holding database connections ~8x
+  longer; the fixed 20-connection pool exhausted under flash-sale concurrency and a
+  no-backoff retry storm, until an operator disabled the flag at 14:41.
+started_at: 2026-05-14T14:02:00Z
+detected_at: 2026-05-14T14:08:00Z
+resolved_at: 2026-05-14T14:48:00Z
+
+ambiguity_notes: >-
+  Three plausible framings compete: the 14:00 deploy, the flash-sale traffic surge,
+  and an Elasticsearch fault. Each is contradicted by specific evidence (rollback
+  did not help; higher traffic the prior week was fine; the cluster stayed green),
+  so the sound reading is a layered one: pool exhaustion (mechanism) triggered by
+  the facet-query flag and amplified by traffic and retries.
+evaluation_tags: [cascade, connection-pool, feature-flag, retry-storm, layered-causation, ambiguous]
+expected_hypothesis_families:
+  - pool-exhaustion
+  - facet-query-flag
+  - retry-storm
+  - traffic-surge
+  - deploy-regression
+  - es-cluster-failure
+
+ground_truth_postmortem: ground_truth_postmortem.md
+
+evidence:
+  - source_type: logs
+    source_name: search-api.log
+    path: evidence/search-api.log
+  - source_type: deployment_notes
+    source_name: deploy-log.md
+    path: evidence/deploy-log.md
+  - source_type: deployment_notes
+    source_name: feature-flags-audit.md
+    path: evidence/feature-flags-audit.md
+  - source_type: logs
+    source_name: es-slow-query.log
+    path: evidence/es-slow-query.log
+  - source_type: logs
+    source_name: traffic-metrics.log
+    path: evidence/traffic-metrics.log
+  - source_type: incident_notes
+    source_name: dependency-health.md
+    path: evidence/dependency-health.md
+  - source_type: incident_notes
+    source_name: oncall-slack.md
+    path: evidence/oncall-slack.md
+
+# Machine-checkable "expected reasoning": the causal roles a sound run must land,
+# the alternatives it must consider and rank DOWN, the evidence it must admit it
+# lacks, and the confident-but-shallow claims it must NOT make. Deterministic
+# causal checks read these (never a judge, ADR 0010/0044).
+causal_evaluation:
+  expected_factors:
+    - family: pool-exhaustion
+      role: failure_mechanism
+    - family: facet-query-flag
+      role: trigger
+    - family: retry-storm
+      role: amplifying_condition
+    - family: traffic-surge
+      role: amplifying_condition
+  plausible_rejected_alternatives:
+    - deploy-regression
+    - es-cluster-failure
+  known_counterevidence:
+    - description: The deploy rollback did not stop the 503s, so the deploy is not the trigger.
+      source_name: oncall-slack.md
+      line_start: 3
+      line_end: 3
+    - description: The faceted_search_v2 flag shipped OFF and was not enabled by the deploy.
+      source_name: deploy-log.md
+      line_start: 5
+      line_end: 5
+    - description: Elasticsearch stayed green with normal CPU throughout, ruling out a cluster fault.
+      source_name: dependency-health.md
+      line_start: 2
+      line_end: 3
+    - description: A higher-traffic flash sale the prior week ran with zero errors, so traffic alone is insufficient.
+      source_name: traffic-metrics.log
+      line_start: 5
+      line_end: 5
+  critical_evidence_gaps:
+    - The pool maximum size is inferred from active=20/20; the actual pool configuration is not captured.
+    - No per-query connection-hold-time metric is present to directly quantify the ~8x claim.
+    - The misconfigured rollout guardrail that skipped the staged 5%/25% steps is noted but its own cause is not captured.
+  expected_refusal: false
+  unacceptable_overclaims:
+    - The 14:00 deploy caused the outage.
+    - A flash-sale traffic surge alone caused the outage.
+    - Elasticsearch failed or suffered a hardware fault.
+    - A single root cause fully explains the incident with no trigger or amplifying conditions.
+
+replay:
+  rca: replay/rca.json
+  incident_facts: replay/incident_facts.json
+  falsification: replay/falsification.json
+  claim_support_overrides:
+    - match: traffic surge
+      status: partial
+      rationale: >-
+        Flash-sale traffic raised concurrency and is a genuine amplifying condition,
+        but a higher-traffic sale the prior week ran cleanly, so a traffic surge as a
+        standalone cause is only partially supported.

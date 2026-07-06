@@ -1,0 +1,5 @@
+2026-05-14T14:03:31Z slow_query 2100ms agg=brand.keyword docs_scanned=1.2M index=products
+2026-05-14T14:07:12Z slow_query 3400ms agg=brand.keyword docs_scanned=1.2M index=products
+2026-05-14T14:19:50Z slow_query 4100ms agg=brand.keyword docs_scanned=1.2M index=products
+2026-05-14T14:19:51Z note aggregation on brand.keyword performs a full scan; no eager_global_ordinals configured
+2026-05-14T14:45:00Z slow_query volume dropped to 0 after the flag was disabled

@@ -1,0 +1,5 @@
+2026-05-14T13:30:00Z search_rps=850 pool_active=6/20 retry_rate=1.0x baseline_pre_incident
+2026-05-14T14:05:00Z search_rps=2550 pool_active=20/20 retry_rate=1.4x flash_sale_live_3x_baseline
+2026-05-14T14:20:00Z search_rps=2600 pool_active=20/20 retry_rate=3.1x retries_compounding_load
+2026-05-14T14:44:00Z search_rps=2400 pool_active=13/20 retry_rate=1.2x flag_disabled_recovering
+2026-05-14T14:44:05Z note prior_flash_sale 2026-05-07 peaked search_rps=3200 pool_active_max=15/20 with zero errors

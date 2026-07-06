@@ -1,0 +1,10 @@
+2026-05-14T14:00:12Z INFO deploy v4.7.1 rollout started region=us-east-1
+2026-05-14T14:02:03Z INFO feature_flag faceted_search_v2=true (was false) source=automated-rollout
+2026-05-14T14:03:20Z WARN search latency p95 rising 220ms -> 900ms
+2026-05-14T14:05:41Z ERROR HikariPool-1 Connection is not available, request timed out after 30000ms
+2026-05-14T14:06:10Z ERROR search 503 upstream connection pool exhausted active=20 idle=0 waiting=180
+2026-05-14T14:12:00Z WARN client retry rate 3.1x baseline; duplicate query signatures observed
+2026-05-14T14:20:33Z ERROR 503 rate 41% of search requests; pool wait queue depth 240
+2026-05-14T14:41:07Z INFO operator disabled feature_flag faceted_search_v2
+2026-05-14T14:44:30Z INFO pool active=12 idle=8; 503 rate falling
+2026-05-14T14:48:12Z INFO search p95 latency recovered to 210ms; 503 rate 0%

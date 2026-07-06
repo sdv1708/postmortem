@@ -1,0 +1,23 @@
+{
+  "impact_claims": [
+    {
+      "description": "Search 503 error rate reached 41% of requests at the peak of the incident.",
+      "evidence": [{"source_name": "search-api.log", "line_start": 7, "line_end": 7}]
+    },
+    {
+      "description": "Search p95 latency rose from ~220ms to ~900ms as the pool began to saturate.",
+      "evidence": [{"source_name": "search-api.log", "line_start": 3, "line_end": 3}]
+    },
+    {
+      "description": "The connection pool was fully saturated (active=20/20) with a wait queue up to 240 requests.",
+      "evidence": [
+        {"source_name": "search-api.log", "line_start": 5, "line_end": 5},
+        {"source_name": "traffic-metrics.log", "line_start": 2, "line_end": 3}
+      ]
+    },
+    {
+      "description": "Degradation lasted roughly 45 minutes, from ~14:03 until recovery at 14:48.",
+      "evidence": [{"source_name": "search-api.log", "line_start": 3, "line_end": 10}]
+    }
+  ]
+}

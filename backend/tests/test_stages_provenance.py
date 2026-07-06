@@ -127,7 +127,7 @@ def test_model_call_records_persisted_for_every_reasoning_role(fresh_session):
     # model's own assertions, not Artifact text.
     (builder,) = _records(fresh_session, run.id, "builder")
     assert builder.model_identity == "fake-model"
-    assert builder.prompt_version == "rca-1"
+    assert builder.prompt_version == "rca-2"
     assert builder.schema_version == "rca-output-1"
     assert builder.input_hash and builder.output_hash
     assert builder.usage == {"total_tokens": 11}

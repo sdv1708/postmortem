@@ -1,0 +1,108 @@
+{
+  "hypotheses": [
+    {
+      "title": "Connection-pool exhaustion triggered by an unindexed facet aggregation from feature flag faceted_search_v2",
+      "summary": "At 14:02 the faceted_search_v2 flag was enabled and added an unindexed brand.keyword aggregation to every search query, holding each database connection ~8x longer. The fixed 20-connection pool saturated (active=20, waiting=180) and search returned 503s until the flag was disabled at 14:41 and the pool drained. Pool exhaustion is the failure mechanism; the flag-driven facet query is the trigger.",
+      "supporting_evidence": [
+        {"source_name": "search-api.log", "line_start": 4, "line_end": 5, "confidence_score": 0.92},
+        {"source_name": "feature-flags-audit.md", "line_start": 4, "line_end": 5, "confidence_score": 0.9},
+        {"source_name": "es-slow-query.log", "line_start": 1, "line_end": 4, "confidence_score": 0.85},
+        {"source_name": "search-api.log", "line_start": 2, "line_end": 2, "confidence_score": 0.8},
+        {"source_name": "search-api.log", "line_start": 8, "line_end": 10, "confidence_score": 0.88}
+      ],
+      "contradicting_evidence": [],
+      "unknowns": [
+        "The configured pool maximum is inferred from active=20/20; the actual pool sizing is not in evidence.",
+        "No per-query connection-hold-time metric is captured to directly confirm the ~8x figure."
+      ],
+      "validation_steps": [
+        "Confirm the pool max is 20 and correlate connection-hold time before and after 14:02.",
+        "Reproduce a faceted query in staging and measure connections held versus the non-faceted path."
+      ],
+      "remediation_items": [
+        {
+          "description": "Add an index (eager_global_ordinals) for the brand.keyword facet so the aggregation stops full-scanning and releases connections quickly.",
+          "evidence": [{"source_name": "es-slow-query.log", "line_start": 4, "line_end": 4}]
+        },
+        {
+          "description": "Gate feature flags that change the query path behind a load test and enforce the staged 5%/25% rollout the guardrail skipped.",
+          "evidence": [{"source_name": "feature-flags-audit.md", "line_start": 3, "line_end": 3}]
+        },
+        {
+          "description": "Right-size and bulkhead the connection pool with a short acquisition timeout so a slow query path degrades instead of exhausting the pool.",
+          "evidence": [{"source_name": "search-api.log", "line_start": 5, "line_end": 5}]
+        }
+      ]
+    },
+    {
+      "title": "A no-backoff client retry storm amplified the pool exhaustion",
+      "summary": "As latency rose, clients retried without backoff: retry rate climbed to 3.1x baseline and duplicate query signatures appeared, tripling effective load on the already-saturated pool. This is an amplifying condition, not the initiating cause.",
+      "supporting_evidence": [
+        {"source_name": "search-api.log", "line_start": 6, "line_end": 6, "confidence_score": 0.85},
+        {"source_name": "traffic-metrics.log", "line_start": 3, "line_end": 3, "confidence_score": 0.8}
+      ],
+      "contradicting_evidence": [],
+      "unknowns": [
+        "Whether retries came from first-party clients, the SDK default, or an upstream gateway."
+      ],
+      "validation_steps": [
+        "Attribute the 3.1x retry rate to a client/SDK and confirm it lacked exponential backoff."
+      ],
+      "remediation_items": [
+        {
+          "description": "Add exponential backoff with jitter and a circuit breaker so retries shed load instead of compounding it.",
+          "evidence": [{"source_name": "search-api.log", "line_start": 7, "line_end": 7}]
+        }
+      ]
+    },
+    {
+      "title": "Flash-sale traffic surge amplified but did not by itself cause the outage",
+      "summary": "Flash-sale traffic ran at ~3x baseline (2550 rps) and raised concurrency on the pool. But a higher-traffic sale the prior week (3200 rps) ran with zero errors, so the surge is an amplifying condition that made the triggered mechanism worse, not a standalone cause.",
+      "supporting_evidence": [
+        {"source_name": "traffic-metrics.log", "line_start": 2, "line_end": 2, "confidence_score": 0.7}
+      ],
+      "contradicting_evidence": [
+        {"source_name": "traffic-metrics.log", "line_start": 5, "line_end": 5}
+      ],
+      "unknowns": [
+        "Whether the prior sale ran with the same pool size and query path for a clean comparison."
+      ],
+      "validation_steps": [
+        "Compare the 05-07 sale's pool utilization and query path against 05-14 to isolate the flag's contribution."
+      ],
+      "remediation_items": []
+    },
+    {
+      "title": "The v4.7.1 deploy regressed search (rejected)",
+      "summary": "The 14:00 deploy is the obvious suspect but is not supported: it shipped the faceted_search_v2 code with the flag OFF, the flag was flipped on 2 minutes later by a separate automated job, and a rollback did not stop the 503s.",
+      "supporting_evidence": [],
+      "contradicting_evidence": [
+        {"source_name": "deploy-log.md", "line_start": 5, "line_end": 5},
+        {"source_name": "feature-flags-audit.md", "line_start": 2, "line_end": 2},
+        {"source_name": "oncall-slack.md", "line_start": 3, "line_end": 3}
+      ],
+      "unknowns": [
+        "Whether any non-flagged code in v4.7.1 touched the search path at all."
+      ],
+      "validation_steps": [
+        "Diff v4.7.1 for any unflagged change to the search query or pool configuration."
+      ],
+      "remediation_items": []
+    },
+    {
+      "title": "An Elasticsearch cluster or hardware fault (rejected)",
+      "summary": "A datastore fault would explain slow queries, but the cluster stayed green with normal CPU and heap and no restarts or shard moves throughout, so a cluster/hardware fault is unsupported.",
+      "supporting_evidence": [],
+      "contradicting_evidence": [
+        {"source_name": "dependency-health.md", "line_start": 2, "line_end": 3}
+      ],
+      "unknowns": [
+        "Whether a single hot shard could degrade without moving the cluster off green."
+      ],
+      "validation_steps": [
+        "Check per-shard latency for a hot shard that a green cluster status could mask."
+      ],
+      "remediation_items": []
+    }
+  ]
+}
