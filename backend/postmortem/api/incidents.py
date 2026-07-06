@@ -12,28 +12,38 @@ from ..services import (
     IncidentService,
     conclusion_read,
 )
-from .deps import get_db
+from .deps import get_db, get_workspace_id, require_owned_incident
 
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"], dependencies=[Depends(require_user)])
 
 
 @router.post("", response_model=IncidentRead, status_code=status.HTTP_201_CREATED)
-def create_incident(payload: IncidentCreate, db: Session = Depends(get_db)) -> IncidentRead:
-    incident = IncidentService(db).create(payload)
+def create_incident(
+    payload: IncidentCreate,
+    db: Session = Depends(get_db),
+    workspace_id: str = Depends(get_workspace_id),
+) -> IncidentRead:
+    incident = IncidentService(db, workspace_id).create(payload)
     return IncidentRead.model_validate(incident)
 
 
 @router.get("", response_model=list[IncidentRead])
-def list_incidents(db: Session = Depends(get_db)) -> list[IncidentRead]:
-    incidents = IncidentService(db).list()
+def list_incidents(
+    db: Session = Depends(get_db), workspace_id: str = Depends(get_workspace_id)
+) -> list[IncidentRead]:
+    incidents = IncidentService(db, workspace_id).list()
     return [IncidentRead.model_validate(i) for i in incidents]
 
 
 @router.get("/{incident_id}", response_model=IncidentRead)
-def get_incident(incident_id: str, db: Session = Depends(get_db)) -> IncidentRead:
+def get_incident(
+    incident_id: str,
+    db: Session = Depends(get_db),
+    workspace_id: str = Depends(get_workspace_id),
+) -> IncidentRead:
     try:
-        incident = IncidentService(db).get(incident_id)
+        incident = IncidentService(db, workspace_id).get(incident_id)
     except IncidentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     return IncidentRead.model_validate(incident)
@@ -41,19 +51,26 @@ def get_incident(incident_id: str, db: Session = Depends(get_db)) -> IncidentRea
 
 @router.patch("/{incident_id}", response_model=IncidentRead)
 def update_incident(
-    incident_id: str, payload: IncidentUpdate, db: Session = Depends(get_db)
+    incident_id: str,
+    payload: IncidentUpdate,
+    db: Session = Depends(get_db),
+    workspace_id: str = Depends(get_workspace_id),
 ) -> IncidentRead:
     try:
-        incident = IncidentService(db).update(incident_id, payload)
+        incident = IncidentService(db, workspace_id).update(incident_id, payload)
     except IncidentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     return IncidentRead.model_validate(incident)
 
 
 @router.delete("/{incident_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_incident(incident_id: str, db: Session = Depends(get_db)) -> Response:
+def delete_incident(
+    incident_id: str,
+    db: Session = Depends(get_db),
+    workspace_id: str = Depends(get_workspace_id),
+) -> Response:
     try:
-        IncidentService(db).delete(incident_id)
+        IncidentService(db, workspace_id).delete(incident_id)
     except IncidentNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     except IncidentHasFinalizedConclusionsError:
@@ -67,6 +84,7 @@ def delete_incident(incident_id: str, db: Session = Depends(get_db)) -> Response
 @router.get(
     "/{incident_id}/disputed-conclusions",
     response_model=list[RootCauseConclusionRead],
+    dependencies=[Depends(require_owned_incident)],
 )
 def list_incident_disputed_conclusions(
     incident_id: str, db: Session = Depends(get_db)

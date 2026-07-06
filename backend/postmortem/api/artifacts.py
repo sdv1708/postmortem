@@ -12,13 +12,15 @@ from ..services import (
     IncidentNotFoundError,
     artifact_read,
 )
-from .deps import get_db
+from .deps import get_db, require_owned_incident
 
 
 router = APIRouter(
     prefix="/api/incidents/{incident_id}/artifacts",
     tags=["artifacts"],
-    dependencies=[Depends(require_user)],
+    # require_user gates auth; require_owned_incident enforces per-visitor tenancy so
+    # every artifact route only touches an incident in the caller's workspace.
+    dependencies=[Depends(require_user), Depends(require_owned_incident)],
 )
 
 

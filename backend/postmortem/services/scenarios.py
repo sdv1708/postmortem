@@ -54,6 +54,7 @@ class ScenarioSeedService:
         *,
         execute_inline: bool = True,
         falsification_enabled: bool = True,
+        workspace_id: str | None = None,
     ) -> tuple[Incident, AnalysisRun]:
         """Create the Incident + Artifacts and start an Analysis Run.
 
@@ -64,6 +65,10 @@ class ScenarioSeedService:
         ``falsification_enabled=False`` drives the Builder-Only Baseline (PRD #38):
         the bundled falsifier replay is simply never consulted, so the same scenario
         runs under both configurations with matched model and retrieval constraints.
+
+        ``workspace_id`` scopes the seeded Incident to a visitor's sandbox (the demo
+        seed endpoint passes the caller's workspace). The ephemeral evaluation
+        harness omits it and lands in the default workspace.
         """
         scenario = self.get(scenario_id)
         log_event(
@@ -75,7 +80,7 @@ class ScenarioSeedService:
             execute_inline=execute_inline,
         )
 
-        incident = IncidentService(self._session).create(
+        incident = IncidentService(self._session, workspace_id).create(
             IncidentCreate(
                 title=scenario.title,
                 summary=scenario.summary,

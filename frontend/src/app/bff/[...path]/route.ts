@@ -54,12 +54,33 @@ function jsonError(status: number, detail: string): Response {
   });
 }
 
+// Per-visitor session: an opaque id in an HttpOnly cookie the browser can't read,
+// forwarded to the backend so it isolates each visitor's incidents to their own
+// workspace. Minted here (server-side) on first visit. Secure only in production
+// so local dev/e2e over http still receives the cookie.
+const SESSION_COOKIE = "pm_sid";
+
+function sessionCookie(sid: string): string {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `${SESSION_COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure}`;
+}
+
 async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }): Promise<Response> {
   const method = req.method.toUpperCase();
 
+  // Read or mint the visitor session id; a new one is set on the response below.
+  const existing = req.cookies.get(SESSION_COOKIE)?.value;
+  const sid = existing ?? crypto.randomUUID();
+  const finalize = (resp: Response): Response => {
+    if (!existing) {
+      resp.headers.append("set-cookie", sessionCookie(sid));
+    }
+    return resp;
+  };
+
   // GETs are read-only and cheap; only meter the mutating, cost-bearing calls.
   if (method !== "GET" && rateLimited(clientIp(req))) {
-    return jsonError(429, "rate limit exceeded, retry shortly");
+    return finalize(jsonError(429, "rate limit exceeded, retry shortly"));
   }
 
   const { path } = await ctx.params;
@@ -67,6 +88,7 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
 
   const headers = new Headers();
   headers.set("content-type", "application/json");
+  headers.set("x-postmortem-session", sid);
   if (API_TOKEN) {
     headers.set("authorization", `Bearer ${API_TOKEN}`);
   }
@@ -83,7 +105,7 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
       cache: "no-store",
     });
   } catch {
-    return jsonError(502, "upstream backend unreachable");
+    return finalize(jsonError(502, "upstream backend unreachable"));
   }
 
   // Pass the upstream response through verbatim — same status and body — so the
@@ -94,10 +116,10 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     outHeaders.set("content-type", contentType);
   }
   if (upstream.status === 204) {
-    return new Response(null, { status: 204, headers: outHeaders });
+    return finalize(new Response(null, { status: 204, headers: outHeaders }));
   }
   const payload = await upstream.arrayBuffer();
-  return new Response(payload, { status: upstream.status, headers: outHeaders });
+  return finalize(new Response(payload, { status: upstream.status, headers: outHeaders }));
 }
 
 export const GET = proxy;
