@@ -53,6 +53,7 @@ import {
   type TimelineEvent,
 } from "@/lib/api";
 import { SeverityBadge, StatusBadge } from "../_components/badges";
+import { GLOSSARY, InfoTip, Tip } from "../_components/InfoTip";
 
 const SOURCE_TYPES: Array<{ value: ArtifactSourceType; label: string }> = [
   { value: "incident_notes", label: "Incident notes" },
@@ -435,6 +436,10 @@ function EvidenceManager({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isReplacing, setIsReplacing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState<{ done: number; total: number; failed: string[] } | null>(
+    null,
+  );
 
   useEffect(() => {
     if (selectedArtifact) {
@@ -487,15 +492,47 @@ function EvidenceManager({
     }
   }
 
-  async function readFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) {
+  async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    // Reset the input so re-picking the same file(s) fires onChange again.
+    event.target.value = "";
+    if (files.length === 0) {
       return;
     }
-    const text = await file.text();
-    setSourceName(file.name);
-    setBody(text);
-    setSourceType(inferSourceType(file.name));
+    // One file drops into the form so its type/name can be tweaked before adding.
+    if (files.length === 1) {
+      const file = files[0];
+      const text = await file.text();
+      setSourceName(file.name);
+      setBody(text);
+      setSourceType(inferSourceType(file.name));
+      return;
+    }
+    // Several files upload straight away, one artifact each — source type inferred
+    // from the filename — so a whole evidence bundle lands in one action.
+    setBulkBusy(true);
+    setBulkStatus({ done: 0, total: files.length, failed: [] });
+    const failed: string[] = [];
+    let done = 0;
+    for (const file of files) {
+      try {
+        const text = await file.text();
+        if (!text.trim()) {
+          throw new Error("empty file");
+        }
+        await onAdd({
+          source_type: inferSourceType(file.name),
+          source_name: file.name,
+          body: text,
+        });
+      } catch {
+        failed.push(file.name);
+      } finally {
+        done += 1;
+        setBulkStatus({ done, total: files.length, failed: [...failed] });
+      }
+    }
+    setBulkBusy(false);
   }
 
   const replaceDirty = !!selectedArtifact && replaceBody !== selectedArtifact.body;
@@ -512,7 +549,7 @@ function EvidenceManager({
       >
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50/60 px-5 py-3">
           <h3 className="text-sm font-semibold text-slate-900">Add evidence</h3>
-          <span className="text-xs text-slate-500">Paste text or upload a file</span>
+          <span className="text-xs text-slate-500">Paste text, or upload one or many files</span>
         </div>
         <div className="grid gap-5 p-5 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
           <div className="space-y-4">
@@ -541,15 +578,34 @@ function EvidenceManager({
             </label>
 
             <label className="block space-y-1.5">
-              <span className="text-sm font-medium text-slate-700">Upload text file</span>
+              <span className="text-sm font-medium text-slate-700">Upload files</span>
               <input
                 type="file"
+                multiple
                 accept=".log,.txt,.md,.json,.csv,text/*"
+                disabled={bulkBusy}
                 onChange={(event) => {
-                  void readFile(event);
+                  void handleFiles(event);
                 }}
               />
-              <span className="block text-xs text-slate-500">.log, .txt, .md, .json, .csv</span>
+              <span className="block text-xs text-slate-500">
+                Pick several at once to add them all — one file drops into the box to edit first.
+                .log, .txt, .md, .json, .csv
+              </span>
+              {bulkStatus && (
+                <span
+                  className={`flex items-center gap-2 text-xs ${
+                    bulkBusy ? "text-slate-500" : bulkStatus.failed.length ? "text-rose-600" : "text-emerald-600"
+                  }`}
+                >
+                  {bulkBusy && <Spinner />}
+                  {bulkBusy
+                    ? `Uploading ${bulkStatus.done} of ${bulkStatus.total}…`
+                    : bulkStatus.failed.length
+                      ? `Added ${bulkStatus.done - bulkStatus.failed.length} of ${bulkStatus.total}. Failed: ${bulkStatus.failed.join(", ")}`
+                      : `Added all ${bulkStatus.total} files.`}
+                </span>
+              )}
             </label>
           </div>
 
@@ -1850,37 +1906,34 @@ function HypothesisCard({
     <div className="rounded-xl border border-slate-200 bg-white">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
         <div className="flex min-w-0 items-start gap-2.5">
-          <span
-            className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold tabular-nums text-slate-600"
-            title={
-              hypothesis.advisory_rank !== null
-                ? `Advisory rank ${hypothesis.advisory_rank} · generated #${hypothesis.rank}`
-                : `Generated #${hypothesis.rank}`
-            }
-          >
-            {hypothesis.advisory_rank ?? hypothesis.rank}
-          </span>
+          <Tip text={GLOSSARY.advisoryRank} className="mt-0.5 shrink-0">
+            <span className="inline-flex h-6 w-6 cursor-help items-center justify-center rounded-full bg-slate-100 text-xs font-semibold tabular-nums text-slate-600">
+              {hypothesis.advisory_rank ?? hypothesis.rank}
+            </span>
+          </Tip>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h4 className="text-sm font-semibold text-slate-900">{hypothesis.title}</h4>
               {hypothesis.leading_but_critically_challenged && (
-                <span
-                  className="badge bg-rose-50 text-rose-700 ring-rose-200"
-                  title="Ranked first by plausibility, but an unresolved critical challenge means it cannot be presented as the failure mechanism without an explicit human override."
-                >
-                  Leading but critically challenged
-                </span>
+                <Tip text={GLOSSARY.leadingChallenged}>
+                  <span className="badge cursor-help bg-rose-50 text-rose-700 ring-rose-200">
+                    Leading, but challenged
+                  </span>
+                </Tip>
               )}
               {hypothesis.origin === "proposed" && (
-                <span
-                  className="badge bg-violet-50 text-violet-700 ring-violet-200"
-                  title="Introduced by the falsifier's bounded alternative-expansion round, then challenged and reviewed like any other hypothesis. Not a root cause."
-                >
-                  proposed alternative
-                </span>
+                <Tip text={GLOSSARY.proposedAlternative}>
+                  <span className="badge cursor-help bg-violet-50 text-violet-700 ring-violet-200">
+                    added by falsifier
+                  </span>
+                </Tip>
               )}
               {hypothesis.assumption && (
-                <span className="badge bg-amber-50 text-amber-700 ring-amber-200">assumption</span>
+                <Tip text={GLOSSARY.assumption}>
+                  <span className="badge cursor-help bg-amber-50 text-amber-700 ring-amber-200">
+                    assumption
+                  </span>
+                </Tip>
               )}
               <ClaimSupportBadge status={hypothesis.support_status} />
               <ReviewStatusBadge status={hypothesis.review_status} />
@@ -1947,7 +2000,10 @@ function HypothesisCard({
 
         {hypothesis.action_items.length > 0 && (
           <div className="space-y-1.5">
-            <p className="label">Remediation proposals</p>
+            <div className="flex items-center gap-1.5">
+              <p className="label">Suggested fixes</p>
+              <InfoTip text={GLOSSARY.remediation} />
+            </div>
             <ul className="space-y-2">
               {hypothesis.action_items.map((item) => (
                 <li key={item.id} className="text-sm text-slate-700">
@@ -1974,10 +2030,14 @@ function HypothesisCard({
         )}
 
         {hypothesis.unknowns.length > 0 && (
-          <BulletGroup label="Unknowns" items={hypothesis.unknowns} />
+          <BulletGroup label="Open questions" tip={GLOSSARY.unknowns} items={hypothesis.unknowns} />
         )}
         {hypothesis.validation_steps.length > 0 && (
-          <BulletGroup label="Validation steps" items={hypothesis.validation_steps} />
+          <BulletGroup
+            label="How to confirm it"
+            tip={GLOSSARY.validationSteps}
+            items={hypothesis.validation_steps}
+          />
         )}
 
         <div className="space-y-2 border-t border-slate-100 pt-3">
@@ -3286,10 +3346,13 @@ function CitationStatusBadge({
   );
 }
 
-function BulletGroup({ label, items }: { label: string; items: string[] }) {
+function BulletGroup({ label, items, tip }: { label: string; items: string[]; tip?: string }) {
   return (
     <div className="space-y-1.5">
-      <p className="label">{label}</p>
+      <div className="flex items-center gap-1.5">
+        <p className="label">{label}</p>
+        {tip && <InfoTip text={tip} />}
+      </div>
       <ul className="list-disc space-y-1 pl-5 text-sm text-slate-700">
         {items.map((item, index) => (
           <li key={index}>{item}</li>
@@ -3325,19 +3388,21 @@ function RankingRationalePanel({
   return (
     <div className="space-y-2 rounded-lg border border-indigo-100 bg-indigo-50/40 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <p className="label">Why this rank</p>
+        <p className="label">How the agent ranked this</p>
+        <InfoTip text={GLOSSARY.whyThisRank} />
         {advisoryRank !== null && (
-          <span className="badge bg-indigo-50 text-indigo-700 ring-indigo-200">
-            advisory rank {advisoryRank}
-          </span>
+          <Tip text={GLOSSARY.advisoryRank}>
+            <span className="badge cursor-help bg-indigo-50 text-indigo-700 ring-indigo-200">
+              plausibility #{advisoryRank}
+            </span>
+          </Tip>
         )}
         {reordered && (
-          <span
-            className="text-xs text-slate-500"
-            title="Falsification moved this candidate from its original generation order."
-          >
-            generated #{builderRank}
-          </span>
+          <Tip text={GLOSSARY.generatedOrder}>
+            <span className="cursor-help text-xs text-slate-500 underline decoration-dotted underline-offset-2">
+              re-ranked from #{builderRank}
+            </span>
+          </Tip>
         )}
       </div>
       <p className="text-sm leading-relaxed text-slate-700">{rationale.summary}</p>
@@ -3373,14 +3438,18 @@ function ChallengePanel({
       }`}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <p className="label">Falsification challenge</p>
+        <p className="label">Stress test</p>
+        <InfoTip text={GLOSSARY.falsification} />
         <ChallengeSeverityBadge severity={challenge.severity} />
       </div>
       <p className="text-sm leading-relaxed text-slate-700">{challenge.challenged_claim}</p>
 
       {challenge.counterclaims.length > 0 && (
         <div className="space-y-1.5">
-          <p className="label">Counterclaims</p>
+          <div className="flex items-center gap-1.5">
+            <p className="label">Points against it</p>
+            <InfoTip text={GLOSSARY.counterclaims} />
+          </div>
           <ul className="space-y-2">
             {challenge.counterclaims.map((counter) => (
               <li key={counter.id} className="text-sm text-slate-700">
@@ -3400,10 +3469,14 @@ function ChallengePanel({
       )}
 
       {challenge.evidence_gaps.length > 0 && (
-        <BulletGroup label="Evidence gaps" items={challenge.evidence_gaps} />
+        <BulletGroup label="What's missing" tip={GLOSSARY.evidenceGaps} items={challenge.evidence_gaps} />
       )}
       {challenge.falsification_tests.length > 0 && (
-        <BulletGroup label="Falsification tests" items={challenge.falsification_tests} />
+        <BulletGroup
+          label="Ways to test this"
+          tip={GLOSSARY.falsificationTests}
+          items={challenge.falsification_tests}
+        />
       )}
     </div>
   );
@@ -3417,18 +3490,45 @@ const CHALLENGE_SEVERITY_BADGE: Record<ChallengeSeverity, { label: string; cls: 
   minor: { label: "minor challenge", cls: "bg-slate-100 text-slate-600 ring-slate-200" },
 };
 
+const CHALLENGE_SEVERITY_TIP: Record<ChallengeSeverity, string> = {
+  critical: GLOSSARY.challengeCritical,
+  material: GLOSSARY.challengeMaterial,
+  minor: GLOSSARY.challengeMinor,
+};
+
 function ChallengeSeverityBadge({ severity }: { severity: ChallengeSeverity }) {
   const config = CHALLENGE_SEVERITY_BADGE[severity];
-  return <span className={`badge ${config.cls}`}>{config.label}</span>;
+  return (
+    <Tip text={CHALLENGE_SEVERITY_TIP[severity]}>
+      <span className={`badge cursor-help ${config.cls}`}>{config.label}</span>
+    </Tip>
+  );
 }
 
 function ReviewStatusBadge({ status }: { status: HypothesisReviewStatus }) {
-  const map: Record<HypothesisReviewStatus, string> = {
-    proposed: "bg-slate-100 text-slate-600 ring-slate-200",
-    accepted: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-    rejected: "bg-rose-50 text-rose-700 ring-rose-200",
+  const map: Record<HypothesisReviewStatus, { cls: string; label: string; tip: string }> = {
+    proposed: {
+      cls: "bg-slate-100 text-slate-600 ring-slate-200",
+      label: "needs your review",
+      tip: GLOSSARY.reviewProposed,
+    },
+    accepted: {
+      cls: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+      label: "accepted",
+      tip: GLOSSARY.reviewAccepted,
+    },
+    rejected: {
+      cls: "bg-rose-50 text-rose-700 ring-rose-200",
+      label: "rejected",
+      tip: GLOSSARY.reviewRejected,
+    },
   };
-  return <span className={`badge ${map[status]}`}>{status}</span>;
+  const cfg = map[status];
+  return (
+    <Tip text={cfg.tip}>
+      <span className={`badge cursor-help ${cfg.cls}`}>{cfg.label}</span>
+    </Tip>
+  );
 }
 
 // The decision state of a Remediation Proposal (ADR 0041): generated 'proposed'
@@ -3457,12 +3557,23 @@ const CLAIM_SUPPORT_BADGE: Record<
   unsupported: { label: "unsupported", cls: "bg-rose-50 text-rose-700 ring-rose-200" },
 };
 
+const CLAIM_SUPPORT_TIP: Record<ClaimSupportStatus, string> = {
+  unevaluated: "",
+  supported: GLOSSARY.supported,
+  partial: GLOSSARY.partial,
+  unsupported: GLOSSARY.unsupported,
+};
+
 function ClaimSupportBadge({ status }: { status: ClaimSupportStatus }) {
   const config = CLAIM_SUPPORT_BADGE[status];
   if (!config) {
     return null;
   }
-  return <span className={`badge ${config.cls}`}>{config.label}</span>;
+  return (
+    <Tip text={CLAIM_SUPPORT_TIP[status]}>
+      <span className={`badge cursor-help ${config.cls}`}>{config.label}</span>
+    </Tip>
+  );
 }
 
 function SupportRationale({

@@ -16,6 +16,12 @@
   --ring: rgba(79, 70, 229, 0.18);
 }
 
+/* Nudge the whole UI up a touch for readability. Tailwind sizes are rem-based, so
+   this scales type and spacing together like a gentle zoom without per-element edits. */
+html {
+  font-size: 103%;
+}
+
 html,
 body {
   background-color: var(--bg);
@@ -24,8 +30,10 @@ body {
     radial-gradient(at 0% 100%, rgba(14, 165, 233, 0.05) 0px, transparent 50%);
   background-attachment: fixed;
   color: var(--text);
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 input,
@@ -76,8 +84,10 @@ textarea {
   @apply h-1.5 w-1.5 rounded-full;
 }
 
+/* Section labels: sentence case, not shouty all-caps. Slightly larger and higher
+   contrast than before so the many small headings on the Review Surface stay legible. */
 .label {
-  @apply text-xs font-medium uppercase tracking-wide text-slate-500;
+  @apply text-xs font-semibold tracking-wide text-slate-600;
 }
 
 /* Scrollbar styling */
