@@ -107,7 +107,7 @@ def test_get_postmortem_returns_structured_document(app, client: TestClient, aut
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["incident_title"] == "PM incident"
-    assert body["composer_version"] == "postmortem-template-1"
+    assert body["composer_version"] == "postmortem-template-2"
     # An automated run produces a provisional draft, never a finalized conclusion
     # (ADR 0035, PRD #26 stories 26-28).
     assert body["conclusion_status"] == "provisional"

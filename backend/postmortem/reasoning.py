@@ -34,7 +34,7 @@ from typing import Callable, TypeVar
 
 # The version stamped into Experiment Metadata beside the budget values so a
 # budget-shape change is comparable across runs (ADR 0025 / 0043).
-REASONING_BUDGET_VERSION = "causal-budget-0"
+REASONING_BUDGET_VERSION = "causal-budget-1"
 
 
 # --- Controlled failure codes (ADR 0043) ------------------------------------
@@ -141,9 +141,9 @@ class ReasoningBudget:
     no signal for; the call-count and retrieval bounds always apply.
     """
 
-    max_initial_hypotheses: int = 5
-    max_proposed_hypotheses: int = 2
-    max_final_hypotheses: int = 7
+    max_initial_hypotheses: int = 4
+    max_proposed_hypotheses: int = 0
+    max_final_hypotheses: int = 4
     max_retrieval_chunks_per_role: int = 200
     max_input_tokens_per_role: int = 0
     max_output_tokens_per_role: int = 0

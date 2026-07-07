@@ -6,7 +6,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # Versioned prompt identity recorded in Experiment Metadata (ADR 0025). Bump when
 # the prompt or the expected output contract changes so runs stay comparable.
-PROMPT_VERSION: Final[str] = "rca-2"
+PROMPT_VERSION: Final[str] = "rca-3"
 
 # Versioned identity of the builder's strict output schema (ADR 0028 / 0038),
 # recorded on each builder Model Call Record. Bump when ``RcaGenerationOutput``
@@ -16,10 +16,16 @@ RCA_SCHEMA_VERSION: Final[str] = "rca-output-1"
 # The bounded builder cardinality (ADR 0036, PRD #26 / #30 user story 65, Hypothesis
 # Budget): the builder may generate at most this many initial RCA Hypotheses. More
 # than this fails the Runtime Reasoning Gate rather than persisting an unbounded
-# candidate set, keeping the review and token surface predictable. This is the
-# initial-hypothesis sibling of ``MAX_PROPOSED_HYPOTHESES`` (at most two), which
-# together cap the final advisory list at seven.
-MAX_INITIAL_HYPOTHESES: Final[int] = 5
+# candidate set, keeping the review and token surface predictable. With
+# ``MAX_PROPOSED_HYPOTHESES`` at zero (expansion off) this also caps the final
+# advisory list.
+MAX_INITIAL_HYPOTHESES: Final[int] = 4
+
+# Cap on the total Remediation Proposals persisted across a run's hypotheses.
+# Allocated in hypothesis-rank order, so the leading causal layers keep their
+# remediation and lower-ranked/red-herring hypotheses are trimmed first — the
+# builder is also prompted to keep remediation to the few highest-value actions.
+MAX_REMEDIATION_ITEMS: Final[int] = 6
 
 
 # --- Strict structured model-output contract (ADR 0028) ---------------------
@@ -85,8 +91,14 @@ hypotheses that a skeptical engineer can judge.
 
 Rules:
 - Output ONLY a single JSON object. No prose, no markdown fences.
-- When the evidence is ambiguous, produce MULTIPLE competing hypotheses rather
-  than committing to one. Rank them most-supported first.
+- Produce AT MOST 4 hypotheses, ranked most-supported first. Prioritize, in order:
+  the failure mechanism, its trigger, the single most significant amplifying
+  condition, and the single most significant red herring. Merge related points and
+  omit weaker ones rather than exceeding 4 — more than 4 is rejected.
+- When the evidence is ambiguous, still produce MULTIPLE competing hypotheses
+  rather than committing to one, within that budget of 4.
+- Be concise: each `summary` is 1-2 sentences; keep unknowns, validation steps, and
+  remediation to the few that matter, not an exhaustive list.
 - Cite evidence by Artifact id and exact 1-based inclusive line ranges from the
   EVIDENCE block. Never invent artifact ids or line numbers.
 - Every hypothesis must include supporting evidence when the evidence exists. If
@@ -108,28 +120,26 @@ Reason in causal LAYERS, not a flat list of rivals:
   how a feature flag exhausts a pool), it is the same chain — describe the chain,
   do not argue a cause against its own sub-cause. Competing hypotheses are MUTUALLY
   EXCLUSIVE explanations, not layers of one chain.
-- Before finishing, SWEEP the evidence for amplifying conditions and give EACH its
-  own hypothesis: retry storms or missing backoff/circuit-breaking (look for retry
-  rates, duplicate requests), missing backpressure, and traffic surges. Do not drop
-  an amplifier just because a trigger already explains the incident — an amplifier
-  visible in the evidence (e.g. an elevated retry rate) must appear as its own
-  cited hypothesis with matching remediation (add backoff / a circuit breaker).
-- Give remediation for EVERY layer you identify — fix the trigger, HARDEN the
-  mechanism (e.g. bulkhead / acquisition timeout, not merely "raise the limit"),
-  and tame each amplifier — rather than only addressing the trigger.
-- Surface the OBVIOUS-but-wrong explanations as their OWN explicit hypotheses and
-  rank them DOWN, each with the specific contradicting evidence that refutes it —
-  rather than only rebutting them inside a better hypothesis's reasoning. Give the
-  wrong framings a separate ranked-down hypothesis apiece (e.g. a deploy/rollback
-  regression AND an infrastructure/dependency fault), so a reviewer sees each red
-  herring named and sees why it was rejected.
+- SWEEP the evidence for amplifying conditions (retry storms or missing
+  backoff/circuit-breaking, missing backpressure, traffic surges). Within the
+  4-hypothesis budget, give the SINGLE most significant amplifier its own cited
+  hypothesis with matching remediation; fold the rest into that hypothesis or the
+  mechanism rather than spending a slot on each.
+- Give remediation for the layers you identify — fix the trigger and HARDEN the
+  mechanism (e.g. bulkhead / acquisition timeout, not merely "raise the limit") —
+  but keep it to the few highest-value actions, not an item for every idea.
+- Surface the OBVIOUS-but-wrong explanation as its OWN ranked-down hypothesis with
+  the specific contradicting evidence that refutes it, so a reviewer sees the red
+  herring named and why it was rejected. Within the budget, include the single most
+  tempting red herring (e.g. a deploy/rollback regression OR an
+  infrastructure/dependency fault, whichever the evidence most invites).
 
 The JSON object must match this shape:
 {
   "hypotheses": [
     {
       "title": "short hypothesis name",
-      "summary": "1-3 sentence statement of the suspected root cause",
+      "summary": "1-2 sentence statement of the suspected root cause",
       "supporting_evidence": [{"artifact_id": "...", "line_start": 1, "line_end": 2, "confidence_score": 0.0-1.0}],
       "contradicting_evidence": [{"artifact_id": "...", "line_start": 1, "line_end": 1}],
       "unknowns": ["what we still cannot determine"],

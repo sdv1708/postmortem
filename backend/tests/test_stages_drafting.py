@@ -89,7 +89,7 @@ def test_drafting_persists_one_structured_postmortem(fresh_session):
         "Was the pool size changed in v184?",
         "What else changed at 14:28?",
     ]
-    assert postmortem.composer_version == "postmortem-template-1"
+    assert postmortem.composer_version == "postmortem-template-2"
 
 
 def test_drafting_marks_a_cited_run_sufficient_without_a_warning(fresh_session):
