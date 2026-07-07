@@ -48,6 +48,52 @@ def test_http_error_omits_provider_response_body(monkeypatch):
     assert "sensitive" not in str(excinfo.value)
 
 
+def _capture_payload(monkeypatch, model, **complete_kwargs):
+    """Run a completion with a captured request and return the JSON payload sent."""
+    captured: dict = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "{}"}}]}
+            ).encode("utf-8")
+
+    def urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    client = OpenAICompatibleLLMClient(
+        base_url="https://provider.test/v1", api_key="secret", model=model
+    )
+    client.complete(system="system", user="user", **complete_kwargs)
+    return captured["payload"]
+
+
+def test_chat_model_sends_temperature_and_max_tokens(monkeypatch):
+    payload = _capture_payload(monkeypatch, "gpt-4o-mini", max_output_tokens=512)
+
+    assert payload["temperature"] == 0.2
+    assert payload["max_tokens"] == 512
+    assert "max_completion_tokens" not in payload
+
+
+@pytest.mark.parametrize("model", ["gpt-5.4-mini", "gpt-5", "o1-mini", "o3", "vendor/gpt-5"])
+def test_reasoning_model_drops_temperature_and_renames_token_cap(monkeypatch, model):
+    payload = _capture_payload(monkeypatch, model, max_output_tokens=512)
+
+    # GPT-5/o-series 400 on any non-default temperature and on max_tokens.
+    assert "temperature" not in payload
+    assert "max_tokens" not in payload
+    assert payload["max_completion_tokens"] == 512
+
+
 def test_invalid_provider_envelope_omits_response_body(monkeypatch):
     class Response:
         def __enter__(self):
