@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # Versioned prompt identity recorded in Experiment Metadata (ADR 0025). Bump when
 # the prompt or the expected output contract changes so runs stay comparable.
@@ -32,7 +32,10 @@ MAX_INITIAL_HYPOTHESES: Final[int] = 5
 
 
 class StrictRcaModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # ``populate_by_name`` keeps construction by the canonical field name working
+    # even where a field also accepts an input alias (below), so internal callers
+    # that build these models by keyword are unaffected.
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
 class RcaEvidenceRef(StrictRcaModel):
@@ -43,7 +46,13 @@ class RcaEvidenceRef(StrictRcaModel):
 
 
 class RcaRemediationItem(StrictRcaModel):
-    description: str = Field(min_length=1)
+    # Some models emit the remediation text under the key "item" instead of the
+    # contract's "description" (observed with the GPT-5 family), which otherwise
+    # fails strict validation and burns the run's repair budget. Accept either key
+    # on input while keeping "description" canonical for storage and the prompt.
+    description: str = Field(
+        min_length=1, validation_alias=AliasChoices("description", "item")
+    )
     evidence: list[RcaEvidenceRef] = Field(default_factory=list)
 
 
