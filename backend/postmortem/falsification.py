@@ -144,9 +144,17 @@ Rules:
 # permitted to surface a missed alternative (ADR 0036, PRD #30 user stories 14-16).
 _SYSTEM_PROMPT_PROPOSALS_ALLOWED = """\
 - You MAY surface a missed alternative explanation the original analysis
-  overlooked, in "proposed_hypotheses", using the SAME shape as an RCA hypothesis
-  (title, summary, supporting_evidence, contradicting_evidence, unknowns,
-  validation_steps, remediation_items). Propose one only if the evidence genuinely
+  overlooked, in "proposed_hypotheses", using the SAME shape as an RCA hypothesis.
+  Each entry MUST use exactly these keys — note remediation items use the key
+  "description" (NOT "item"):
+  {"title": "short hypothesis name",
+   "summary": "1-3 sentence statement of the suspected cause",
+   "supporting_evidence": [{"artifact_id": "...", "line_start": 1, "line_end": 2, "confidence_score": 0.0-1.0}],
+   "contradicting_evidence": [{"artifact_id": "...", "line_start": 1, "line_end": 1}],
+   "unknowns": ["what we still cannot determine"],
+   "validation_steps": ["how to confirm or refute this"],
+   "remediation_items": [{"description": "concrete action", "evidence": []}]}
+  Propose one only if the evidence genuinely
   points to a cause the builder ignored; leave it empty otherwise. Across the whole
   review at most two alternatives total are accepted, and each is then verified and
   challenged like an initial hypothesis — so propose sparingly and cite it.

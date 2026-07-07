@@ -13,7 +13,7 @@ from postmortem.falsification import (
     build_falsification_prompt,
 )
 from postmortem.llm import FakeLLMClient
-from postmortem.rca import RcaHypothesis
+from postmortem.rca import RcaHypothesis, RcaRemediationItem
 
 
 class _Artifact:
@@ -53,6 +53,38 @@ def test_output_schema_round_trips_proposed_hypotheses():
     assert isinstance(output.proposed_hypotheses[0], RcaHypothesis)
     # Defaults to empty so the offline/no-proposal path validates unchanged.
     assert HypothesisChallengeOutput(challenged_claim="x", severity="minor").proposed_hypotheses == []
+
+
+def test_remediation_item_accepts_item_alias_for_description():
+    # The GPT-5 family sometimes emits remediation text under "item"; accept it as
+    # an alias so a proposed hypothesis does not fail strict validation, while
+    # keeping "description" canonical on output.
+    aliased = RcaRemediationItem.model_validate({"item": "index the facet field"})
+    assert aliased.description == "index the facet field"
+    assert aliased.model_dump()["description"] == "index the facet field"
+    assert "item" not in aliased.model_dump()
+
+    canonical = RcaRemediationItem.model_validate({"description": "same key"})
+    assert canonical.description == "same key"
+
+
+def test_proposed_hypothesis_with_item_keyed_remediation_validates():
+    output = HypothesisChallengeOutput.model_validate(
+        {
+            "challenged_claim": "x",
+            "severity": "material",
+            "proposed_hypotheses": [
+                {
+                    "title": "Retry storm amplified the exhaustion",
+                    "summary": "Amplifying condition: clients retried without backoff.",
+                    "remediation_items": [{"item": "add exponential backoff"}],
+                }
+            ],
+        }
+    )
+    assert output.proposed_hypotheses[0].remediation_items[0].description == (
+        "add exponential backoff"
+    )
 
 
 def test_prompt_permits_or_forbids_proposals_by_round():
