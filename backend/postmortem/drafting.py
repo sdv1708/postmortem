@@ -22,6 +22,13 @@ class HypothesisDigest:
     title: str
     assumption: bool
     unknowns: tuple[str, ...]
+    # The persisted Falsification Round output for this hypothesis (ADR 0034):
+    # Evidence Gaps the falsifier could not close and the Falsification Tests it
+    # proposed. Both are procedural, already-persisted content — not new incident
+    # facts — so the composer may surface them (ADR 0026-safe). Empty when the
+    # hypothesis was not challenged.
+    challenge_evidence_gaps: tuple[str, ...] = ()
+    challenge_falsification_tests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,8 +68,11 @@ class PostmortemDraft:
     summary: str
     lessons_learned: tuple[str, ...]
     # Deterministic refusal assessment (ADR 0032 / 0015). ``evidence_sufficiency``
-    # is "sufficient" or "insufficient"; the gaps and validation steps are
-    # procedural guidance about evidence completeness, populated only on refusal.
+    # is "sufficient" or "insufficient". The gaps and validation steps are
+    # procedural guidance about evidence completeness: on refusal they name the
+    # structural evidence shortfall; on a sufficient run they carry forward the
+    # Falsification Round's open Evidence Gaps and Falsification Tests so the
+    # honest limits of a completed analysis stay visible, not just on refusal.
     evidence_sufficiency: str = "sufficient"
     evidence_gaps: tuple[str, ...] = ()
     next_validation_steps: tuple[str, ...] = ()
@@ -101,12 +111,22 @@ class DeterministicPostmortemComposer:
     def compose(self, context: PostmortemComposerContext) -> PostmortemDraft:
         sufficiency = self._sufficiency(context)
         insufficient = sufficiency == "insufficient"
+        # On refusal, name the structural evidence shortfall. On a sufficient run,
+        # carry forward the Falsification Round's open Evidence Gaps and proposed
+        # Falsification Tests so a completed postmortem still states what it could
+        # not close instead of implying nothing is missing.
+        if insufficient:
+            evidence_gaps = self._evidence_gaps(context)
+            next_validation_steps = self._validation_steps(context)
+        else:
+            evidence_gaps = self._challenge_evidence_gaps(context)
+            next_validation_steps = self._challenge_validation_steps(context)
         return PostmortemDraft(
             summary=self._summary(context, insufficient),
             lessons_learned=self._lessons(context),
             evidence_sufficiency=sufficiency,
-            evidence_gaps=self._evidence_gaps(context) if insufficient else (),
-            next_validation_steps=self._validation_steps(context) if insufficient else (),
+            evidence_gaps=evidence_gaps,
+            next_validation_steps=next_validation_steps,
         )
 
     def _sufficiency(self, context: PostmortemComposerContext) -> str:
@@ -187,6 +207,28 @@ class DeterministicPostmortemComposer:
         )
         return tuple(steps)
 
+    def _challenge_evidence_gaps(
+        self, context: PostmortemComposerContext
+    ) -> tuple[str, ...]:
+        """Open Evidence Gaps the Falsification Round could not close.
+
+        Aggregated across hypotheses in rank order and deduplicated. These are the
+        falsifier's already-persisted, procedural gap statements (ADR 0034), not
+        new incident claims, so a deterministic composer may surface them on a
+        completed analysis (ADR 0026-safe).
+        """
+        return _dedupe_in_order(
+            gap for h in context.hypotheses for gap in h.challenge_evidence_gaps
+        )
+
+    def _challenge_validation_steps(
+        self, context: PostmortemComposerContext
+    ) -> tuple[str, ...]:
+        """Falsification Tests proposed for the ranked hypotheses, deduplicated."""
+        return _dedupe_in_order(
+            test for h in context.hypotheses for test in h.challenge_falsification_tests
+        )
+
     def _lessons(self, context: PostmortemComposerContext) -> tuple[str, ...]:
         # The honest "lessons" for an unresolved, ambiguous incident are the open
         # questions the hypotheses still carry. Deduplicated in rank order; never
@@ -199,6 +241,16 @@ class DeterministicPostmortemComposer:
                     seen.add(unknown)
                     lessons.append(unknown)
         return tuple(lessons)
+
+
+def _dedupe_in_order(values) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return tuple(ordered)
 
 
 def _span(context: PostmortemComposerContext) -> str:

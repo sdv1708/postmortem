@@ -1370,6 +1370,16 @@ class PipelineStageRunner:
                     title=hypothesis.title,
                     assumption=hypothesis.assumption,
                     unknowns=tuple(hypothesis.unknowns),
+                    challenge_evidence_gaps=(
+                        tuple(hypothesis.challenge.evidence_gaps)
+                        if hypothesis.challenge is not None
+                        else ()
+                    ),
+                    challenge_falsification_tests=(
+                        tuple(hypothesis.challenge.falsification_tests)
+                        if hypothesis.challenge is not None
+                        else ()
+                    ),
                 )
                 for hypothesis in hypotheses
             ),
