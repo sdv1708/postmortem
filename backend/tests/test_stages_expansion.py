@@ -94,7 +94,7 @@ def _proposal(artifact_id: str, title: str) -> RcaHypothesis:
 
 
 # These tests exercise the alternative-expansion machinery, which the shipped
-# default budget now turns off (max_proposed_hypotheses=0, max_initial=4). Drive
+# default budget now turns off (max_proposed_hypotheses=0, max_initial=5). Drive
 # them with the pre-cap headroom (5 initial + 2 proposed = 7) so the two-pass
 # expansion round stays covered independently of the shipped default.
 _EXPANSION_BUDGET = ReasoningBudget(
@@ -230,17 +230,17 @@ def test_second_expansion_round_is_rejected(fresh_session):
     assert "second expansion round" in (run.error or "")
 
 
-def test_more_than_four_initial_hypotheses_fails_the_stage(fresh_session):
+def test_more_than_five_initial_hypotheses_fails_the_stage(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
     fresh_session.commit()
 
-    # Five builder hypotheses exceed the bounded maximum of four (Runtime Reasoning
+    # Six builder hypotheses exceed the bounded maximum of five (Runtime Reasoning
     # Gate, ADR 0036 / PRD user story 65). Seed twice so the retry reproduces the
     # same deterministic gate failure on run.error.
     run = AnalysisService(
         fresh_session,
-        llm_client=FakeLLMClient([_n_hypotheses(artifact.id, 5)] * 2),
+        llm_client=FakeLLMClient([_n_hypotheses(artifact.id, 6)] * 2),
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
         falsifier=FakeFalsifier(),

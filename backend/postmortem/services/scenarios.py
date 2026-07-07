@@ -6,8 +6,11 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from ..falsification import MAX_PROPOSED_HYPOTHESES
 from ..logging import log_event
 from ..models import AnalysisRun, Incident
+from ..rca import MAX_INITIAL_HYPOTHESES
+from ..reasoning import ReasoningBudget
 from ..scenarios import (
     LoadedScenario,
     ScenarioNotFoundError,
@@ -26,6 +29,18 @@ from .incidents import IncidentService
 
 
 logger = logging.getLogger("postmortem.scenarios")
+
+
+# Scenario replays are bundled to demonstrate the full Causal Analysis Stage,
+# including the bounded alternative-expansion round (ADR 0036). The shipped live
+# default runs expansion OFF (max_proposed_hypotheses=0) to keep the review surface
+# brief, which would silently drop a replay's proposed alternative. Seeding re-enables
+# the machinery ceiling so the deterministic demo keeps its proposed hypotheses.
+_SCENARIO_REPLAY_BUDGET = ReasoningBudget(
+    max_initial_hypotheses=MAX_INITIAL_HYPOTHESES,
+    max_proposed_hypotheses=MAX_PROPOSED_HYPOTHESES,
+    max_final_hypotheses=MAX_INITIAL_HYPOTHESES + MAX_PROPOSED_HYPOTHESES,
+)
 
 
 class ScenarioSeedService:
@@ -129,6 +144,7 @@ class ScenarioSeedService:
             ),
             falsifier=ScenarioReplayFalsifier(scenario.id, falsification),
             falsification_enabled=falsification_enabled,
+            reasoning_budget=_SCENARIO_REPLAY_BUDGET,
         ).start_run(incident.id, AnalysisRunCreate(), execute_inline=execute_inline)
         log_event(
             logger,
