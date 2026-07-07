@@ -663,11 +663,13 @@ class PipelineStageRunner:
            same citation/challenge/review path as an initial hypothesis and is
            challenged exactly once (PRD user story 15).
 
-        Runtime Reasoning Gate (ADR 0036, PRD user story 65 / AC #4): more than two
-        proposed alternatives, or a second-round challenge that tries to propose
-        again, raises — which fails the stage after its single retry (ADR 0029),
-        the bounded repair/failure contract available at this point. Complete
-        challenge coverage stays mandatory (ADR 0034). Idempotent across the retry:
+        Runtime Reasoning Gate (ADR 0036, PRD user story 65 / AC #4): when the
+        falsifier surfaces more than ``max_proposed_hypotheses`` alternatives, the
+        overflow is dropped in rank order with a ``proposals_truncated`` warning so
+        the round stays bounded without failing the run. A second-round challenge
+        that tries to propose again still raises — which fails the stage after its
+        single retry (ADR 0029), the bounded repair/failure contract available at
+        this point. Complete challenge coverage stays mandatory (ADR 0034). Idempotent across the retry:
         ``_clear_hypotheses`` cascades both initial and proposed hypotheses, their
         challenges, and counterclaims away before regeneration.
         """
@@ -685,21 +687,23 @@ class PipelineStageRunner:
             )
             proposed.extend(result.proposed_hypotheses)
 
-        # Runtime Reasoning Gate: the expansion round is bounded (ADR 0043). The cap
-        # is a structural limit on the whole round, not a single invalid invocation,
-        # so exceeding it fails the stage immediately with a controlled
-        # ``limit_exceeded`` code rather than re-attempting one role (a re-challenge
-        # would not change the aggregate).
+        # Bounded expansion round (ADR 0043): the round accepts at most
+        # ``max_proposed_hypotheses`` alternatives total. A model that proposes more
+        # (observed with the GPT-5 family, which surfaces alternatives freely across
+        # the independent per-hypothesis challenges) is not misbehaving — the prompt
+        # itself says at most two are *accepted* — so keep the first N in rank order,
+        # drop the overflow, and record a warning rather than failing the whole run.
         if len(proposed) > self._budget.max_proposed_hypotheses:
-            raise CausalAnalysisError(
-                FAILURE_LIMIT_EXCEEDED,
-                substep="falsifier:expansion",
-                detail=(
-                    f"falsification proposed {len(proposed)} alternatives, exceeding the "
-                    f"bounded maximum of {self._budget.max_proposed_hypotheses}"
-                ),
-                gate_code=GATE_LIMIT_EXCEEDED,
+            log_event(
+                logger,
+                logging.INFO,
+                "falsification_proposals_truncated",
+                run_id=run.id,
+                proposed=len(proposed),
+                cap=self._budget.max_proposed_hypotheses,
             )
+            warning_codes.append("proposals_truncated")
+            proposed = proposed[: self._budget.max_proposed_hypotheses]
 
         # Pass 2: persist each proposed alternative as an origin='proposed'
         # hypothesis and challenge it once with proposals disabled (no recursion).

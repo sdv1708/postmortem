@@ -14,7 +14,7 @@ import json
 
 from postmortem.falsification import HypothesisChallengeOutput
 from postmortem.llm import FakeLLMClient
-from postmortem.models import Hypothesis
+from postmortem.models import Hypothesis, RunStageEvent
 from postmortem.rca import RcaEvidenceRef, RcaHypothesis
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
@@ -149,32 +149,46 @@ def test_proposed_alternative_is_persisted_and_fully_reviewed(fresh_session):
     assert falsifier.last_allow_proposals is False
 
 
-def test_more_than_two_proposals_fails_the_stage(fresh_session):
+def test_more_than_two_proposals_are_truncated_to_the_cap(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
     fresh_session.commit()
 
+    alt_titles = ("Alt one", "Alt two", "Alt three")
+
     def challenge(hypothesis):
-        # A misbehaving falsifier that proposes three alternatives in one round —
-        # over the bounded maximum of two (Runtime Reasoning Gate, AC #4).
+        # The initial hypothesis surfaces three alternatives — over the bounded
+        # maximum of two; a proposed alternative's own challenge proposes none so
+        # the round does not recurse. The overflow is dropped, not fatal (AC #4).
+        proposals = (
+            [_proposal(artifact.id, title) for title in alt_titles]
+            if hypothesis.title not in alt_titles
+            else []
+        )
         return HypothesisChallengeOutput(
-            challenged_claim="x",
-            severity="material",
-            proposed_hypotheses=[
-                _proposal(artifact.id, "Alt one"),
-                _proposal(artifact.id, "Alt two"),
-                _proposal(artifact.id, "Alt three"),
-            ],
+            challenged_claim="x", severity="material", proposed_hypotheses=proposals
         )
 
-    run = _run(
-        fresh_session, incident.id, artifact.id, FakeFalsifier(challenge), builder_responses=2
-    )
+    run = _run(fresh_session, incident.id, artifact.id, FakeFalsifier(challenge))
     fresh_session.commit()
 
-    # The stage fails after its single retry; no successful run is presented.
-    assert run.status == "failed"
-    assert "exceeding the bounded maximum" in (run.error or "")
+    # The run succeeds with the first two proposals kept in rank order and the
+    # overflow dropped under a recorded warning.
+    assert run.status == "succeeded"
+    hyps = _hypotheses(fresh_session, run.id)
+    assert [h.origin for h in hyps] == ["initial", "proposed", "proposed"]
+    assert [h.title for h in hyps[1:]] == ["Alt one", "Alt two"]
+    event = (
+        fresh_session.query(RunStageEvent)
+        .filter(
+            RunStageEvent.run_id == run.id,
+            RunStageEvent.stage == "analyzing_causal_hypotheses",
+            RunStageEvent.status == "succeeded",
+        )
+        .order_by(RunStageEvent.sequence.desc())
+        .first()
+    )
+    assert "proposals_truncated" in event.warning_codes
 
 
 def test_second_expansion_round_is_rejected(fresh_session):
