@@ -6,7 +6,14 @@ from typing import Final, Protocol
 # Versioned identity for the drafting composer, recorded on each Postmortem so
 # template choices stay comparable (ADR 0025, client brief "Postmortem
 # template"). Bump when the composition logic changes.
-POSTMORTEM_COMPOSER_VERSION: Final[str] = "postmortem-template-1"
+POSTMORTEM_COMPOSER_VERSION: Final[str] = "postmortem-template-2"
+
+# Cap on how many aggregated Falsification-Round Evidence Gaps / Falsification
+# Tests the composed postmortem surfaces. The falsifier can emit several per
+# hypothesis; the deduped union across all hypotheses is honest but unreadable, so
+# the postmortem keeps the top few in rank order and the rest stay on the
+# per-hypothesis challenges for anyone who wants the full set.
+MAX_POSTMORTEM_EVIDENCE_GAPS: Final[int] = 5
 
 
 @dataclass(frozen=True)
@@ -218,7 +225,8 @@ class DeterministicPostmortemComposer:
         completed analysis (ADR 0026-safe).
         """
         return _dedupe_in_order(
-            gap for h in context.hypotheses for gap in h.challenge_evidence_gaps
+            (gap for h in context.hypotheses for gap in h.challenge_evidence_gaps),
+            limit=MAX_POSTMORTEM_EVIDENCE_GAPS,
         )
 
     def _challenge_validation_steps(
@@ -226,7 +234,8 @@ class DeterministicPostmortemComposer:
     ) -> tuple[str, ...]:
         """Falsification Tests proposed for the ranked hypotheses, deduplicated."""
         return _dedupe_in_order(
-            test for h in context.hypotheses for test in h.challenge_falsification_tests
+            (test for h in context.hypotheses for test in h.challenge_falsification_tests),
+            limit=MAX_POSTMORTEM_EVIDENCE_GAPS,
         )
 
     def _lessons(self, context: PostmortemComposerContext) -> tuple[str, ...]:
@@ -243,13 +252,15 @@ class DeterministicPostmortemComposer:
         return tuple(lessons)
 
 
-def _dedupe_in_order(values) -> tuple[str, ...]:
+def _dedupe_in_order(values, *, limit: int | None = None) -> tuple[str, ...]:
     seen: set[str] = set()
     ordered: list[str] = []
     for value in values:
         if value not in seen:
             seen.add(value)
             ordered.append(value)
+            if limit is not None and len(ordered) >= limit:
+                break
     return tuple(ordered)
 
 

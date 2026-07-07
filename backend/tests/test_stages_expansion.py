@@ -16,6 +16,7 @@ from postmortem.falsification import HypothesisChallengeOutput
 from postmortem.llm import FakeLLMClient
 from postmortem.models import Hypothesis, RunStageEvent
 from postmortem.rca import RcaEvidenceRef, RcaHypothesis
+from postmortem.reasoning import ReasoningBudget
 from postmortem.schemas import AnalysisRunCreate, ArtifactCreate, IncidentCreate
 from postmortem.services import AnalysisService, ArtifactService, IncidentService
 
@@ -92,6 +93,15 @@ def _proposal(artifact_id: str, title: str) -> RcaHypothesis:
     )
 
 
+# These tests exercise the alternative-expansion machinery, which the shipped
+# default budget now turns off (max_proposed_hypotheses=0, max_initial=4). Drive
+# them with the pre-cap headroom (5 initial + 2 proposed = 7) so the two-pass
+# expansion round stays covered independently of the shipped default.
+_EXPANSION_BUDGET = ReasoningBudget(
+    max_initial_hypotheses=5, max_proposed_hypotheses=2, max_final_hypotheses=7
+)
+
+
 def _run(session, incident_id, artifact_id, falsifier, *, builder_responses=1):
     # Seed the builder response once per expected stage attempt. The stage retries
     # once on failure (ADR 0029); a gate-failure test seeds twice so the retry
@@ -103,6 +113,7 @@ def _run(session, incident_id, artifact_id, falsifier, *, builder_responses=1):
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
         falsifier=falsifier,
+        reasoning_budget=_EXPANSION_BUDGET,
     ).start_run(incident_id, AnalysisRunCreate())
 
 
@@ -219,17 +230,17 @@ def test_second_expansion_round_is_rejected(fresh_session):
     assert "second expansion round" in (run.error or "")
 
 
-def test_more_than_five_initial_hypotheses_fails_the_stage(fresh_session):
+def test_more_than_four_initial_hypotheses_fails_the_stage(fresh_session):
     incident = _incident(fresh_session)
     artifact = _add(fresh_session, incident.id)
     fresh_session.commit()
 
-    # Six builder hypotheses exceed the bounded maximum of five (Runtime Reasoning
+    # Five builder hypotheses exceed the bounded maximum of four (Runtime Reasoning
     # Gate, ADR 0036 / PRD user story 65). Seed twice so the retry reproduces the
     # same deterministic gate failure on run.error.
     run = AnalysisService(
         fresh_session,
-        llm_client=FakeLLMClient([_n_hypotheses(artifact.id, 6)] * 2),
+        llm_client=FakeLLMClient([_n_hypotheses(artifact.id, 5)] * 2),
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
         falsifier=FakeFalsifier(),
@@ -266,6 +277,7 @@ def test_five_initial_plus_two_proposed_is_within_budget(fresh_session):
         claim_support_verifier=FakeClaimSupportVerifier(),
         incident_fact_extractor=FakeIncidentFactExtractor(),
         falsifier=FakeFalsifier(challenge),
+        reasoning_budget=_EXPANSION_BUDGET,
     ).start_run(incident.id, AnalysisRunCreate())
     fresh_session.commit()
 

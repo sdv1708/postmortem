@@ -14,9 +14,12 @@ from .reasoning import append_repair_feedback
 logger = logging.getLogger("postmortem.falsification")
 
 # The bounded alternative-expansion cap (ADR 0036, PRD #26 / #30): across one
-# Falsification Round the falsifier may introduce at most this many Proposed RCA
-# Hypotheses total. More than this fails the Runtime Reasoning Gate rather than
-# silently truncating, so the bound is auditable.
+# The upper bound the expansion machinery and the offline scenario-replay
+# validator support: a bundled replay may introduce at most this many Proposed RCA
+# Hypotheses. This is the machinery ceiling, NOT the shipped live policy — the
+# live Causal Analysis Stage reads ``ReasoningBudget.max_proposed_hypotheses``,
+# whose default is 0 (expansion off), so real runs propose no alternatives while
+# offline demos that seed proposals still validate against this cap.
 MAX_PROPOSED_HYPOTHESES: Final[int] = 2
 
 # Versioned prompt/role identity for the falsifier (ADR 0025 / 0034). Bump when

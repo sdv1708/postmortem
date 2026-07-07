@@ -67,6 +67,7 @@ from ..ranking import (
     RankingCandidate,
 )
 from ..rca import (
+    MAX_REMEDIATION_ITEMS,
     PROMPT_VERSION,
     RCA_SCHEMA_VERSION,
     RcaEvidenceRef,
@@ -562,6 +563,10 @@ class PipelineStageRunner:
         by_id = {artifact.id: artifact for artifact in retrieval.artifacts}
         warning_codes: list[str] = []
         hypotheses: list[Hypothesis] = []
+        # Total remediation is bounded across the run and allocated in rank order,
+        # so the leading causal layers keep their actions and lower-ranked/red-herring
+        # hypotheses are trimmed once the budget is spent.
+        remediation_remaining = MAX_REMEDIATION_ITEMS
         for rank, hyp in enumerate(output.hypotheses, start=1):
             supporting = self._resolve_refs(
                 by_id, hyp.supporting_evidence, "supporting", warning_codes
@@ -585,7 +590,9 @@ class PipelineStageRunner:
             )
             hypothesis.evidence_refs.extend(supporting)
             hypothesis.evidence_refs.extend(contradicting)
-            for sequence, remediation in enumerate(hyp.remediation_items, start=1):
+            for sequence, remediation in enumerate(
+                hyp.remediation_items[:remediation_remaining], start=1
+            ):
                 item = ActionItem(sequence=sequence, description=remediation.description)
                 item.evidence_refs.extend(
                     self._resolve_refs(
@@ -593,6 +600,7 @@ class PipelineStageRunner:
                     )
                 )
                 hypothesis.action_items.append(item)
+            remediation_remaining -= len(hypothesis.action_items)
             self._session.add(hypothesis)
             hypotheses.append(hypothesis)
 
@@ -679,13 +687,18 @@ class PipelineStageRunner:
         by_id = {artifact.id: artifact for artifact in all_artifacts}
 
         # Pass 1: challenge initial hypotheses, collecting proposed alternatives.
+        # When the budget allows no proposals, the falsifier is told not to propose
+        # (allow_proposals=False) so the expansion round is skipped entirely — no
+        # wasted generation and no advisory hypotheses beyond the builder's set.
+        proposals_enabled = self._budget.max_proposed_hypotheses > 0
         proposed: list = []
         for hypothesis in initial_hypotheses:
             result = self._challenge_hypothesis(
                 run, hypothesis, all_artifacts, timeline, by_id, warning_codes, ledger,
-                allow_proposals=True,
+                allow_proposals=proposals_enabled,
             )
-            proposed.extend(result.proposed_hypotheses)
+            if proposals_enabled:
+                proposed.extend(result.proposed_hypotheses)
 
         # Bounded expansion round (ADR 0043): the round accepts at most
         # ``max_proposed_hypotheses`` alternatives total. A model that proposes more
