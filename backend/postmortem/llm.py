@@ -11,6 +11,20 @@ from typing import Callable, Protocol, runtime_checkable
 logger = logging.getLogger("postmortem.llm")
 
 
+def _is_reasoning_model(model: str) -> bool:
+    """True for OpenAI reasoning models with a divergent request contract.
+
+    The GPT-5 series and the o-series (o1/o3) reject two params the older chat
+    models accept: any ``temperature`` other than the default 1, and ``max_tokens``
+    (renamed ``max_completion_tokens``). Sending either returns HTTP 400, so the
+    client must shape the payload per family. Detection is prefix-based on the bare
+    model id (provider proxies may prepend a vendor segment, so we also match on a
+    trailing path component).
+    """
+    name = model.rsplit("/", 1)[-1].lower()
+    return name.startswith("gpt-5") or name.startswith("o1") or name.startswith("o3")
+
+
 class LLMError(RuntimeError):
     """A transport/protocol failure talking to the model provider.
 
@@ -158,6 +172,7 @@ class OpenAICompatibleLLMClient:
             self._provider,
             self._model,
         )
+        reasoning_model = _is_reasoning_model(self._model)
         payload: dict = {
             "model": self._model,
             "messages": [
@@ -168,14 +183,22 @@ class OpenAICompatibleLLMClient:
             # strict schema parse (ADR 0028) has the best chance of succeeding;
             # providers that ignore this still return text we validate ourselves.
             "response_format": {"type": "json_object"},
-            "temperature": 0.2,
         }
+        # The GPT-5/o-series reasoning models reject any non-default temperature
+        # (only 1 is supported) with HTTP 400, so send the low-variance temperature
+        # only to the older chat models that accept it. Omitting it lets the
+        # reasoning models run at their required default.
+        if not reasoning_model:
+            payload["temperature"] = 0.2
         # Bound the completion length per role to cut output tokens (the role caps
         # are sized above observed output with headroom so a valid JSON answer is
         # never truncated into a schema-invalid result, which would cost a repair
-        # retry). A provider that ignores max_tokens still returns text we validate.
+        # retry). A provider that ignores the cap still returns text we validate.
+        # Reasoning models renamed ``max_tokens`` to ``max_completion_tokens`` and
+        # 400 on the old key, so pick the parameter name per family.
         if max_output_tokens and max_output_tokens > 0:
-            payload["max_tokens"] = max_output_tokens
+            token_param = "max_completion_tokens" if reasoning_model else "max_tokens"
+            payload[token_param] = max_output_tokens
         request = urllib.request.Request(
             f"{self._base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
