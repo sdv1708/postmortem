@@ -6,7 +6,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # Versioned prompt identity recorded in Experiment Metadata (ADR 0025). Bump when
 # the prompt or the expected output contract changes so runs stay comparable.
-PROMPT_VERSION: Final[str] = "rca-3"
+PROMPT_VERSION: Final[str] = "rca-4"
 
 # Versioned identity of the builder's strict output schema (ADR 0028 / 0038),
 # recorded on each builder Model Call Record. Bump when ``RcaGenerationOutput``
@@ -19,7 +19,7 @@ RCA_SCHEMA_VERSION: Final[str] = "rca-output-1"
 # candidate set, keeping the review and token surface predictable. With
 # ``MAX_PROPOSED_HYPOTHESES`` at zero (expansion off) this also caps the final
 # advisory list.
-MAX_INITIAL_HYPOTHESES: Final[int] = 4
+MAX_INITIAL_HYPOTHESES: Final[int] = 5
 
 # Cap on the total Remediation Proposals persisted across a run's hypotheses.
 # Allocated in hypothesis-rank order, so the leading causal layers keep their
@@ -91,12 +91,18 @@ hypotheses that a skeptical engineer can judge.
 
 Rules:
 - Output ONLY a single JSON object. No prose, no markdown fences.
-- Produce AT MOST 4 hypotheses, ranked most-supported first. Prioritize, in order:
-  the failure mechanism, its trigger, the single most significant amplifying
-  condition, and the single most significant red herring. Merge related points and
-  omit weaker ones rather than exceeding 4 — more than 4 is rejected.
+- Produce AT MOST 5 hypotheses, ranked most-supported first. 5 is a CEILING, not a
+  target: emit only as many as the evidence distinctly supports. Prioritize, in
+  order: (1) the failure mechanism, (2) its trigger, (3) the most significant
+  amplifying condition, (4) the most tempting red herring. Use the OPTIONAL 5th slot
+  ONLY when the evidence contains a genuinely distinct, separately-cited argument —
+  a SECOND independent amplifier, or a SECOND red herring with its OWN contradicting
+  evidence — that would otherwise be lost. If no such distinct 5th argument exists,
+  return 4 (or fewer). Never split one argument in two, restate a point, or invent a
+  weak hypothesis to reach 5 — a padded or redundant hypothesis is worse than
+  omitting it. More than 5 is rejected.
 - When the evidence is ambiguous, still produce MULTIPLE competing hypotheses
-  rather than committing to one, within that budget of 4.
+  rather than committing to one, within that ceiling of 5.
 - Be concise: each `summary` is 1-2 sentences; keep unknowns, validation steps, and
   remediation to the few that matter, not an exhaustive list.
 - Cite evidence by Artifact id and exact 1-based inclusive line ranges from the
@@ -121,18 +127,23 @@ Reason in causal LAYERS, not a flat list of rivals:
   do not argue a cause against its own sub-cause. Competing hypotheses are MUTUALLY
   EXCLUSIVE explanations, not layers of one chain.
 - SWEEP the evidence for amplifying conditions (retry storms or missing
-  backoff/circuit-breaking, missing backpressure, traffic surges). Within the
-  4-hypothesis budget, give the SINGLE most significant amplifier its own cited
-  hypothesis with matching remediation; fold the rest into that hypothesis or the
-  mechanism rather than spending a slot on each.
+  backoff/circuit-breaking, missing backpressure, traffic surges). Give the most
+  significant amplifier its own cited hypothesis with matching remediation. Give a
+  SECOND amplifier its own hypothesis only when it is independent and separately
+  cited (not just another symptom of the first); otherwise fold the rest into the
+  leading amplifier or the mechanism rather than spending a slot on each.
 - Give remediation for the layers you identify — fix the trigger and HARDEN the
   mechanism (e.g. bulkhead / acquisition timeout, not merely "raise the limit") —
   but keep it to the few highest-value actions, not an item for every idea.
 - Surface the OBVIOUS-but-wrong explanation as its OWN ranked-down hypothesis with
   the specific contradicting evidence that refutes it, so a reviewer sees the red
-  herring named and why it was rejected. Within the budget, include the single most
-  tempting red herring (e.g. a deploy/rollback regression OR an
-  infrastructure/dependency fault, whichever the evidence most invites).
+  herring named and why it was rejected. Always include the single most tempting red
+  herring (e.g. a deploy/rollback regression OR an infrastructure/dependency fault,
+  whichever the evidence most invites). If a SECOND, clearly distinct wrong
+  explanation is ALSO strongly invited and has its own separate contradicting
+  evidence, give it its own ranked-down hypothesis rather than merging the two — but
+  only when each stands on its own citations. Do not merge unrelated red herrings
+  into one hypothesis just to save a slot, and do not split one into two.
 
 The JSON object must match this shape:
 {
