@@ -6,7 +6,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # Versioned prompt identity recorded in Experiment Metadata (ADR 0025). Bump when
 # the prompt or the expected output contract changes so runs stay comparable.
-PROMPT_VERSION: Final[str] = "rca-4"
+PROMPT_VERSION: Final[str] = "rca-5"
 
 # Versioned identity of the builder's strict output schema (ADR 0028 / 0038),
 # recorded on each builder Model Call Record. Bump when ``RcaGenerationOutput``
@@ -135,15 +135,16 @@ Reason in causal LAYERS, not a flat list of rivals:
 - Give remediation for the layers you identify — fix the trigger and HARDEN the
   mechanism (e.g. bulkhead / acquisition timeout, not merely "raise the limit") —
   but keep it to the few highest-value actions, not an item for every idea.
-- Surface the OBVIOUS-but-wrong explanation as its OWN ranked-down hypothesis with
-  the specific contradicting evidence that refutes it, so a reviewer sees the red
-  herring named and why it was rejected. Always include the single most tempting red
-  herring (e.g. a deploy/rollback regression OR an infrastructure/dependency fault,
-  whichever the evidence most invites). If a SECOND, clearly distinct wrong
-  explanation is ALSO strongly invited and has its own separate contradicting
-  evidence, give it its own ranked-down hypothesis rather than merging the two — but
-  only when each stands on its own citations. Do not merge unrelated red herrings
-  into one hypothesis just to save a slot, and do not split one into two.
+- Surface the OBVIOUS-but-wrong explanations as ranked-down hypotheses with the
+  specific contradicting evidence that refutes each, so a reviewer sees every red
+  herring named and why it was rejected. EVERY wrong explanation the evidence
+  strongly invites AND that has its OWN distinct contradicting evidence (e.g. a
+  deploy/rollback regression AND an infrastructure/dependency fault) MUST be
+  surfaced and rejected — NEVER drop one just to stay small or because another cause
+  is better supported. You MAY reject several in a SINGLE ranked-down hypothesis when
+  they share a rebuttal, as long as each carries its own cited contradicting
+  evidence — you need not spend a separate slot on each. But do not merge UNRELATED
+  red herrings that lack a shared rebuttal, and do not split one into two.
 
 The JSON object must match this shape:
 {
