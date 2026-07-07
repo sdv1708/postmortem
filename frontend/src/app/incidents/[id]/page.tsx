@@ -662,7 +662,7 @@ function EvidenceManager({
         <div className="grid gap-4 lg:grid-cols-[minmax(240px,300px)_minmax(0,1fr)]">
           <aside className="card overflow-hidden">
             <div className="border-b border-slate-200 bg-slate-50/60 px-4 py-2.5">
-              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              <p className="text-xs font-semibold tracking-wide text-slate-500">
                 Artifacts · {artifacts.length}
               </p>
             </div>
@@ -1013,17 +1013,20 @@ function RunStatusCard({
           <RunStatusBadge status={run.status} />
           <span className="text-xs text-slate-500">
             {run.artifact_ids.length} artifact{run.artifact_ids.length === 1 ? "" : "s"} ·{" "}
-            {run.experiment_metadata.pipeline_version}
+            <Tip text="The version of the analysis pipeline that produced this run. Recorded so results stay comparable as the pipeline evolves.">
+              <span className="cursor-help underline decoration-dotted underline-offset-2">
+                {run.experiment_metadata.pipeline_version}
+              </span>
+            </Tip>
           </span>
           {run.experiment_metadata.reasoning_budget && (
             // The recorded Reasoning Budget the Causal Analysis Stage ran under
             // (ADR 0043): a visible, comparable bound even on a successful run.
-            <span
-              className="badge bg-slate-100 text-slate-600 ring-slate-200"
-              title="Causal analysis Reasoning Budget (per-role call ceiling, with one Targeted Repair reserved)"
-            >
-              budget ≤{run.experiment_metadata.reasoning_budget.max_calls_per_role} calls/role
-            </span>
+            <Tip text="A safety cap on how much work the causal-analysis step may do — at most this many model calls per role, so a run's cost stays predictable.">
+              <span className="badge cursor-help bg-slate-100 text-slate-600 ring-slate-200">
+                budget ≤{run.experiment_metadata.reasoning_budget.max_calls_per_role} calls/role
+              </span>
+            </Tip>
           )}
           {isPolling && (
             <span className="inline-flex items-center gap-1.5 text-xs text-slate-500">
@@ -1074,12 +1077,7 @@ function RunStatusCard({
                   </span>
                 )}
                 {event?.warning_codes.map((code) => (
-                  <span
-                    key={code}
-                    className="badge bg-amber-50 text-amber-700 ring-amber-200"
-                  >
-                    {code}
-                  </span>
+                  <StageWarningBadge key={code} code={code} />
                 ))}
               </div>
               <span className="shrink-0 text-xs text-slate-400">
@@ -1854,7 +1852,7 @@ function RunHypotheses({
       )}
       {authoritative.length > 0 && (
         <>
-          <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+          <p className="px-5 pt-3 text-xs font-semibold tracking-wide text-slate-500">
             RCA hypotheses · {authoritative.length}
           </p>
           <ol className="space-y-4 p-5">{authoritative.map(renderHypothesis)}</ol>
@@ -1862,7 +1860,7 @@ function RunHypotheses({
       )}
       {findings.length > 0 && (
         <div className="border-t border-slate-200 bg-slate-50/50">
-          <p className="px-5 pt-3 text-xs font-medium uppercase tracking-wide text-rose-700">
+          <p className="px-5 pt-3 text-xs font-semibold tracking-wide text-rose-700">
             Review findings · unsupported · {findings.length}
           </p>
           <p className="px-5 pt-1 text-xs text-slate-500">
@@ -2501,7 +2499,7 @@ function ConclusionPanel({
       }`}
     >
       <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
-        <p className={`text-xs font-medium uppercase tracking-wide ${headingTone}`}>
+        <p className={`text-xs font-semibold tracking-wide ${headingTone}`}>
           Root Cause Conclusion
         </p>
         {superseded ? (
@@ -2702,7 +2700,7 @@ function SupersedingChain({
             className="rounded-lg border border-violet-200 bg-violet-50/50 px-3 py-2"
           >
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium uppercase tracking-wide text-violet-700">
+              <span className="text-xs font-semibold tracking-wide text-violet-700">
                 {label}
               </span>
               {link.disputed && (
@@ -3024,7 +3022,7 @@ function ConclusionForm({
     >
       <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
         <p
-          className={`text-xs font-medium uppercase tracking-wide ${
+          className={`text-xs font-semibold tracking-wide ${
             isSupersede ? "text-violet-700" : "text-slate-500"
           }`}
         >
@@ -3259,13 +3257,13 @@ function EvidenceRefList({
   onFocusEvidence: (ref: EvidenceRef) => void;
 }) {
   return (
-    <ul className="mt-1 space-y-1">
+    <ul className="mt-1 space-y-1.5">
       {refs.map((ref) => (
         <li key={ref.id}>
           <button
             type="button"
             onClick={() => onFocusEvidence(ref)}
-            className="block w-full rounded-sm text-left text-xs text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+            className="block w-full rounded-sm text-left text-xs leading-relaxed text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
           >
             <CitationStatusBadge status={ref.verifier_status} />{" "}
             <span className="font-medium text-slate-600">
@@ -3282,7 +3280,7 @@ function EvidenceRefList({
 
 function CitationSnippet({ snippet }: { snippet: string }) {
   return (
-    <span className="whitespace-pre-wrap break-words font-mono text-slate-500">
+    <span className="whitespace-pre-wrap break-words font-mono leading-relaxed text-slate-500">
       {snippet}
     </span>
   );
@@ -3659,7 +3657,7 @@ function RunTimeline({
                   type="button"
                   key={ref.id}
                   onClick={() => onFocusEvidence(ref)}
-                  className="mt-0.5 block w-full rounded-sm text-left text-xs text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                  className="mt-0.5 block w-full rounded-sm text-left text-xs leading-relaxed text-slate-500 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
                 >
                   <CitationStatusBadge status={ref.verifier_status} />{" "}
                   <span className="font-medium text-slate-600">
@@ -3759,6 +3757,44 @@ function failureCodeLabel(code: string): string {
     limit_exceeded: "Limit exceeded",
   };
   return map[code] ?? code;
+}
+
+// A run stage can flag warnings (ADR 0021). The raw codes (uncited_claim,
+// partial_claim_support, …) mean nothing to a first-time reader, so each gets a
+// plain-language label and a hover explanation; unknown codes fall back to the
+// de-underscored code with a generic note rather than showing a bare token.
+const STAGE_WARNING: Record<string, { label: string; tip: string }> = {
+  uncited_claim: {
+    label: "uncited claim",
+    tip: "This stage produced a claim with no citation to your evidence. It stays visible but flagged — not treated as established fact.",
+  },
+  unsupported_claim: {
+    label: "unsupported claim",
+    tip: "A claim's citation didn't actually back it up. It's kept for audit, not presented as an established finding.",
+  },
+  partial_claim_support: {
+    label: "partial support",
+    tip: "At least one claim is only partly backed by the evidence it cites. Read those with caution.",
+  },
+  proposals_truncated: {
+    label: "extra alternatives trimmed",
+    tip: "The agent proposed more alternative hypotheses than the run's budget allows, so the lowest-priority extras were dropped.",
+  },
+  falsification_proposals_truncated: {
+    label: "extra alternatives trimmed",
+    tip: "The agent proposed more alternative hypotheses than the run's budget allows, so the lowest-priority extras were dropped.",
+  },
+};
+
+function StageWarningBadge({ code }: { code: string }) {
+  const cfg = STAGE_WARNING[code];
+  const label = cfg?.label ?? code.replace(/_/g, " ");
+  const tip = cfg?.tip ?? "This stage was flagged for review — open the run diagnostics for detail.";
+  return (
+    <Tip text={tip}>
+      <span className="badge cursor-help bg-amber-50 text-amber-700 ring-amber-200">{label}</span>
+    </Tip>
+  );
 }
 
 function RunStatusBadge({ status }: { status: RunStatus }) {
@@ -3894,7 +3930,7 @@ function CollapsibleSection({
       >
         <span className="flex items-center gap-2">
           <Chevron open={open} />
-          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+          <span className="text-xs font-semibold tracking-wide text-slate-500">
             {title}
           </span>
         </span>
